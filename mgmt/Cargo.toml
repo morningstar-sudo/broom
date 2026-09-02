@@ -1,0 +1,22 @@
+[package]
+name = "bootrom-mgmt"
+version = "0.2.1"
+edition = "2021"
+description = "Mgmt app cho hệ thống bootrom diskless tiệm net (M5–M8 + preflight)"
+
+[[bin]]
+name = "bootrom-mgmt"
+path = "src/main.rs"
+
+[dependencies]
+axum = "0.7"
+tokio = { version = "1", features = ["full"] }
+tower-http = { version = "0.5", features = ["fs"] }
+http-body-util = "0.1"
+rusqlite = { version = "0.31", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[profile.release]
+strip = true
+lto = true

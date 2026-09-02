@@ -1,0 +1,280 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Broom Console</title>
+<style>
+  /* NOC console — dark-first (phòng điều khiển). Light theo prefers-color-scheme. */
+  :root{
+    --bg:#0b0f17; --panel:#121a26; --panel2:#0f1620; --line:#1f2b3a;
+    --ink:#e6edf6; --muted:#7c8ba3; --accent:#35c1f0; --accent-ink:#04121b;
+    --on:#3ddc84; --off:#ff6b6b; --amber:#f6c454;
+    --mono:ui-monospace,"JetBrains Mono","SF Mono",Menlo,Consolas,monospace;
+  }
+  @media (prefers-color-scheme:light){
+    :root{--bg:#eef1f5; --panel:#fff; --panel2:#f6f8fb; --line:#dde3ec;
+      --ink:#16202e; --muted:#64748b; --accent:#0ea5e9; --accent-ink:#fff;
+      --on:#16a34a; --off:#dc2626; --amber:#b45309;}
+  }
+  *{box-sizing:border-box}
+  html,body{height:100%}
+  body{margin:0;background:var(--bg);color:var(--ink);
+    font:14px/1.55 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;-webkit-font-smoothing:antialiased}
+  a{color:inherit;text-decoration:none}
+  .app{display:grid;grid-template-columns:216px 1fr;min-height:100vh}
+
+  /* ---- Sidebar ---- */
+  .sidebar{background:var(--panel2);border-right:1px solid var(--line);
+    display:flex;flex-direction:column;padding:18px 12px;position:sticky;top:0;height:100vh}
+  .brand{display:flex;flex-direction:column;gap:2px;padding:6px 10px 18px}
+  .brand b{font-size:1.15rem;letter-spacing:.06em;display:flex;align-items:center;gap:8px}
+  .brand b::before{content:"";width:11px;height:11px;border-radius:3px;
+    background:var(--accent);box-shadow:0 0 12px var(--accent)}
+  .brand small{color:var(--muted);font:600 .62rem/1 var(--mono);letter-spacing:.22em;text-transform:uppercase}
+  nav{display:flex;flex-direction:column;gap:2px;flex:1}
+  nav a{padding:9px 12px;border-radius:8px;color:var(--muted);font-weight:600;
+    display:flex;align-items:center;gap:10px;cursor:pointer;border:1px solid transparent}
+  nav a:hover{color:var(--ink);background:var(--panel)}
+  nav a.active{color:var(--ink);background:var(--panel);border-color:var(--line)}
+  nav a.active::before{content:"";width:3px;height:16px;border-radius:2px;background:var(--accent);margin-left:-6px}
+  .sysbar{border-top:1px solid var(--line);padding:12px 10px 2px;color:var(--muted);
+    font:600 .72rem/1.4 var(--mono)}
+  .sysbar .dot{display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--on);
+    box-shadow:0 0 8px var(--on);margin-right:6px;vertical-align:middle}
+
+  /* ---- Main ---- */
+  main{padding:26px 30px;max-width:1080px}
+  .page{display:none;animation:fade .18s ease}
+  .page.active{display:block}
+  @keyframes fade{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:none}}
+  .head{display:flex;align-items:baseline;gap:14px;margin:0 0 20px}
+  .head h1{font-size:1.4rem;margin:0;letter-spacing:-.01em}
+  .head p{margin:0;color:var(--muted);font-size:.86rem}
+  .head .sp{flex:1}
+
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:16px 18px;margin-bottom:16px}
+  .card h2{font-size:.82rem;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);margin:0 0 14px;font-weight:700}
+
+  table{border-collapse:collapse;width:100%}
+  th,td{padding:9px 10px;text-align:left;border-bottom:1px solid var(--line);white-space:nowrap}
+  th{font:700 .68rem/1 var(--mono);text-transform:uppercase;letter-spacing:.06em;color:var(--muted)}
+  tbody tr:last-child td{border-bottom:0}
+  .mono{font-family:var(--mono);font-size:.86em;color:var(--muted)}
+  .scroll{overflow-x:auto}
+
+  .led{display:inline-flex;align-items:center;gap:7px;font:600 .78rem/1 var(--mono)}
+  .led::before{content:"";width:9px;height:9px;border-radius:50%}
+  .led.on{color:var(--on)} .led.on::before{background:var(--on);box-shadow:0 0 8px var(--on);animation:blink 2.4s ease-in-out infinite}
+  .led.off{color:var(--muted)} .led.off::before{background:#3a4658}
+  @keyframes blink{0%,100%{opacity:1}50%{opacity:.35}}
+  @media (prefers-reduced-motion:reduce){.led.on::before{animation:none}.page{animation:none}}
+
+  input,select{background:var(--panel2);border:1px solid var(--line);color:var(--ink);
+    border-radius:8px;padding:7px 10px;font:inherit;min-width:0}
+  input:focus,select:focus{outline:2px solid var(--accent);outline-offset:-1px;border-color:var(--accent)}
+  input::placeholder{color:var(--muted)}
+  label{color:var(--muted);font-size:.8rem;font-weight:600}
+  button{cursor:pointer;background:var(--panel2);border:1px solid var(--line);color:var(--ink);
+    border-radius:8px;padding:7px 13px;font:600 .86rem/1 inherit}
+  button:hover{border-color:var(--accent);color:var(--accent)}
+  button.primary{background:var(--accent);color:var(--accent-ink);border-color:var(--accent)}
+  button.primary:hover{filter:brightness(1.08);color:var(--accent-ink)}
+  button.ghost{background:transparent}
+  button.danger:hover{border-color:var(--off);color:var(--off)}
+  .row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+  .field{display:flex;flex-direction:column;gap:4px}
+  .msg{font:600 .82rem/1.4 var(--mono);color:var(--muted)}
+  .pill{font:700 .64rem/1 var(--mono);text-transform:uppercase;letter-spacing:.06em;
+    padding:3px 7px;border-radius:20px;border:1px solid var(--line);color:var(--muted)}
+  .pill.linux{color:var(--on);border-color:color-mix(in srgb,var(--on) 45%,transparent)}
+  .pill.new{color:var(--amber);border-color:color-mix(in srgb,var(--amber) 45%,transparent)}
+  .hint{color:var(--muted);font-size:.82rem;margin:.4rem 0 0}
+  code{font-family:var(--mono);font-size:.85em;background:var(--panel2);padding:1px 6px;border-radius:5px}
+  progress{width:160px;height:8px;vertical-align:middle}
+  .ok{color:var(--on)} .no{color:var(--off)}
+
+  @media (max-width:720px){
+    .app{grid-template-columns:1fr}
+    .sidebar{position:static;height:auto;flex-direction:row;flex-wrap:wrap;align-items:center}
+    .brand{padding:6px 10px;flex:1} nav{flex-direction:row;flex-wrap:wrap;flex:none}
+    .sysbar{border-top:0;width:100%} main{padding:18px}
+  }
+</style>
+
+<div class="app">
+  <aside class="sidebar">
+    <div class="brand"><b>Broom</b><small>bootrom console · v__VERSION__</small></div>
+    <nav>
+      <a data-page="machines" class="active">Máy trạm</a>
+      <a data-page="images">Image</a>
+      <a data-page="network">Mạng</a>
+      <a data-page="system">Cấu hình</a>
+    </nav>
+    <div class="sysbar"><span class="dot"></span>server · <span id="onlinecount">—</span></div>
+  </aside>
+
+  <main id="main"><!-- fragment tab nạp on-demand từ /ui/<page> --></main>
+</div>
+
+<script>
+async function j(url,opt){const r=await fetch(url,opt);if(!r.ok)throw new Error(await r.text());return r.json()}
+const esc=s=>(s==null?'':String(s)).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+
+// ---- tabs: nạp fragment HTML on-demand (/ui/<page>) + chỉ load data phần đang xem ----
+const loaders={machines:loadStatus,images:loadImages,network:loadDhcp,system:loadLtsp};
+const fragCache={};
+let curPage=null;
+async function showPage(p){
+  document.querySelectorAll('nav a').forEach(x=>x.classList.toggle('active',x.dataset.page===p));
+  if(fragCache[p]===undefined){
+    try{fragCache[p]=await (await fetch('/ui/'+p)).text();}
+    catch(e){fragCache[p]='<p class="hint">lỗi tải trang '+p+'</p>';}
+  }
+  document.getElementById('main').innerHTML=fragCache[p];
+  curPage=p;
+  if(loaders[p])loaders[p]();
+}
+document.querySelectorAll('nav a').forEach(a=>a.onclick=()=>showPage(a.dataset.page));
+
+// ---- machines (filter + phân trang client-side) ----
+let allMachines=[], mPage=1; const M_PAGE=15;
+async function loadStatus(){
+  allMachines=await j('/api/status');
+  const online=allMachines.filter(m=>m.online).length;
+  document.getElementById('onlinecount').textContent=online+'/'+allMachines.length+' online';
+  renderMachines();
+}
+function filteredMachines(){
+  const q=(document.getElementById('m_filter').value||'').toLowerCase();
+  const st=document.getElementById('m_status').value;
+  return allMachines.filter(m=>{
+    if(q && !((m.hostname||'')+' '+(m.ip||'')+' '+(m.mac||'')).toLowerCase().includes(q))return false;
+    if(st==='online'&&!m.online)return false;
+    if(st==='offline'&&m.online)return false;
+    if(st==='registered'&&!m.registered)return false;
+    if(st==='new'&&m.registered)return false;
+    return true;
+  });
+}
+function renderMachines(){
+  const rows=filteredMachines(), pages=Math.max(1,Math.ceil(rows.length/M_PAGE));
+  if(mPage>pages)mPage=pages; if(mPage<1)mPage=1;
+  const page=rows.slice((mPage-1)*M_PAGE,mPage*M_PAGE);
+  document.querySelector('#machines tbody').innerHTML=page.map(m=>
+    `<tr>
+       <td>${m.hostname?esc(m.hostname):'<span class="mono">—</span>'} ${m.registered?'':'<span class="pill new">mới</span>'}</td>
+       <td class="mono">${esc(m.ip)}</td><td class="mono">${esc(m.mac)}</td>
+       <td><span class="led ${m.online?'on':'off'}">${m.online?'ON':'OFF'}</span></td>
+       <td>${m.registered
+          ? `<button class="ghost" onclick="wake('${esc(m.mac)}')">Wake</button>`
+          : `<button onclick="regMachine('${esc(m.mac)}','${esc(m.ip)}','${esc(m.hostname)}')">Đăng ký</button>`}</td>
+     </tr>`).join('') || '<tr><td colspan=5 class="mono">không có máy khớp</td></tr>';
+  document.getElementById('m_count').textContent=rows.length+' máy';
+  document.getElementById('m_page').textContent='Trang '+mPage+'/'+pages;
+}
+function mPrev(){if(mPage>1){mPage--;renderMachines();}}
+function mNext(){const pages=Math.max(1,Math.ceil(filteredMachines().length/M_PAGE));if(mPage<pages){mPage++;renderMachines();}}
+async function addMachine(){
+  const mac=v('m_mac'),ip=v('m_ip')||null,hostname=v('m_host')||null,msg=document.getElementById('m_msg');
+  if(!mac){alert('Nhập MAC');return;}
+  try{await j('/api/machines',mk({mac,ip,hostname}));msg.textContent=' ✓ đã thêm';
+    ['m_mac','m_ip','m_host'].forEach(i=>document.getElementById(i).value='');loadStatus();}
+  catch(e){msg.textContent=' ✗ '+e.message}
+}
+async function regMachine(mac,ip,host){
+  const hostname=prompt('Hostname cho '+mac+':',host||'PC');if(hostname===null)return;
+  await j('/api/machines',mk({mac,ip:ip||null,hostname}));
+  alert('Đã đăng ký. Cấu hình → User café → Áp dụng, rồi reboot máy để nhận tên.');loadStatus();
+}
+async function wake(mac){await j('/api/wake',mk({mac}));alert('Đã gửi WOL '+mac)}
+
+// ---- images ----
+async function loadImages(){
+  const rows=await j('/api/images');
+  document.querySelector('#images tbody').innerHTML=rows.map(i=>
+    `<tr><td>${esc(i.name)}</td><td><span class="pill ${i.os}">${esc(i.os)}</span></td>
+       <td class="mono">${esc(i.cache_mode||'disk')}</td>
+       <td>${i.is_default?'<span class="ok">✓</span>':''}</td>
+       <td>${i.boot_script?'<span class="ok">✓</span>':'<span class="mono">chưa</span>'}</td>
+       <td class="mono" title="${esc(i.hash||'')}">${i.hash?esc(i.hash).slice(0,10):'—'}</td>
+       <td class="row">
+         <button class="ghost" onclick="setDefault(${i.id})">Default</button>
+         <button class="ghost" onclick="toggleCache(${i.id},'${esc(i.cache_mode||'disk')}','${esc(i.name)}')">${(i.cache_mode==='zram')?'→disk':'→zram'}</button>
+         <button class="ghost" onclick="republish(${i.id},'${esc(i.name)}')">Publish lại</button>
+         <button class="ghost" onclick="editBoot(${i.id},${JSON.stringify(esc(i.boot_script||''))})">Boot</button>
+         <button class="ghost danger" onclick="delImage(${i.id},'${esc(i.name)}')">Xoá</button>
+       </td></tr>`).join('') || '<tr><td colspan=7 class="mono">chưa có image</td></tr>';
+  // srvhost trong fragment images → set sau khi inject.
+  try{document.getElementById('srvhost').textContent=location.host;}catch(_){}
+  try{document.getElementById('srvhost2').textContent=location.host;}catch(_){}
+}
+async function toggleCache(id,cur,name){const mode=cur==='zram'?'disk':'zram';
+  if(!confirm('Đổi cache image sang "'+mode+'"? (republish, zram sẽ nạp img vào RAM)'))return;
+  const el=document.getElementById('img_status');
+  try{await j('/api/images/cache-mode',mk({id,mode}));pollJob(name,el);}catch(e){el.textContent=' ✗ '+e.message;}}
+async function setDefault(id){await j('/api/images/default',mk({id}));loadImages()}
+// Poll job status theo image name → cập nhật text el; dừng khi ✓/✗.
+function pollJob(name,el){
+  el.textContent=' ⏳ đang publish...';
+  const t=setInterval(async()=>{
+    let s='';try{s=(await j('/api/images/job?name='+encodeURIComponent(name))).status;}catch(_){}
+    if(!s)return;
+    el.textContent=' '+s;
+    if(s.startsWith('✓')||s.startsWith('✗')){clearInterval(t);loadImages();}
+  },2000);
+}
+async function republish(id,name){const el=document.getElementById('img_status');
+  try{await j('/api/images/publish',mk({id}));pollJob(name,el);}catch(e){el.textContent=' ✗ '+e.message;}}
+async function editBoot(id,cur){const s=prompt('iPXE boot script:',cur||'');if(s===null)return;
+  await j('/api/images/boot-script',mk({id,boot_script:s}));loadImages();}
+async function delImage(id,name){if(!confirm('Xoá image "'+name+'"?'))return;
+  await j('/api/images/delete',mk({id}));loadImages();}
+function upload(url,file,prog,msg,done){
+  const xhr=new XMLHttpRequest();xhr.open('PUT',url);
+  prog.style.display='';prog.value=0;msg.textContent=' đang upload...';
+  xhr.upload.onprogress=e=>{if(e.lengthComputable){prog.value=e.loaded/e.total*100;msg.textContent=' upload '+Math.round(e.loaded/e.total*100)+'%';}};
+  xhr.onload=()=>{let r={};try{r=JSON.parse(xhr.responseText);}catch(_){}done(xhr.status,r,xhr.responseText);};
+  xhr.onerror=()=>{msg.textContent=' ✗ lỗi mạng';};xhr.send(file);
+}
+async function addImage(){
+  const f=document.getElementById('up_file').files[0],name=v('up_name'),msg=document.getElementById('up_msg');
+  const cache=document.getElementById('up_cache').value;
+  if(!f||!name){alert('Nhập tên + chọn file');return;}
+  // src theo đuôi file: .vmdk → convert; .zip → giải nén; còn lại → raw.
+  const ext=(f.name.split('.').pop()||'').toLowerCase();
+  const src=ext==='vmdk'?'vmdk':(ext==='zip'?'zip':'raw');
+  try{await j('/api/images',mk({name,os:'linux',cache_mode:cache}));}catch(e){}
+  upload('/api/images/upload?name='+encodeURIComponent(name)+'&src='+src,f,document.getElementById('up_prog'),msg,(st,r,txt)=>{
+    if(st!==200){msg.textContent=' ✗ '+txt;return;}
+    msg.textContent=' ✓ upload xong';loadImages();pollJob(name,msg);   // publish chạy nền → poll
+  });
+}
+async function uploadBundle(){
+  const f=document.getElementById('ltsp_file').files[0],name=v('ltsp_name'),msg=document.getElementById('ltsp_msg');
+  if(!f||!name){alert('Nhập tên + chọn golden.zip');return;}
+  upload('/api/images/upload-ltsp?name='+encodeURIComponent(name),f,document.getElementById('ltsp_prog'),msg,(st,r,txt)=>{
+    msg.textContent=st===200?(' ✓ '+(r.result||'xong')):(' ✗ '+txt);if(st===200)loadImages();});
+}
+
+// ---- network ----
+async function loadDhcp(){const c=await j('/api/dhcp');
+  ['mode','iface','server_ip','subnet','range_start','range_end','gateway','dns'].forEach(k=>{const e=document.getElementById('dhcp_'+k);if(e)e.value=c[k]||'';});
+  const dm=document.getElementById('dhcp_mode');if(dm)dm.onchange=toggleFull;toggleFull();}
+function toggleFull(){const fo=document.getElementById('full_only'),dm=document.getElementById('dhcp_mode');if(fo&&dm)fo.style.display=dm.value==='full'?'':'none';}
+async function applyDhcp(){const b={};['mode','iface','server_ip','subnet','range_start','range_end','gateway','dns'].forEach(k=>b[k]=document.getElementById('dhcp_'+k).value);
+  const r=await j('/api/dhcp',mk(b));document.getElementById('dhcp_msg').textContent=r.reloaded?' ✓ reload OK':' ⚠ ghi xong, reload lỗi';}
+
+// ---- system ----
+async function loadLtsp(){const c=await j('/api/ltsp-config');['user','password','ssd_dev','ssd_mount','image_cache','user_sudo'].forEach(k=>{const e=document.getElementById('ltsp_'+k);if(e)e.value=c[k]||'';});}
+async function applyLtsp(){const b={};['user','password','ssd_dev','ssd_mount','image_cache','user_sudo'].forEach(k=>b[k]=document.getElementById('ltsp_'+k).value);
+  const m=document.getElementById('ltsp_cfg_msg');m.textContent=' đang áp dụng (ltsp initrd)...';
+  try{await j('/api/ltsp-config',mk(b));m.textContent=' ✓ xong — reboot client để áp';}catch(e){m.textContent=' ✗ '+e.message;}}
+async function setTimeout_(){await j('/api/config/timeout',mk({seconds:+document.getElementById('timeout').value}));document.getElementById('to_msg').textContent=' ✓ đã lưu';}
+async function setZramReserve(){await j('/api/config/zram-reserve',mk({mb:+document.getElementById('zram_reserve').value}));document.getElementById('zr_msg').textContent=' ✓ đã lưu';}
+
+// ---- helpers + init ----
+function v(id){return document.getElementById(id).value.trim()}
+function mk(body){return {method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body)}}
+// init: chỉ nạp tab đang mở (machines). Poll status chỉ khi đang ở tab máy trạm.
+showPage('machines');
+setInterval(()=>{if(curPage==='machines')loadStatus();},15000);
+</script>

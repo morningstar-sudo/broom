@@ -1,0 +1,28 @@
+<section class="page active" id="page-system">
+  <div class="head"><h1>Cấu hình</h1><p>user café + boot menu</p></div>
+  <div class="card">
+    <h2>User café (Linux)</h2>
+    <div class="row">
+      <div class="field"><label>User café</label><input id="ltsp_user" size="10"></div>
+      <div class="field"><label>Password</label><input id="ltsp_password" size="10"></div>
+      <div class="field"><label>SSD device</label><input id="ltsp_ssd_dev" size="10"></div>
+      <div class="field"><label>Mount</label><input id="ltsp_ssd_mount" size="8"></div>
+      <div class="field"><label>Cache image</label><select id="ltsp_image_cache"><option value="off">Off (đọc NFS)</option><option value="ssd">SSD local (cache, boot nhanh)</option></select></div>
+      <div class="field"><label>Sudo</label><select id="ltsp_user_sudo"><option value="1">Có (khách sudo được)</option><option value="0">Không (an toàn café)</option></select></div>
+      <button class="primary" style="align-self:flex-end" onclick="applyLtsp()">Áp dụng + ltsp initrd</button>
+      <span id="ltsp_cfg_msg" class="msg"></span>
+    </div>
+    <p class="hint"><b>User café</b> = tên duy nhất được login. Mỗi boot XOÁ HẾT user trong image (uid≥1000) rồi tạo lại user café fresh (home skel). Password đặt ở đây.<br>Autologin vào desktop, home tạo mỗi boot (fresh), game ghi xuống SSD. Đổi xong áp dụng → reboot máy. Cũng ghi hostname các máy đã đăng ký.<br>SSD device: <code>auto</code> = ổ vật lý đầu tiên (bất kể sda/nvme, hợp máy 1 ổ), hoặc gõ <code>/dev/sda</code>. Cache SSD: <code>off</code> (đọc NFS) / <code>SSD local</code> (cache golden, boot nhanh). ⚠ Bật SSD cache repartition ổ (xoá /games cũ). <i>(LTSP cũ — gỡ ở B6 sau PoC iSCSI.)</i></p>
+  </div>
+  <div class="card">
+    <h2>Countdown boot menu</h2>
+    <div class="row"><input id="timeout" type="number" min="0" value="10" size="4"> giây
+      <button onclick="setTimeout_()">Lưu</button> <span id="to_msg" class="msg"></span></div>
+  </div>
+  <div class="card">
+    <h2>zram — RAM chừa cho server</h2>
+    <div class="row"><input id="zram_reserve" type="number" min="0" value="2048" size="6"> MB
+      <button onclick="setZramReserve()">Lưu</button> <span id="zr_msg" class="msg"></span></div>
+    <p class="hint">Nạp golden vào <b>zram</b> (cache RAM nén) sẽ từ chối nếu <code>img + reserve > RAM khả dụng</code> → tránh tràn RAM/OOM. Reserve = RAM chừa cho OS + iSCSI serving. Không đủ → tự hạ image về <code>disk</code>.</p>
+  </div>
+</section>
