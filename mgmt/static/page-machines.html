@@ -1,0 +1,38 @@
+<section class="page active" id="page-machines">
+  <div class="head"><h1>Máy trạm</h1><p>máy đã đăng ký + phát hiện qua DHCP lease</p>
+    <span class="sp"></span><button onclick="loadStatus()">↻ Làm mới</button></div>
+  <div class="card">
+    <h2>Thêm máy</h2>
+    <div class="row">
+      <div class="field"><label>MAC</label><input id="m_mac" size="17" placeholder="aa:bb:cc:dd:ee:01"></div>
+      <div class="field"><label>IP</label><input id="m_ip" size="12" placeholder="10.0.0.11"></div>
+      <div class="field"><label>Hostname</label><input id="m_host" size="10" placeholder="PC01"></div>
+      <button class="primary" style="align-self:flex-end" onclick="addMachine()">Thêm</button>
+      <span id="m_msg" class="msg"></span>
+    </div>
+  </div>
+  <div class="card">
+    <h2>Danh sách</h2>
+    <div class="row" style="margin-bottom:12px">
+      <input id="m_filter" placeholder="Lọc hostname / IP / MAC" oninput="mPage=1;renderMachines()" style="min-width:220px">
+      <select id="m_status" onchange="mPage=1;renderMachines()">
+        <option value="">Tất cả trạng thái</option>
+        <option value="online">Online</option>
+        <option value="offline">Offline</option>
+        <option value="registered">Đã đăng ký</option>
+        <option value="new">Mới (chưa đăng ký)</option>
+      </select>
+      <span style="flex:1"></span>
+      <span id="m_count" class="msg"></span>
+    </div>
+    <div class="scroll"><table id="machines">
+      <thead><tr><th>Hostname</th><th>IP</th><th>MAC</th><th>Trạng thái</th><th></th></tr></thead>
+      <tbody></tbody></table></div>
+    <div class="row" style="margin-top:12px;justify-content:flex-end;align-items:center">
+      <button class="ghost" onclick="mPrev()">‹ Trước</button>
+      <span id="m_page" class="msg"></span>
+      <button class="ghost" onclick="mNext()">Sau ›</button>
+    </div>
+    <p class="hint">Máy <span class="pill new">mới</span> = đã lease IP nhưng chưa đăng ký. Đặt hostname → <b>Cấu hình → User café → Áp dụng</b> → reboot để nhận tên.</p>
+  </div>
+</section>
