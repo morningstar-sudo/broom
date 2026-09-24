@@ -1,4 +1,4 @@
-// zfs.rs — helper shell-out ZFS cho version/rollback image (M6). Không tự viết COW.
+// zfs.rs — ZFS shell-out helpers for image versions/rollback (M6). No home-made COW.
 use std::process::Command;
 
 pub fn snapshot(dataset: &str, snap: &str) -> std::io::Result<bool> {
@@ -15,7 +15,7 @@ pub fn rollback(dataset: &str, snap: &str) -> std::io::Result<bool> {
         .success())
 }
 
-/// Danh sách snapshot của 1 dataset (tên đầy đủ dataset@snap).
+/// List the snapshots of a dataset (full names dataset@snap).
 pub fn list_snapshots(dataset: &str) -> std::io::Result<Vec<String>> {
     let out = Command::new("zfs")
         .args(["list", "-H", "-t", "snapshot", "-o", "name", "-r", dataset])

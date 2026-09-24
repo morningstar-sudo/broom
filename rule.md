@@ -1,19 +1,21 @@
-# Rule — Quy tắc làm việc
+# Rules — How we work
 
-## Sau MỖI khi hoàn thành 1 giai đoạn (bắt buộc)
-1. **Review code** phần vừa làm: đúng module, không phình, bám `plan.md`.
-2. **Ghi bước test chi tiết** cho giai đoạn hiện tại vào `progress.md` — lệnh cụ thể,
-   đầu vào, **kết quả mong đợi vs kết quả thực**. Đủ để người khác chạy lại y hệt.
-3. Chỉ đánh dấu phase **done** trong `progress.md` khi test **pass thật** (có bằng
-   chứng: log/output/ảnh), không phỏng đoán. Fail → ghi rõ lỗi, **không qua phase sau**.
-4. Cập nhật `plan.md` / `rule.md` nếu phát sinh thay đổi thiết kế.
+## After EVERY completed phase (mandatory)
+1. **Review the code** just written: right module, no bloat, follows `plan.md`.
+2. **Write detailed test steps** for the current phase into `progress.md` — exact commands,
+   inputs, **expected vs actual result**. Enough for someone else to rerun them exactly.
+3. Only mark a phase **done** in `progress.md` when the tests **really pass** (with
+   evidence: log/output/screenshot), no guessing. Fail → record the error clearly, **don't move to the next phase**.
+4. Update `plan.md` / `rule.md` if the design changes.
 
-## Nguyên tắc chung
-- 1 module = 1 file, không dồn. Tách rõ theo M1–M8.
-- Không thêm dependency/lớp trung gian nếu chưa cần (nginx bỏ, NFS thuần cho Linux).
-- Golden image chia sẻ **read-only**; ghi runtime: overlay RAM (reset mỗi boot) + data nặng xuống SSD local `/games`.
-- Preflight phải pass trước khi app serve (thiếu gói → exit ≠ 0, báo rõ).
-- **Scope hiện tại: chỉ Linux diskless (LTSP).** Windows diskless đã gỡ khỏi codebase — tối ưu Linux trước.
+## General principles
+- 1 module = 1 file, no dumping. Split clearly along M1–M8.
+- No new dependency/intermediate layer until needed (nginx dropped, plain NFS for Linux).
+- The golden image is shared **read-only**; runtime writes: a write layer on the **local SSD**, reset every
+  boot (Linux: overlayroot; Windows: child VHDX). PXE first in BootOrder so every boot goes through the reset.
+- Preflight must pass before the app serves (missing packages → exit ≠ 0, reported clearly).
+- **Current scope:** Linux diskless (iSCSI + SSD writeback/cache) + **Windows design B** (native VHDX
+  boot on the client SSD, child reset every boot — see plan.md section "Phase W", docs/phase-w-windows.md).
 
-## Trạng thái phase
-`todo` → `doing` → `done`. Chỉ 1 phase `doing` tại 1 thời điểm.
+## Phase status
+`todo` → `doing` → `done`. Only one phase `doing` at a time.

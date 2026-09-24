@@ -1,4 +1,4 @@
-// monitor.rs — M7 mgmt-monitor. Giám sát on/off (ping) + WOL + reboot.
+// monitor.rs — M7 mgmt-monitor. On/off monitoring (ping) + WOL + reboot.
 use axum::{
     extract::State,
     http::StatusCode,
@@ -26,13 +26,13 @@ struct MachineStatus {
     registered: bool,
 }
 
-/// Máy trạm = đã đăng ký (bảng machines) + phát hiện qua DHCP lease (dnsmasq).
-/// ponytail: ping tuần tự, 10–30 máy ok.
+/// Machines = registered (machines table) + discovered via DHCP leases (dnsmasq).
+/// ponytail: sequential ping, fine for 10–30 machines.
 async fn status(State(st): State<SharedState>) -> Json<Vec<MachineStatus>> {
     // (ip, hostname, registered) theo mac.
     let mut map: HashMap<String, (Option<String>, Option<String>, bool)> = HashMap::new();
 
-    // 1. Đã đăng ký từ DB.
+    // 1. Registered, from the DB.
     {
         let conn = st.db.lock().unwrap();
         let mut stmt = conn
@@ -52,7 +52,7 @@ async fn status(State(st): State<SharedState>) -> Json<Vec<MachineStatus>> {
         }
     }
 
-    // 2. Phát hiện qua DHCP lease (chỉ full DHCP mode có file này).
+    // 2. Discovered via DHCP leases (only full DHCP mode has this file).
     if let Ok(txt) = std::fs::read_to_string("/var/lib/misc/dnsmasq.leases") {
         for line in txt.lines() {
             let f: Vec<&str> = line.split_whitespace().collect();
@@ -71,8 +71,8 @@ async fn status(State(st): State<SharedState>) -> Json<Vec<MachineStatus>> {
         }
     }
 
-    // Ping SONG SONG (JoinSet + spawn_blocking): 30 máy offline chờ -W 1 tuần tự = ~30s
-    // và chẹn cả runtime → chạy đồng thời còn ~1s, không chẹn tokio worker.
+    // PARALLEL ping (JoinSet + spawn_blocking): 30 offline machines waiting -W 1 in sequence = ~30s
+    // and blocks the runtime → concurrently it's ~1s, without blocking a tokio worker.
     let entries: Vec<(String, Option<String>, Option<String>, bool)> = map
         .into_iter()
         .map(|(mac, (ip, hostname, registered))| (mac, ip, hostname, registered))
@@ -99,7 +99,7 @@ async fn status(State(st): State<SharedState>) -> Json<Vec<MachineStatus>> {
             registered,
         })
         .collect();
-    // Đã đăng ký lên trước, rồi theo hostname/ip.
+    // Registered first, then by hostname/ip.
     out.sort_by(|a, b| {
         b.registered
             .cmp(&a.registered)

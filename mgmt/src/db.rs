@@ -1,4 +1,4 @@
-// db.rs — SQLite schema + open. Nguồn định danh máy trạm + image + config.
+// db.rs — SQLite schema + open. Source of machine + image + config identity.
 use rusqlite::{Connection, Result};
 
 pub fn open(path: &str) -> Result<Connection> {
@@ -11,11 +11,11 @@ pub fn open(path: &str) -> Result<Connection> {
             id          INTEGER PRIMARY KEY,
             name        TEXT UNIQUE NOT NULL,
             os          TEXT NOT NULL,           -- 'linux'
-            dataset     TEXT,                    -- ZFS dataset chứa golden
+            dataset     TEXT,                    -- ZFS dataset holding the golden
             is_default  INTEGER NOT NULL DEFAULT 0,
-            boot_script TEXT,                    -- đoạn iPXE boot (kernel/initrd); rỗng = TODO
-            hash        TEXT,                    -- sha256 image (so version cho cache SSD)
-            cache_mode  TEXT NOT NULL DEFAULT 'disk'  -- golden lưu ở đâu: 'disk' | 'zram'
+            boot_script TEXT,                    -- iPXE boot snippet (kernel/initrd); empty = TODO
+            hash        TEXT,                    -- sha256 of the image (version check for the SSD cache)
+            cache_mode  TEXT NOT NULL DEFAULT 'disk'  -- where the golden is kept: 'disk' | 'zram'
         );
 
         CREATE TABLE IF NOT EXISTS machines(
@@ -42,25 +42,45 @@ pub fn open(path: &str) -> Result<Connection> {
         INSERT OR IGNORE INTO config(key,value) VALUES('dhcp_gateway','');
         INSERT OR IGNORE INTO config(key,value) VALUES('dhcp_dns','');
         INSERT OR IGNORE INTO config(key,value) VALUES('dhcp_lease','12h');
-        INSERT OR IGNORE INTO config(key,value) VALUES('ltsp_user','khach');
+        INSERT OR IGNORE INTO config(key,value) VALUES('ltsp_user','guest');
         INSERT OR IGNORE INTO config(key,value) VALUES('ltsp_password','123456');
-        INSERT OR IGNORE INTO config(key,value) VALUES('ltsp_ssd_dev','auto');
-        INSERT OR IGNORE INTO config(key,value) VALUES('ltsp_ssd_mount','/games');
-        INSERT OR IGNORE INTO config(key,value) VALUES('ltsp_image_cache','off');
-        INSERT OR IGNORE INTO config(key,value) VALUES('ltsp_user_sudo','1');
         "#,
     )?;
-    // Migration DB cũ: thêm cột, bỏ qua nếu đã có.
+    // Old DB migration: add columns, ignore if they already exist.
     let _ = c.execute("ALTER TABLE images ADD COLUMN boot_script TEXT", []);
     let _ = c.execute("ALTER TABLE images ADD COLUMN hash TEXT", []);
     let _ = c.execute("ALTER TABLE images ADD COLUMN cache_mode TEXT NOT NULL DEFAULT 'disk'", []);
+    // iSCSI IQN base, random per server, generated once (first open without it) and kept.
+    c.execute("INSERT OR IGNORE INTO config(key,value) VALUES('iqn_base',?1)", [random_iqn_base()])?;
     Ok(c)
 }
 
-/// Lấy 1 giá trị config, có default.
+/// "iqn.2026-01.local.broom-<8 hex>" — RandomState is seeded from OS randomness (std only).
+fn random_iqn_base() -> String {
+    use std::hash::{BuildHasher, Hasher};
+    let r = std::collections::hash_map::RandomState::new().build_hasher().finish();
+    format!("iqn.2026-01.local.broom-{:08x}", r as u32)
+}
+
+/// Get a config value, with a default.
 pub fn get_config(c: &Connection, key: &str, default: &str) -> String {
     c.query_row("SELECT value FROM config WHERE key=?1", [key], |r| r.get(0))
         .unwrap_or_else(|_| default.to_string())
+}
+
+#[cfg(test)]
+#[test]
+fn iqn_base_random_and_kept() {
+    let p = std::env::temp_dir().join("broom_test_iqn.db");
+    let _ = std::fs::remove_file(&p);
+    let p = p.to_str().unwrap();
+    let a = get_config(&open(p).unwrap(), "iqn_base", "");
+    assert!(a.starts_with("iqn.2026-01.local.broom-") && a.len() == 32, "{a}");
+    assert_eq!(get_config(&open(p).unwrap(), "iqn_base", ""), a, "kept on reopen");
+    assert_ne!(get_config(&open(":memory:").unwrap(), "iqn_base", ""), a, "new DB → new base");
+    for s in ["", "-wal", "-shm"] {
+        let _ = std::fs::remove_file(format!("{p}{s}"));
+    }
 }
 
 pub fn set_config(c: &Connection, key: &str, value: &str) -> Result<()> {

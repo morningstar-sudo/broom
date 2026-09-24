@@ -1,5 +1,5 @@
-// machines.rs — M8 mgmt-config. Bảng máy (MAC/IP/hostname), gán image,
-// set default image + countdown timeout, chọn DHCP mode → sinh bindings.conf + reload dnsmasq.
+// machines.rs — M8 mgmt-config. Machine table (MAC/IP/hostname), image assignment,
+// default image + countdown timeout, DHCP mode selection → generate bindings.conf + reload dnsmasq.
 use axum::{
     extract::State,
     http::StatusCode,
@@ -18,64 +18,36 @@ pub fn routes() -> Router<SharedState> {
         .route("/api/config/zram-reserve", post(set_zram_reserve))
         .route("/api/dhcp", get(get_dhcp).post(set_dhcp))
         .route("/api/dhcp/apply", post(apply_dhcp))
-        .route("/api/ltsp-config", get(get_ltsp).post(set_ltsp))
+        .route("/api/cafe-user", get(get_cafe_user).post(set_cafe_user))
 }
 
-/// Config café user (Linux/LTSP): user, password, SSD.
-async fn get_ltsp(State(st): State<SharedState>) -> Json<serde_json::Value> {
+/// Guest user (created in the Windows golden by broom-prep-win → autologon). The DB keys keep the old names
+/// `ltsp_user`/`ltsp_password` so running DBs need no migration.
+async fn get_cafe_user(State(st): State<SharedState>) -> Json<serde_json::Value> {
     let conn = st.db.lock().unwrap();
-    let g = |k: &str, d: &str| db::get_config(&conn, k, d);
     Json(serde_json::json!({
-        "user": g("ltsp_user", "khach"),
-        "password": g("ltsp_password", "123456"),
-        "ssd_dev": g("ltsp_ssd_dev", "auto"),
-        "ssd_mount": g("ltsp_ssd_mount", "/games"),
-        "image_cache": g("ltsp_image_cache", "off"),
-        "user_sudo": g("ltsp_user_sudo", "1"),
+        "user": db::get_config(&conn, "ltsp_user", "guest"),
+        "password": db::get_config(&conn, "ltsp_password", "123456"),
     }))
 }
 
 #[derive(Deserialize)]
-struct LtspBody {
-    user: Option<String>,
-    password: Option<String>,
-    ssd_dev: Option<String>,
-    ssd_mount: Option<String>,
-    image_cache: Option<String>,
-    user_sudo: Option<String>,
+struct CafeUser {
+    user: String,
+    password: String,
 }
 
-/// Đặt café user + sinh lại ltsp.conf + `ltsp initrd` (áp cho mọi client).
-async fn set_ltsp(
+async fn set_cafe_user(
     State(st): State<SharedState>,
-    Json(b): Json<LtspBody>,
+    Json(b): Json<CafeUser>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    {
-        let conn = st.db.lock().unwrap();
-        let put = |k: &str, v: &Option<String>| {
-            if let Some(val) = v {
-                db::set_config(&conn, k, val).ok();
-            }
-        };
-        put("ltsp_user", &b.user);
-        put("ltsp_password", &b.password);
-        put("ltsp_ssd_dev", &b.ssd_dev);
-        put("ltsp_ssd_mount", &b.ssd_mount);
-        put("ltsp_image_cache", &b.image_cache);
-        put("ltsp_user_sudo", &b.user_sudo);
+    if b.user.trim().is_empty() {
+        return Err((StatusCode::BAD_REQUEST, "user is empty".into()));
     }
-    // write_conf + ltsp initrd (blocking) → tách thread.
-    let st2 = st.clone();
-    let res = tokio::task::spawn_blocking(move || {
-        let conn = st2.db.lock().unwrap();
-        crate::ltsp::apply(&conn)
-    })
-    .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    match res {
-        Ok(()) => Ok(Json(serde_json::json!({"ok": true}))),
-        Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, e)),
-    }
+    let conn = st.db.lock().unwrap();
+    db::set_config(&conn, "ltsp_user", b.user.trim()).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    db::set_config(&conn, "ltsp_password", &b.password).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    Ok(Json(serde_json::json!({"ok": true})))
 }
 
 #[derive(Serialize)]
@@ -106,6 +78,29 @@ async fn list(State(st): State<SharedState>) -> Json<Vec<Machine>> {
     Json(rows.filter_map(|r| r.ok()).collect())
 }
 
+const HOSTNAME_RULE: &str =
+    "Hostname: 1-15 characters, only letters/digits/'-', must not start or end with '-', not all digits (Windows computer name)";
+
+/// Windows computer name (NetBIOS) — becomes the Windows name via stage/broom-done. Keep in sync with hostOk() in index.html.
+fn hostname_ok(h: &str) -> bool {
+    (1..=15).contains(&h.len())
+        && h.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+        && !h.starts_with('-')
+        && !h.ends_with('-')
+        && !h.chars().all(|c| c.is_ascii_digit())
+}
+
+#[cfg(test)]
+#[test]
+fn hostname_rule() {
+    for ok in ["PC01", "FPS-43", "a", "ABCDEFGHIJKLMNO"] {
+        assert!(hostname_ok(ok), "{ok}");
+    }
+    for bad in ["", "ABCDEFGHIJKLMNOP", "PC 01", "PC_01", "-PC", "PC-", "123", "Zoë1"] {
+        assert!(!hostname_ok(bad), "{bad}");
+    }
+}
+
 #[derive(Deserialize)]
 struct NewMachine {
     mac: String,
@@ -117,10 +112,16 @@ async fn add(
     State(st): State<SharedState>,
     Json(b): Json<NewMachine>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let hostname = b.hostname.as_deref().map(str::trim).filter(|h| !h.is_empty());
+    if let Some(h) = hostname {
+        if !hostname_ok(h) {
+            return Err((StatusCode::BAD_REQUEST, HOSTNAME_RULE.into()));
+        }
+    }
     let conn = st.db.lock().unwrap();
     conn.execute(
         "INSERT INTO machines(mac,ip,hostname) VALUES(?1,?2,?3)",
-        rusqlite::params![b.mac, b.ip, b.hostname],
+        rusqlite::params![b.mac, b.ip, hostname],
     )
     .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
     Ok(Json(serde_json::json!({"ok": true, "id": conn.last_insert_rowid()})))
@@ -165,7 +166,7 @@ struct ZramReserve {
     mb: u64,
 }
 
-/// RAM (MB) chừa cho server khi nạp golden vào zram (validate tràn RAM). POST /api/config/zram-reserve
+/// RAM (MB) kept for the server when loading a golden into zram (RAM overflow check). POST /api/config/zram-reserve
 async fn set_zram_reserve(
     State(st): State<SharedState>,
     Json(b): Json<ZramReserve>,
@@ -176,7 +177,7 @@ async fn set_zram_reserve(
     Ok(Json(serde_json::json!({"ok": true})))
 }
 
-/// Config DHCP hiện tại (mode + tham số) để web hiển thị.
+/// Current DHCP config (mode + parameters) for the web to display.
 async fn get_dhcp(State(st): State<SharedState>) -> Json<serde_json::Value> {
     let conn = st.db.lock().unwrap();
     let g = |k: &str, d: &str| db::get_config(&conn, k, d);
@@ -208,7 +209,7 @@ struct DhcpBody {
     lease: Option<String>,
 }
 
-/// Đặt config DHCP + sinh lại pxe.conf + restart dnsmasq (dnsmasq.rs).
+/// Set the DHCP config + regenerate pxe.conf + restart dnsmasq (dnsmasq.rs).
 async fn set_dhcp(
     State(st): State<SharedState>,
     Json(b): Json<DhcpBody>,
@@ -235,7 +236,7 @@ async fn set_dhcp(
     Ok(Json(serde_json::json!({"ok": true, "reloaded": reloaded})))
 }
 
-/// Chỉ sinh lại pxe.conf từ config + bindings hiện có (vd sau khi sửa bảng máy).
+/// Only regenerate pxe.conf from the current config + bindings (e.g. after editing the machine table).
 async fn apply_dhcp(
     State(st): State<SharedState>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {

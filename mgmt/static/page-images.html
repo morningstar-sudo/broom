@@ -1,34 +1,25 @@
 <section class="page active" id="page-images">
-  <div class="head"><h1>Image</h1><p>golden OS boot qua mạng</p>
+  <div class="head"><h1>Images</h1><p>golden OS booted over the network</p>
     <span class="sp"></span><button onclick="loadImages()">↻</button></div>
   <div class="card">
-    <h2>Danh sách image</h2>
+    <h2>Image list</h2>
     <div class="scroll"><table id="images">
-      <thead><tr><th>Tên</th><th>OS</th><th>Cache</th><th>Default</th><th>Boot</th><th>Hash</th><th></th></tr></thead>
+      <thead><tr><th>Name</th><th>OS</th><th>Cache</th><th>Default</th><th>Boot</th><th>Hash</th><th></th></tr></thead>
       <tbody></tbody></table></div>
     <div id="img_status" class="msg" style="margin-top:10px"></div>
   </div>
   <div class="card">
-    <h2>Golden Linux (.zip từ ltsp-script)</h2>
-    <div class="row">
-      <div class="field"><label>Tên</label><input id="ltsp_name" value="x86_64" size="12"></div>
-      <div class="field"><label>File golden.zip</label><input type="file" id="ltsp_file" accept=".zip"></div>
-      <button class="primary" style="align-self:flex-end" onclick="uploadBundle()">Upload + Publish</button>
-      <progress id="ltsp_prog" value="0" max="100" style="display:none"></progress>
-      <span id="ltsp_msg" class="msg"></span>
-    </div>
-    <p class="hint">Trên VM desktop: <code>curl -fsSL http://<span id="srvhost">SERVER</span>/ltsp-script | sudo bash</code> → <code>/tmp/golden.zip</code> → upload ở đây (server tự giải nén + publish).</p>
-  </div>
-  <div class="card">
     <h2>Golden (.vmdk / .img / .zip) — iSCSI + overlay SSD</h2>
     <div class="row">
-      <div class="field"><label>Tên</label><input id="up_name" value="ubuntu" size="12"></div>
+      <div class="field"><label>Name</label><input id="up_name" value="ubuntu" size="12"></div>
+      <div class="field"><label>OS</label><select id="up_os"><option value="linux">linux</option><option value="windows">windows</option></select></div>
       <div class="field"><label>File</label><input type="file" id="up_file" accept=".vmdk,.img,.raw,.zip"></div>
-      <div class="field"><label>Cache</label><select id="up_cache"><option value="disk">disk (page cache)</option><option value="zram">zram (nén RAM)</option></select></div>
-      <button class="primary" style="align-self:flex-end" onclick="addImage()">Tạo + Upload + Publish</button>
+      <div class="field"><label>Cache</label><select id="up_cache"><option value="disk">disk (page cache)</option><option value="zram">zram (compressed RAM)</option></select></div>
+      <button class="primary" style="align-self:flex-end" onclick="addImage()">Create + Upload + Publish</button>
       <progress id="up_prog" value="0" max="100" style="display:none"></progress>
       <span id="up_msg" class="msg"></span>
     </div>
-    <p class="hint">Bake overlay trong golden VM trước: <code>curl -fsSL http://<span id="srvhost2">SERVER</span>/broom-prep | sudo bash</code> → tắt VM. Up <b>1 file vmdk monolithic</b> (VMware chẻ nhiều file: <code>vmware-vdiskmanager -r disk.vmdk -t 0 golden.vmdk</code>) HOẶC <b>zip cả folder VM</b> (mọi .vmdk) → server tự chọn descriptor + convert. Đừng up từng extent lẻ. <b>disk</b> = rẻ; <b>zram</b> = img hot lên RAM (nén).</p>
+    <p class="hint"><b>Linux</b>: <code>curl -fsSL http://<span id="srvhost2">SERVER</span>/broom-prep | sudo bash</code></p>
+    <p class="hint"><b>Windows (Pro)</b>: PowerShell Admin: <code>irm http://<span id="srvhost3">SERVER</span>/broom-prep-win | iex</code></p>
   </div>
 </section>
