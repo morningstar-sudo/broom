@@ -1,28 +1,24 @@
 <section class="page active" id="page-system">
-  <div class="head"><h1>Cấu hình</h1><p>user café + boot menu</p></div>
+  <div class="head"><h1>Settings</h1><p>guest user + boot menu + zram</p></div>
   <div class="card">
-    <h2>User café (Linux)</h2>
+    <h2>Guest user (Windows)</h2>
     <div class="row">
-      <div class="field"><label>User café</label><input id="ltsp_user" size="10"></div>
-      <div class="field"><label>Password</label><input id="ltsp_password" size="10"></div>
-      <div class="field"><label>SSD device</label><input id="ltsp_ssd_dev" size="10"></div>
-      <div class="field"><label>Mount</label><input id="ltsp_ssd_mount" size="8"></div>
-      <div class="field"><label>Cache image</label><select id="ltsp_image_cache"><option value="off">Off (đọc NFS)</option><option value="ssd">SSD local (cache, boot nhanh)</option></select></div>
-      <div class="field"><label>Sudo</label><select id="ltsp_user_sudo"><option value="1">Có (khách sudo được)</option><option value="0">Không (an toàn café)</option></select></div>
-      <button class="primary" style="align-self:flex-end" onclick="applyLtsp()">Áp dụng + ltsp initrd</button>
-      <span id="ltsp_cfg_msg" class="msg"></span>
+      <div class="field"><label>Guest user</label><input id="cafe_user" size="10"></div>
+      <div class="field"><label>Password</label><input id="cafe_password" size="10"></div>
+      <button class="primary" style="align-self:flex-end" onclick="saveCafe()">Save</button>
+      <span id="cafe_msg" class="msg"></span>
     </div>
-    <p class="hint"><b>User café</b> = tên duy nhất được login. Mỗi boot XOÁ HẾT user trong image (uid≥1000) rồi tạo lại user café fresh (home skel). Password đặt ở đây.<br>Autologin vào desktop, home tạo mỗi boot (fresh), game ghi xuống SSD. Đổi xong áp dụng → reboot máy. Cũng ghi hostname các máy đã đăng ký.<br>SSD device: <code>auto</code> = ổ vật lý đầu tiên (bất kể sda/nvme, hợp máy 1 ổ), hoặc gõ <code>/dev/sda</code>. Cache SSD: <code>off</code> (đọc NFS) / <code>SSD local</code> (cache golden, boot nhanh). ⚠ Bật SSD cache repartition ổ (xoá /games cũ). <i>(LTSP cũ — gỡ ở B6 sau PoC iSCSI.)</i></p>
+    <p class="hint">The user is created + set to autologon in the Windows golden when <code>broom-prep-win</code> runs in the VM. Changes here only apply to goldens prepared <b>afterwards</b> (run prep again → upload). Linux golden: the user already exists in the image.</p>
   </div>
   <div class="card">
     <h2>Countdown boot menu</h2>
-    <div class="row"><input id="timeout" type="number" min="0" value="10" size="4"> giây
-      <button onclick="setTimeout_()">Lưu</button> <span id="to_msg" class="msg"></span></div>
+    <div class="row"><input id="timeout" type="number" min="0" value="10" size="4"> seconds
+      <button onclick="setTimeout_()">Save</button> <span id="to_msg" class="msg"></span></div>
   </div>
   <div class="card">
-    <h2>zram — RAM chừa cho server</h2>
+    <h2>zram — RAM reserved for the server</h2>
     <div class="row"><input id="zram_reserve" type="number" min="0" value="2048" size="6"> MB
-      <button onclick="setZramReserve()">Lưu</button> <span id="zr_msg" class="msg"></span></div>
-    <p class="hint">Nạp golden vào <b>zram</b> (cache RAM nén) sẽ từ chối nếu <code>img + reserve > RAM khả dụng</code> → tránh tràn RAM/OOM. Reserve = RAM chừa cho OS + iSCSI serving. Không đủ → tự hạ image về <code>disk</code>.</p>
+      <button onclick="setZramReserve()">Save</button> <span id="zr_msg" class="msg"></span></div>
+    <p class="hint">Loading a golden into <b>zram</b> (compressed RAM cache) is refused if <code>img + reserve > available RAM</code> → avoids RAM overflow/OOM. Reserve = RAM kept for the OS + iSCSI serving. Not enough → the image falls back to <code>disk</code> by itself.</p>
   </div>
 </section>

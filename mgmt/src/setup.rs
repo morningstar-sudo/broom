@@ -1,11 +1,10 @@
-// setup.rs — auto-fix gọi từ main() khi preflight FAIL (không còn subcommand riêng).
-// Dò IFACE/IP/SUBNET → cài gói → copy snponly.efi → seed config DHCP vào DB →
-// dnsmasq::apply (sinh pxe.conf + restart). main() preflight lại sau khi xong.
+// setup.rs — auto-fix called from main() when preflight FAILS (no longer a separate subcommand).
+// Detect IFACE/IP/SUBNET → install packages → write snponly.efi (embedded) → seed DHCP config into the DB →
+// dnsmasq::apply (generate pxe.conf + restart). main() runs preflight again afterwards.
 //
-// Flags (đọc từ args của lệnh chạy chính, vd `sudo ./bootrom-mgmt --mode full`):
+// Flags (read from the args of the main command, e.g. `sudo ./bootrom-mgmt --mode full`):
 //   --iface --ip --subnet --mode <proxy|full>
 //   --range-start --range-end --netmask --gateway --dns
-use std::path::Path;
 use std::process::Command;
 
 use crate::{db, dnsmasq, preflight};
@@ -50,7 +49,7 @@ fn run_cmd(bin: &str, args: &[&str]) -> bool {
         .unwrap_or(false)
 }
 
-/// Đọc `--flag value` từ args.
+/// Read `--flag value` from args.
 fn flag(args: &[String], name: &str) -> Option<String> {
     args.iter()
         .position(|a| a == name)
@@ -61,7 +60,7 @@ fn flag(args: &[String], name: &str) -> Option<String> {
 pub fn run(args: &[String]) {
     println!("== bootrom-mgmt setup ==");
 
-    // 1. Tham số mạng (flag override detect).
+    // 1. Network parameters (flags override detection).
     let (d_iface, d_ip) = detect_iface_ip();
     let iface = flag(args, "--iface").or(d_iface);
     let ip = flag(args, "--ip").or(d_ip);
@@ -70,8 +69,8 @@ pub fn run(args: &[String]) {
     let (iface, ip, subnet) = match (iface, ip, subnet) {
         (Some(i), Some(p), Some(s)) => (i, p, s),
         (i, p, s) => {
-            eprintln!("Không dò đủ tham số mạng: IFACE={i:?} IP={p:?} SUBNET={s:?}");
-            eprintln!("Chỉ định tay: setup --iface ens33 --ip 10.0.0.12 --subnet 10.0.0.0");
+            eprintln!("Could not detect all network parameters: IFACE={i:?} IP={p:?} SUBNET={s:?}");
+            eprintln!("Specify them by hand: setup --iface ens33 --ip 10.0.0.12 --subnet 10.0.0.0");
             std::process::exit(1);
         }
     };
@@ -80,42 +79,33 @@ pub fn run(args: &[String]) {
 
     // 2. Root.
     if !preflight::is_root() {
-        eprintln!("\nCần root. Chạy: sudo bootrom-mgmt setup ...");
+        eprintln!("\nRoot required. Run: sudo bootrom-mgmt setup ...");
         std::process::exit(1);
     }
 
-    // 3. Cài gói thiếu.
+    // 3. Install missing packages.
     let pkgs = preflight::missing_pkgs();
     if pkgs.is_empty() {
-        println!("[gói] đủ");
+        println!("[packages] all present");
     } else {
-        println!("[gói] cài: {}", pkgs.join(" "));
+        println!("[packages] installing: {}", pkgs.join(" "));
         run_cmd("apt-get", &["update", "-y"]);
         let mut a = vec!["install", "-y"];
         a.extend(pkgs.iter().map(|s| s.as_str()));
         if !run_cmd("apt-get", &a) {
-            eprintln!("apt install thất bại");
+            eprintln!("apt install failed");
             std::process::exit(1);
         }
     }
 
-    // 4. iPXE binary: snponly.efi (UEFI).
-    std::fs::create_dir_all("/srv/tftp").ok();
-    for (dst, src, label) in [
-        ("/srv/tftp/snponly.efi", "/usr/lib/ipxe/snponly.efi", "snponly.efi (UEFI)"),
-    ] {
-        if Path::new(dst).exists() {
-            println!("[tftp] {label} đã có");
-        } else if Path::new(src).exists() {
-            std::fs::copy(src, dst).ok();
-            println!("[tftp] copy {label}");
-        } else {
-            eprintln!("[tftp] thiếu {src} — apt install ipxe");
-        }
+    // 4. iPXE (UEFI snponly.efi) embedded in the binary → /srv/tftp.
+    match crate::boot::install_ipxe() {
+        Ok(_) => println!("[tftp] snponly.efi (embedded iPXE) ready"),
+        Err(e) => eprintln!("[tftp] writing snponly.efi failed: {e}"),
     }
 
-    // 5. Seed config DHCP vào DB (nguồn sự thật cho dnsmasq.rs).
-    let conn = db::open("bootrom.db").expect("mở DB");
+    // 5. Seed the DHCP config into the DB (source of truth for dnsmasq.rs).
+    let conn = db::open("bootrom.db").expect("open DB");
     let seed = |k: &str, v: &str| {
         db::set_config(&conn, k, v).ok();
     };
@@ -135,14 +125,14 @@ pub fn run(args: &[String]) {
         }
     }
 
-    // 6. Sinh pxe.conf + restart dnsmasq. (main() sẽ preflight lại sau khi return.)
+    // 6. Generate pxe.conf + restart dnsmasq. (main() runs preflight again after return.)
     match dnsmasq::apply(&conn) {
         Ok(true) => println!("[dnsmasq] pxe.conf ghi + restart OK ({mode})"),
-        Ok(false) => eprintln!("[dnsmasq] pxe.conf ghi xong nhưng restart LỖI — kiểm journalctl -u dnsmasq"),
+        Ok(false) => eprintln!("[dnsmasq] pxe.conf written but restart FAILED — check journalctl -u dnsmasq"),
         Err(e) => {
-            eprintln!("[dnsmasq] ghi config lỗi: {e}");
+            eprintln!("[dnsmasq] writing config failed: {e}");
             std::process::exit(1);
         }
     }
-    println!("== setup xong ==");
+    println!("== setup done ==");
 }

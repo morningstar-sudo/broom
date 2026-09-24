@@ -3,7 +3,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Broom Console</title>
 <style>
-  /* NOC console — dark-first (phòng điều khiển). Light theo prefers-color-scheme. */
+  /* NOC console — dark-first (control room). Light via prefers-color-scheme. */
   :root{
     --bg:#0b0f17; --panel:#121a26; --panel2:#0f1620; --line:#1f2b3a;
     --ink:#e6edf6; --muted:#7c8ba3; --accent:#35c1f0; --accent-ink:#04121b;
@@ -38,8 +38,10 @@
   nav a.active::before{content:"";width:3px;height:16px;border-radius:2px;background:var(--accent);margin-left:-6px}
   .sysbar{border-top:1px solid var(--line);padding:12px 10px 2px;color:var(--muted);
     font:600 .72rem/1.4 var(--mono)}
-  .sysbar .dot{display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--on);
-    box-shadow:0 0 8px var(--on);margin-right:6px;vertical-align:middle}
+  .sysbar .dot{display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--muted);
+    margin-right:6px;vertical-align:middle}
+  .sysbar .dot.up{background:var(--on);box-shadow:0 0 8px var(--on)}
+  .sysbar .dot.down{background:var(--off);box-shadow:0 0 8px var(--off)}
 
   /* ---- Main ---- */
   main{padding:26px 30px;max-width:1080px}
@@ -104,38 +106,46 @@
   <aside class="sidebar">
     <div class="brand"><b>Broom</b><small>bootrom console · v__VERSION__</small></div>
     <nav>
-      <a data-page="machines" class="active">Máy trạm</a>
-      <a data-page="images">Image</a>
-      <a data-page="network">Mạng</a>
-      <a data-page="system">Cấu hình</a>
+      <a href="/machines" data-page="machines">Machines</a>
+      <a href="/images" data-page="images">Images</a>
+      <a href="/network" data-page="network">Network</a>
+      <a href="/system" data-page="system">Settings</a>
     </nav>
-    <div class="sysbar"><span class="dot"></span>server · <span id="onlinecount">—</span></div>
+    <div class="sysbar"><span class="dot" id="srvdot" title="connecting..."></span>server · <span id="onlinecount">—</span></div>
   </aside>
 
-  <main id="main"><!-- fragment tab nạp on-demand từ /ui/<page> --></main>
+  <main id="main"><!-- tab fragment loaded on demand from /ui/<page> --></main>
 </div>
 
 <script>
 async function j(url,opt){const r=await fetch(url,opt);if(!r.ok)throw new Error(await r.text());return r.json()}
 const esc=s=>(s==null?'':String(s)).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 
-// ---- tabs: nạp fragment HTML on-demand (/ui/<page>) + chỉ load data phần đang xem ----
-const loaders={machines:loadStatus,images:loadImages,network:loadDhcp,system:loadLtsp};
+// ---- tabs: load HTML fragments on demand (/ui/<page>) + only load data for the tab being viewed ----
+const loaders={machines:loadStatus,images:loadImages,network:loadDhcp,system:loadCafe};
 const fragCache={};
 let curPage=null;
 async function showPage(p){
   document.querySelectorAll('nav a').forEach(x=>x.classList.toggle('active',x.dataset.page===p));
   if(fragCache[p]===undefined){
     try{fragCache[p]=await (await fetch('/ui/'+p)).text();}
-    catch(e){fragCache[p]='<p class="hint">lỗi tải trang '+p+'</p>';}
+    catch(e){fragCache[p]='<p class="hint">failed to load page '+p+'</p>';}
   }
   document.getElementById('main').innerHTML=fragCache[p];
   curPage=p;
   if(loaders[p])loaders[p]();
 }
-document.querySelectorAll('nav a').forEach(a=>a.onclick=()=>showPage(a.dataset.page));
+// Page from the URL (/machines, /images, ...); "/" or unknown → machines.
+const pageFromPath=()=>{const p=location.pathname.slice(1);return loaders[p]?p:'machines';};
+document.querySelectorAll('nav a').forEach(a=>a.onclick=e=>{
+  if(e.ctrlKey||e.metaKey||e.shiftKey||e.button!==0)return;   // new tab/window: let the browser handle it
+  e.preventDefault();
+  if(a.dataset.page!==curPage)history.pushState(null,'','/'+a.dataset.page);
+  showPage(a.dataset.page);
+});
+window.onpopstate=()=>showPage(pageFromPath());
 
-// ---- machines (filter + phân trang client-side) ----
+// ---- machines (filter + client-side paging) ----
 let allMachines=[], mPage=1; const M_PAGE=15;
 async function loadStatus(){
   allMachines=await j('/api/status');
@@ -161,31 +171,37 @@ function renderMachines(){
   const page=rows.slice((mPage-1)*M_PAGE,mPage*M_PAGE);
   document.querySelector('#machines tbody').innerHTML=page.map(m=>
     `<tr>
-       <td>${m.hostname?esc(m.hostname):'<span class="mono">—</span>'} ${m.registered?'':'<span class="pill new">mới</span>'}</td>
+       <td>${m.hostname?esc(m.hostname):'<span class="mono">—</span>'} ${m.registered?'':'<span class="pill new">new</span>'}</td>
        <td class="mono">${esc(m.ip)}</td><td class="mono">${esc(m.mac)}</td>
        <td><span class="led ${m.online?'on':'off'}">${m.online?'ON':'OFF'}</span></td>
        <td>${m.registered
           ? `<button class="ghost" onclick="wake('${esc(m.mac)}')">Wake</button>`
-          : `<button onclick="regMachine('${esc(m.mac)}','${esc(m.ip)}','${esc(m.hostname)}')">Đăng ký</button>`}</td>
-     </tr>`).join('') || '<tr><td colspan=5 class="mono">không có máy khớp</td></tr>';
-  document.getElementById('m_count').textContent=rows.length+' máy';
-  document.getElementById('m_page').textContent='Trang '+mPage+'/'+pages;
+          : `<button onclick="regMachine('${esc(m.mac)}','${esc(m.ip)}','${esc(m.hostname)}')">Register</button>`}</td>
+     </tr>`).join('') || '<tr><td colspan=5 class="mono">no matching machines</td></tr>';
+  document.getElementById('m_count').textContent=rows.length+' machines';
+  document.getElementById('m_page').textContent='Page '+mPage+'/'+pages;
 }
 function mPrev(){if(mPage>1){mPage--;renderMachines();}}
 function mNext(){const pages=Math.max(1,Math.ceil(filteredMachines().length/M_PAGE));if(mPage<pages){mPage++;renderMachines();}}
+// Windows computer name (NetBIOS). Keep in sync with hostname_ok() in machines.rs.
+const HOST_RULE='Hostname: 1-15 characters, only letters/digits/"-", must not start or end with "-", not all digits';
+const hostOk=h=>/^[A-Za-z0-9-]{1,15}$/.test(h)&&!/^-|-$/.test(h)&&!/^[0-9]+$/.test(h);
 async function addMachine(){
   const mac=v('m_mac'),ip=v('m_ip')||null,hostname=v('m_host')||null,msg=document.getElementById('m_msg');
-  if(!mac){alert('Nhập MAC');return;}
-  try{await j('/api/machines',mk({mac,ip,hostname}));msg.textContent=' ✓ đã thêm';
+  if(!mac){alert('Enter a MAC');return;}
+  if(hostname&&!hostOk(hostname)){msg.textContent=' ✗ '+HOST_RULE;return;}
+  try{await j('/api/machines',mk({mac,ip,hostname}));msg.textContent=' ✓ added';
     ['m_mac','m_ip','m_host'].forEach(i=>document.getElementById(i).value='');loadStatus();}
   catch(e){msg.textContent=' ✗ '+e.message}
 }
 async function regMachine(mac,ip,host){
-  const hostname=prompt('Hostname cho '+mac+':',host||'PC');if(hostname===null)return;
+  let hostname=host||'PC';
+  do{hostname=prompt('Hostname for '+mac+(hostOk(hostname)?'':'\n'+HOST_RULE)+':',hostname);if(hostname===null)return;hostname=hostname.trim();}
+  while(!hostOk(hostname));
   await j('/api/machines',mk({mac,ip:ip||null,hostname}));
-  alert('Đã đăng ký. Cấu hình → User café → Áp dụng, rồi reboot máy để nhận tên.');loadStatus();
+  alert('Registered. Network → Apply (regenerates DHCP), then reboot the machine to get its IP/name.');loadStatus();
 }
-async function wake(mac){await j('/api/wake',mk({mac}));alert('Đã gửi WOL '+mac)}
+async function wake(mac){await j('/api/wake',mk({mac}));alert('WOL sent to '+mac)}
 
 // ---- images ----
 async function loadImages(){
@@ -194,27 +210,27 @@ async function loadImages(){
     `<tr><td>${esc(i.name)}</td><td><span class="pill ${i.os}">${esc(i.os)}</span></td>
        <td class="mono">${esc(i.cache_mode||'disk')}</td>
        <td>${i.is_default?'<span class="ok">✓</span>':''}</td>
-       <td>${i.boot_script?'<span class="ok">✓</span>':'<span class="mono">chưa</span>'}</td>
+       <td>${i.boot_script?'<span class="ok">✓</span>':'<span class="mono">no</span>'}</td>
        <td class="mono" title="${esc(i.hash||'')}">${i.hash?esc(i.hash).slice(0,10):'—'}</td>
        <td class="row">
          <button class="ghost" onclick="setDefault(${i.id})">Default</button>
          <button class="ghost" onclick="toggleCache(${i.id},'${esc(i.cache_mode||'disk')}','${esc(i.name)}')">${(i.cache_mode==='zram')?'→disk':'→zram'}</button>
-         <button class="ghost" onclick="republish(${i.id},'${esc(i.name)}')">Publish lại</button>
+         <button class="ghost" onclick="republish(${i.id},'${esc(i.name)}')">Republish</button>
          <button class="ghost" onclick="editBoot(${i.id},${JSON.stringify(esc(i.boot_script||''))})">Boot</button>
-         <button class="ghost danger" onclick="delImage(${i.id},'${esc(i.name)}')">Xoá</button>
-       </td></tr>`).join('') || '<tr><td colspan=7 class="mono">chưa có image</td></tr>';
-  // srvhost trong fragment images → set sau khi inject.
-  try{document.getElementById('srvhost').textContent=location.host;}catch(_){}
+         <button class="ghost danger" onclick="delImage(${i.id},'${esc(i.name)}')">Delete</button>
+       </td></tr>`).join('') || '<tr><td colspan=7 class="mono">no images yet</td></tr>';
+  // srvhost inside the images fragment → set after it is injected.
   try{document.getElementById('srvhost2').textContent=location.host;}catch(_){}
+  try{document.getElementById('srvhost3').textContent=location.host;}catch(_){}
 }
 async function toggleCache(id,cur,name){const mode=cur==='zram'?'disk':'zram';
-  if(!confirm('Đổi cache image sang "'+mode+'"? (republish, zram sẽ nạp img vào RAM)'))return;
+  if(!confirm('Switch image cache to "'+mode+'"? (republish; zram loads the img into RAM)'))return;
   const el=document.getElementById('img_status');
   try{await j('/api/images/cache-mode',mk({id,mode}));pollJob(name,el);}catch(e){el.textContent=' ✗ '+e.message;}}
 async function setDefault(id){await j('/api/images/default',mk({id}));loadImages()}
-// Poll job status theo image name → cập nhật text el; dừng khi ✓/✗.
+// Poll the job status by image name → update the text of el; stop at ✓/✗.
 function pollJob(name,el){
-  el.textContent=' ⏳ đang publish...';
+  el.textContent=' ⏳ publishing...';
   const t=setInterval(async()=>{
     let s='';try{s=(await j('/api/images/job?name='+encodeURIComponent(name))).status;}catch(_){}
     if(!s)return;
@@ -226,33 +242,28 @@ async function republish(id,name){const el=document.getElementById('img_status')
   try{await j('/api/images/publish',mk({id}));pollJob(name,el);}catch(e){el.textContent=' ✗ '+e.message;}}
 async function editBoot(id,cur){const s=prompt('iPXE boot script:',cur||'');if(s===null)return;
   await j('/api/images/boot-script',mk({id,boot_script:s}));loadImages();}
-async function delImage(id,name){if(!confirm('Xoá image "'+name+'"?'))return;
+async function delImage(id,name){if(!confirm('Delete image "'+name+'"?'))return;
   await j('/api/images/delete',mk({id}));loadImages();}
 function upload(url,file,prog,msg,done){
   const xhr=new XMLHttpRequest();xhr.open('PUT',url);
-  prog.style.display='';prog.value=0;msg.textContent=' đang upload...';
+  prog.style.display='';prog.value=0;msg.textContent=' uploading...';
   xhr.upload.onprogress=e=>{if(e.lengthComputable){prog.value=e.loaded/e.total*100;msg.textContent=' upload '+Math.round(e.loaded/e.total*100)+'%';}};
   xhr.onload=()=>{let r={};try{r=JSON.parse(xhr.responseText);}catch(_){}done(xhr.status,r,xhr.responseText);};
-  xhr.onerror=()=>{msg.textContent=' ✗ lỗi mạng';};xhr.send(file);
+  xhr.onerror=()=>{msg.textContent=' ✗ network error';};xhr.send(file);
 }
 async function addImage(){
   const f=document.getElementById('up_file').files[0],name=v('up_name'),msg=document.getElementById('up_msg');
   const cache=document.getElementById('up_cache').value;
-  if(!f||!name){alert('Nhập tên + chọn file');return;}
-  // src theo đuôi file: .vmdk → convert; .zip → giải nén; còn lại → raw.
+  if(!f||!name){alert('Enter a name + choose a file');return;}
+  // src from the file extension: .vmdk → convert; .zip → unzip; anything else → raw.
   const ext=(f.name.split('.').pop()||'').toLowerCase();
   const src=ext==='vmdk'?'vmdk':(ext==='zip'?'zip':'raw');
-  try{await j('/api/images',mk({name,os:'linux',cache_mode:cache}));}catch(e){}
+  const os=document.getElementById('up_os').value;
+  try{await j('/api/images',mk({name,os,cache_mode:cache}));}catch(e){}
   upload('/api/images/upload?name='+encodeURIComponent(name)+'&src='+src,f,document.getElementById('up_prog'),msg,(st,r,txt)=>{
     if(st!==200){msg.textContent=' ✗ '+txt;return;}
-    msg.textContent=' ✓ upload xong';loadImages();pollJob(name,msg);   // publish chạy nền → poll
+    msg.textContent=' ✓ upload done';loadImages();pollJob(name,msg);   // publish runs in the background → poll
   });
-}
-async function uploadBundle(){
-  const f=document.getElementById('ltsp_file').files[0],name=v('ltsp_name'),msg=document.getElementById('ltsp_msg');
-  if(!f||!name){alert('Nhập tên + chọn golden.zip');return;}
-  upload('/api/images/upload-ltsp?name='+encodeURIComponent(name),f,document.getElementById('ltsp_prog'),msg,(st,r,txt)=>{
-    msg.textContent=st===200?(' ✓ '+(r.result||'xong')):(' ✗ '+txt);if(st===200)loadImages();});
 }
 
 // ---- network ----
@@ -261,20 +272,31 @@ async function loadDhcp(){const c=await j('/api/dhcp');
   const dm=document.getElementById('dhcp_mode');if(dm)dm.onchange=toggleFull;toggleFull();}
 function toggleFull(){const fo=document.getElementById('full_only'),dm=document.getElementById('dhcp_mode');if(fo&&dm)fo.style.display=dm.value==='full'?'':'none';}
 async function applyDhcp(){const b={};['mode','iface','server_ip','subnet','range_start','range_end','gateway','dns'].forEach(k=>b[k]=document.getElementById('dhcp_'+k).value);
-  const r=await j('/api/dhcp',mk(b));document.getElementById('dhcp_msg').textContent=r.reloaded?' ✓ reload OK':' ⚠ ghi xong, reload lỗi';}
+  const r=await j('/api/dhcp',mk(b));document.getElementById('dhcp_msg').textContent=r.reloaded?' ✓ reload OK':' ⚠ saved, reload failed';}
 
 // ---- system ----
-async function loadLtsp(){const c=await j('/api/ltsp-config');['user','password','ssd_dev','ssd_mount','image_cache','user_sudo'].forEach(k=>{const e=document.getElementById('ltsp_'+k);if(e)e.value=c[k]||'';});}
-async function applyLtsp(){const b={};['user','password','ssd_dev','ssd_mount','image_cache','user_sudo'].forEach(k=>b[k]=document.getElementById('ltsp_'+k).value);
-  const m=document.getElementById('ltsp_cfg_msg');m.textContent=' đang áp dụng (ltsp initrd)...';
-  try{await j('/api/ltsp-config',mk(b));m.textContent=' ✓ xong — reboot client để áp';}catch(e){m.textContent=' ✗ '+e.message;}}
-async function setTimeout_(){await j('/api/config/timeout',mk({seconds:+document.getElementById('timeout').value}));document.getElementById('to_msg').textContent=' ✓ đã lưu';}
-async function setZramReserve(){await j('/api/config/zram-reserve',mk({mb:+document.getElementById('zram_reserve').value}));document.getElementById('zr_msg').textContent=' ✓ đã lưu';}
+async function loadCafe(){const c=await j('/api/cafe-user');['user','password'].forEach(k=>{const e=document.getElementById('cafe_'+k);if(e)e.value=c[k]||'';});}
+async function saveCafe(){const m=document.getElementById('cafe_msg');
+  try{await j('/api/cafe-user',mk({user:v('cafe_user'),password:v('cafe_password')}));m.textContent=' ✓ saved';}catch(e){m.textContent=' ✗ '+e.message;}}
+async function setTimeout_(){await j('/api/config/timeout',mk({seconds:+document.getElementById('timeout').value}));document.getElementById('to_msg').textContent=' ✓ saved';}
+async function setZramReserve(){await j('/api/config/zram-reserve',mk({mb:+document.getElementById('zram_reserve').value}));document.getElementById('zr_msg').textContent=' ✓ saved';}
+
+// ---- server liveness (SSE /api/events: "ping" on connect + every 5 s) ----
+// Green on ping; red on connection error or no ping for 12 s (e.g. server powered off, half-open link).
+// EventSource reconnects by itself → green again on the next ping.
+let lastPing=0;
+function setServer(up){const d=document.getElementById('srvdot');
+  d.classList.toggle('up',up);d.classList.toggle('down',!up);d.title=up?'server online':'server offline';}
+const srvEvents=new EventSource('/api/events');
+srvEvents.addEventListener('ping',()=>{lastPing=Date.now();setServer(true);});
+srvEvents.onerror=()=>setServer(false);
+setInterval(()=>{if(lastPing&&Date.now()-lastPing>12000)setServer(false);},3000);
 
 // ---- helpers + init ----
 function v(id){return document.getElementById(id).value.trim()}
 function mk(body){return {method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body)}}
-// init: chỉ nạp tab đang mở (machines). Poll status chỉ khi đang ở tab máy trạm.
-showPage('machines');
+// init: only load the page in the URL. Poll status only while on the machines page.
+if(location.pathname!=='/'+pageFromPath())history.replaceState(null,'','/'+pageFromPath());
+showPage(pageFromPath());
 setInterval(()=>{if(curPage==='machines')loadStatus();},15000);
 </script>

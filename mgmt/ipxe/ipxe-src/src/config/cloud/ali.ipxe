@@ -1,0 +1,26 @@
+#!ipxe
+
+echo Alibaba Cloud ECS - iPXE boot via metadata
+echo CPU: ${cpuvendor} ${cpumodel}
+ifstat ||
+dhcp ||
+route ||
+
+# Fetch session token
+params --method PUT
+param --header X-aliyun-ecs-metadata-token-ttl-seconds 600
+imgset authtoken http://100.100.100.200/latest/api/token##params ||
+
+# Fetch user-data
+params
+isset ${authtoken} && param --header X-aliyun-ecs-metadata-token ${authtoken} ||
+kernel http://100.100.100.200/latest/user-data##params ||
+imgstat ||
+
+# Boot from user-data
+boot -ar ||
+
+# Show diagnostic information on failure
+imgstat ||
+ifstat ||
+exit

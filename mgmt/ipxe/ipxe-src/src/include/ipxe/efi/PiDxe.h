@@ -1,0 +1,18 @@
+/** @file
+
+  Root include file for Mde Package DXE_CORE, DXE, RUNTIME, SMM, SAL type modules.
+
+Copyright (c) 2006 - 2018, Intel Corporation. All rights reserved.<BR>
+SPDX-License-Identifier: BSD-2-Clause-Patent
+
+**/
+
+#pragma once
+
+FILE_LICENCE ( BSD2_PATENT );
+FILE_SECBOOT ( PERMITTED );
+
+#include <ipxe/efi/Uefi/UefiBaseType.h>
+#include <ipxe/efi/Uefi/UefiSpec.h>
+
+#include <ipxe/efi/Pi/PiDxeCis.h>

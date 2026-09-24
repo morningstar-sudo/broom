@@ -1,1 +1,0 @@
-cargo:rustc-env=MIME_TYPES_GENERATED_PATH=/mnt/d/Windows/Desktop/code/broom/mgmt/$HOME/broom-target/release/build/mime_guess-5cbd65945317fe1a/out/mime_types_generated.rs

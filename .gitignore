@@ -1,0 +1,34 @@
+# --- build output ---
+# Cargo build cache (a mistyped $HOME once created this directory)
+mgmt/$HOME/
+# cargo target dir if cargo is run directly inside the repo (build.sh uses ~/broom-target)
+mgmt/target/
+# iPXE build output (also covered by ipxe-src/src/.gitignore)
+mgmt/ipxe/ipxe-src/src/bin*/
+
+# --- local runtime data ---
+# Local DB + images during development
+mgmt/bootrom.db*
+mgmt/images/
+# Disk images / VM exports never belong in git
+*.vmdk
+*.vhdx
+*.img
+*.iso
+*.raw
+*.log
+*.tmp
+.env
+
+# --- vendored iPXE: upstream repo tooling, unused here ---
+mgmt/ipxe/ipxe-src/.github/
+mgmt/ipxe/ipxe-src/.claude/
+
+# --- editors / OS ---
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store
+Thumbs.db
+desktop.ini

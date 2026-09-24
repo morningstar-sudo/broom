@@ -1,0 +1,15 @@
+#ifndef _BITS_TIME_H
+#define _BITS_TIME_H
+
+/** @file
+ *
+ * x86-specific time API implementations
+ *
+ */
+
+FILE_LICENCE ( GPL2_OR_LATER_OR_UBDL );
+FILE_SECBOOT ( PERMITTED );
+
+#include <ipxe/rtc_time.h>
+
+#endif /* _BITS_TIME_H */
