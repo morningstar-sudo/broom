@@ -1,0 +1,731 @@
+// dhcp.rs — built-in DHCP server (replaces dnsmasq): full DHCP or proxyDHCP, for UEFI PXE + iPXE.
+// Full: hands out IPs (Machines-table binding > previous lease > first free in range) + boot file.
+// Proxy: another router hands out IPs; we only answer PXE/iPXE clients with boot info (port 67 offer
+// + PXE boot server on 4011), like dnsmasq pxe-service / pixiecore. No DNS (dnsmasq ran with port=0).
+// Every packet reads config/bindings/leases from the DB → Machines/DHCP edits apply immediately;
+// start() rebinds sockets only for interface/mode changes. Leases live in the `leases` table.
+use std::collections::HashMap;
+use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
+
+use crate::db::{Db, Lease};
+use crate::SharedState;
+
+const MAGIC: [u8; 4] = [99, 130, 83, 99];
+const DISCOVER: u8 = 1;
+const OFFER: u8 = 2;
+const REQUEST: u8 = 3;
+const DECLINE: u8 = 4;
+const ACK: u8 = 5;
+const NAK: u8 = 6;
+const RELEASE: u8 = 7;
+const INFORM: u8 = 8;
+/// An OFFER reserves its IP this long; the ACK extends it to the full lease.
+const OFFER_HOLD_S: u64 = 60;
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Packet {
+    pub op: u8,
+    pub htype: u8,
+    pub hlen: u8,
+    pub xid: [u8; 4],
+    pub flags: [u8; 2],
+    pub ciaddr: Ipv4Addr,
+    pub yiaddr: Ipv4Addr,
+    pub siaddr: Ipv4Addr,
+    pub giaddr: Ipv4Addr,
+    pub chaddr: [u8; 16],
+    pub file: String,
+    pub opts: Vec<(u8, Vec<u8>)>,
+}
+
+impl Packet {
+    pub fn opt(&self, code: u8) -> Option<&[u8]> {
+        self.opts.iter().find(|(c, _)| *c == code).map(|(_, v)| v.as_slice())
+    }
+    fn opt_ip(&self, code: u8) -> Option<Ipv4Addr> {
+        self.opt(code).filter(|v| v.len() == 4).map(|v| Ipv4Addr::new(v[0], v[1], v[2], v[3]))
+    }
+    fn push(&mut self, code: u8, v: impl Into<Vec<u8>>) {
+        let mut v = v.into();
+        v.truncate(255);
+        self.opts.push((code, v));
+    }
+}
+
+pub fn parse(b: &[u8]) -> Option<Packet> {
+    if b.len() < 240 || b[236..240] != MAGIC {
+        return None;
+    }
+    let ip = |o: usize| Ipv4Addr::new(b[o], b[o + 1], b[o + 2], b[o + 3]);
+    let mut opts = Vec::new();
+    let mut i = 240;
+    while i < b.len() {
+        match b[i] {
+            0 => i += 1,
+            255 => break,
+            code => {
+                let len = *b.get(i + 1)? as usize;
+                opts.push((code, b.get(i + 2..i + 2 + len)?.to_vec()));
+                i += 2 + len;
+            }
+        }
+    }
+    let file_end = b[108..236].iter().position(|&c| c == 0).unwrap_or(128);
+    Some(Packet {
+        op: b[0],
+        htype: b[1],
+        hlen: b[2],
+        xid: b[4..8].try_into().ok()?,
+        flags: b[10..12].try_into().ok()?,
+        ciaddr: ip(12),
+        yiaddr: ip(16),
+        siaddr: ip(20),
+        giaddr: ip(24),
+        chaddr: b[28..44].try_into().ok()?,
+        file: String::from_utf8_lossy(&b[108..108 + file_end]).into_owned(),
+        opts,
+    })
+}
+
+pub fn build(p: &Packet) -> Vec<u8> {
+    let mut b = vec![0u8; 236];
+    b[0] = p.op;
+    b[1] = p.htype;
+    b[2] = p.hlen;
+    b[4..8].copy_from_slice(&p.xid);
+    b[10..12].copy_from_slice(&p.flags);
+    for (o, ip) in [(12, p.ciaddr), (16, p.yiaddr), (20, p.siaddr), (24, p.giaddr)] {
+        b[o..o + 4].copy_from_slice(&ip.octets());
+    }
+    b[28..44].copy_from_slice(&p.chaddr);
+    let f = p.file.as_bytes();
+    let n = f.len().min(127);
+    b[108..108 + n].copy_from_slice(&f[..n]);
+    b.extend_from_slice(&MAGIC);
+    for (c, v) in &p.opts {
+        b.push(*c);
+        b.push(v.len() as u8);
+        b.extend_from_slice(v);
+    }
+    b.push(255);
+    if b.len() < 300 {
+        b.resize(300, 0); // BOOTP minimum size
+    }
+    b
+}
+
+/// "aa:bb:cc:dd:ee:ff" (same form as the Machines table and iPXE ${net0/mac}).
+fn mac_str(chaddr: &[u8; 16]) -> String {
+    chaddr[..6].iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(":")
+}
+
+pub struct Cfg {
+    pub full: bool,
+    pub iface: String,
+    pub server: Ipv4Addr,
+    pub start: Ipv4Addr,
+    pub end: Ipv4Addr,
+    pub netmask: Ipv4Addr,
+    pub gateway: Option<Ipv4Addr>,
+    pub dns: Vec<Ipv4Addr>,
+    pub lease_s: u32,
+}
+
+/// "12h" / "30m" / "1d" / "3600" → seconds (default 12h).
+fn lease_secs(s: &str) -> u32 {
+    let s = s.trim();
+    let (n, mul) = match s.chars().last() {
+        Some('h') => (&s[..s.len() - 1], 3600),
+        Some('m') => (&s[..s.len() - 1], 60),
+        Some('d') => (&s[..s.len() - 1], 86400),
+        _ => (s, 1),
+    };
+    n.parse::<u32>().ok().filter(|&v| v > 0).map_or(43200, |v| v.saturating_mul(mul))
+}
+
+impl Cfg {
+    pub fn load(db: &dyn Db) -> Result<Cfg, String> {
+        let g = |k: &str, d: &str| db.get_config(k, d);
+        let ip = |k: &str| g(k, "").trim().parse::<Ipv4Addr>().ok();
+        let server = ip("dhcp_server_ip").ok_or("dhcp_server_ip is not set — run setup (start as root)")?;
+        // Range default: .100–.200 of the subnet (same as the old dnsmasq config).
+        let base = ip("dhcp_subnet").unwrap_or(server).octets();
+        let start = ip("dhcp_range_start").unwrap_or(Ipv4Addr::new(base[0], base[1], base[2], 100));
+        let end = ip("dhcp_range_end").unwrap_or(Ipv4Addr::new(base[0], base[1], base[2], 200));
+        Ok(Cfg {
+            full: g("dhcp_mode", "proxy") == "full",
+            iface: g("dhcp_iface", ""),
+            server,
+            start,
+            end,
+            netmask: ip("dhcp_netmask").unwrap_or(Ipv4Addr::new(255, 255, 255, 0)),
+            gateway: ip("dhcp_gateway"),
+            dns: g("dhcp_dns", "").split([',', ' ']).filter_map(|s| s.trim().parse().ok()).collect(),
+            lease_s: lease_secs(&g("dhcp_lease", "12h")),
+        })
+    }
+}
+
+/// Snapshot of what IP allocation needs: static bindings + active full-mode leases.
+pub struct Store {
+    /// mac → (ip, hostname) from the Machines table.
+    pub bindings: HashMap<String, (Ipv4Addr, Option<String>)>,
+    /// mac → (ip, expires unix s), full-mode leases only.
+    pub leases: HashMap<String, (Ipv4Addr, u64)>,
+    pub now: u64,
+}
+
+impl Store {
+    pub fn load(db: &dyn Db, now: u64) -> Store {
+        let bindings = db
+            .machines()
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|m| {
+                let ip = m.ip?.trim().parse().ok()?;
+                Some((m.mac.to_lowercase().replace('-', ":"), (ip, m.hostname)))
+            })
+            .collect();
+        let leases = db
+            .leases()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|l| l.source == "full")
+            .filter_map(|l| Some((l.mac, (l.ip?.parse().ok()?, l.expires.max(0) as u64))))
+            .collect();
+        Store { bindings, leases, now }
+    }
+}
+
+#[derive(Debug, PartialEq)]
+pub enum Dest {
+    Broadcast,
+    Unicast(SocketAddrV4),
+}
+
+#[derive(Debug, PartialEq)]
+pub enum LeaseOp {
+    None,
+    Set { mac: String, ip: Option<Ipv4Addr>, hostname: Option<String>, expires: u64, source: &'static str },
+    Remove(String),
+}
+
+pub struct Outcome {
+    pub reply: Option<(Packet, Dest)>,
+    pub lease: LeaseOp,
+    pub log: String,
+    /// Log `log` as a warning (refused/declined/pool exhausted).
+    pub warn: bool,
+}
+
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Kind {
+    Ipxe,
+    /// UEFI PXE firmware, x64 (client arch 7/9).
+    PxeEfi,
+    /// PXE firmware of another arch (e.g. legacy BIOS) — no boot file for it.
+    PxeOther,
+    Plain,
+}
+
+impl Kind {
+    fn label(self) -> &'static str {
+        match self {
+            Kind::Ipxe => "iPXE",
+            Kind::PxeEfi => "UEFI PXE",
+            Kind::PxeOther => "PXE, not UEFI x64",
+            Kind::Plain => "DHCP",
+        }
+    }
+}
+
+/// Hostname from the Machines table, else the mac — how clients are named in the log.
+fn who(mac: &str, st: &Store) -> String {
+    st.bindings.get(mac).and_then(|(_, h)| h.clone()).unwrap_or_else(|| mac.to_string())
+}
+
+fn kind(req: &Packet) -> Kind {
+    let ipxe = req.opt(175).is_some() || req.opt(77).is_some_and(|v| v.windows(4).any(|w| w == b"iPXE"));
+    if ipxe {
+        return Kind::Ipxe;
+    }
+    let pxe = req.opt(60).is_some_and(|v| v.starts_with(b"PXEClient"));
+    let arch = req.opt(93).filter(|v| v.len() >= 2).map(|v| u16::from_be_bytes([v[0], v[1]]));
+    match (pxe, arch) {
+        (true, Some(7 | 9)) => Kind::PxeEfi,
+        (true, _) => Kind::PxeOther,
+        _ => Kind::Plain,
+    }
+}
+
+/// Boot file for the client: iPXE → our dynamic menu URL; UEFI PXE firmware → snponly.efi over TFTP.
+fn boot_file(k: Kind, cfg: &Cfg) -> Option<String> {
+    match k {
+        Kind::Ipxe => Some(format!("http://{}/boot.ipxe?mac=${{net0/mac}}&ip=${{net0/ip}}", cfg.server)),
+        Kind::PxeEfi => Some("snponly.efi".into()),
+        _ => None,
+    }
+}
+
+fn reply(req: &Packet, mt: u8, cfg: &Cfg) -> Packet {
+    let mut p = Packet {
+        op: 2,
+        htype: req.htype,
+        hlen: req.hlen,
+        xid: req.xid,
+        flags: req.flags,
+        ciaddr: req.ciaddr,
+        yiaddr: Ipv4Addr::UNSPECIFIED,
+        siaddr: cfg.server,
+        giaddr: req.giaddr,
+        chaddr: req.chaddr,
+        file: String::new(),
+        opts: Vec::new(),
+    };
+    p.push(53, [mt]);
+    p.push(54, cfg.server.octets());
+    p
+}
+
+/// Proxy offer/ack: no IP, PXEClient + PXE discovery control 8 (download the boot file named here
+/// directly, no boot-server discovery) + client GUID echoed.
+fn proxy_reply(req: &Packet, mt: u8, file: String, cfg: &Cfg) -> Packet {
+    let mut p = reply(req, mt, cfg);
+    p.file = file;
+    p.push(60, *b"PXEClient");
+    p.push(43, [6, 1, 8, 255]);
+    if let Some(guid) = req.opt(97) {
+        p.push(97, guid.to_vec());
+    }
+    p
+}
+
+fn in_range(ip: Ipv4Addr, cfg: &Cfg) -> bool {
+    (u32::from(cfg.start)..=u32::from(cfg.end)).contains(&u32::from(ip))
+}
+
+/// May `mac` use `ip`? A bound machine only gets its binding; others get free IPs in the range.
+fn allowed(mac: &str, ip: Ipv4Addr, cfg: &Cfg, st: &Store) -> bool {
+    if let Some((b, _)) = st.bindings.get(mac) {
+        return *b == ip;
+    }
+    in_range(ip, cfg)
+        && ip != cfg.server
+        && Some(ip) != cfg.gateway
+        && !st.bindings.values().any(|(b, _)| *b == ip)
+        && !st.leases.iter().any(|(m, (l, exp))| m != mac && *l == ip && *exp > st.now)
+}
+
+fn pick(mac: &str, cfg: &Cfg, st: &Store) -> Option<Ipv4Addr> {
+    if let Some((b, _)) = st.bindings.get(mac) {
+        return Some(*b);
+    }
+    if let Some((l, _)) = st.leases.get(mac) {
+        if allowed(mac, *l, cfg, st) {
+            return Some(*l);
+        }
+    }
+    (u32::from(cfg.start)..=u32::from(cfg.end)).map(Ipv4Addr::from).find(|&ip| allowed(mac, ip, cfg, st))
+}
+
+/// Full-mode OFFER/ACK body: IP + network options + boot file.
+fn full_reply(req: &Packet, mt: u8, ip: Ipv4Addr, mac: &str, k: Kind, cfg: &Cfg, st: &Store) -> Packet {
+    let mut p = reply(req, mt, cfg);
+    p.yiaddr = ip;
+    p.push(51, cfg.lease_s.to_be_bytes());
+    p.push(58, (cfg.lease_s / 2).to_be_bytes());
+    p.push(59, (cfg.lease_s / 8 * 7).to_be_bytes());
+    p.push(1, cfg.netmask.octets());
+    if let Some(gw) = cfg.gateway {
+        p.push(3, gw.octets());
+    }
+    if !cfg.dns.is_empty() {
+        p.push(6, cfg.dns.iter().flat_map(|d| d.octets()).collect::<Vec<_>>());
+    }
+    if let Some((_, Some(h))) = st.bindings.get(mac) {
+        p.push(12, h.as_bytes().to_vec());
+    }
+    if let Some(f) = boot_file(k, cfg) {
+        p.file = f;
+    }
+    if k == Kind::Ipxe {
+        // iPXE option 175.176 no-pxedhcp = 1: our offer already carries the boot file → iPXE requests at once
+        // instead of waiting DHCP_DISC_PROXY_TIMEOUT_SEC (2 s) for ProxyDHCP offers.
+        p.push(175, [0xb0, 1, 1]);
+    }
+    p
+}
+
+/// Decide the answer to one request. Pure: no I/O, so the whole protocol logic is unit-tested.
+/// `port` = local port it arrived on (67, or 4011 = PXE boot server in proxy mode).
+pub fn handle(req: &Packet, from: SocketAddrV4, port: u16, cfg: &Cfg, st: &Store) -> Outcome {
+    let mut out = Outcome { reply: None, lease: LeaseOp::None, log: String::new(), warn: false };
+    let Some(mt) = req.opt(53).and_then(|v| v.first().copied()) else {
+        return out;
+    };
+    if req.op != 1 || req.htype != 1 || req.hlen != 6 {
+        return out;
+    }
+    let mac = mac_str(&req.chaddr);
+    let k = kind(req);
+    let want = req.opt_ip(50).or((!req.ciaddr.is_unspecified()).then_some(req.ciaddr));
+    let host = req.opt(12).map(|h| String::from_utf8_lossy(h).into_owned());
+
+    // PXE boot server (proxy mode): firmware/iPXE unicast a REQUEST here after the proxy offer.
+    if port == 4011 {
+        if let (REQUEST | INFORM, Some(f)) = (mt, boot_file(k, cfg)) {
+            out.log = format!("client {mac} ({}) PXE boot server -> {f}", k.label());
+            out.reply = Some((proxy_reply(req, ACK, f, cfg), Dest::Unicast(from)));
+        }
+        return out;
+    }
+
+    if !cfg.full {
+        if k == Kind::Plain {
+            return out; // not a PXE client: the router's business
+        }
+        // Remember PXE clients seen on the LAN (Machines page), with the IP they ask the router for.
+        out.lease = LeaseOp::Set {
+            mac: mac.clone(),
+            ip: want,
+            hostname: host,
+            expires: st.now + cfg.lease_s as u64,
+            source: "proxy",
+        };
+        if let (DISCOVER, Some(f)) = (mt, boot_file(k, cfg)) {
+            out.log = format!("client {mac} ({}) proxyDHCP offer -> {f}", k.label());
+            out.reply = Some((proxy_reply(req, OFFER, f, cfg), Dest::Broadcast));
+        }
+        return out;
+    }
+
+    let set = |ip: Ipv4Addr, secs: u64| LeaseOp::Set {
+        mac: mac.clone(),
+        ip: Some(ip),
+        hostname: st.bindings.get(&mac).and_then(|(_, h)| h.clone()).or_else(|| host.clone()),
+        expires: st.now + secs,
+        source: "full",
+    };
+    match mt {
+        DISCOVER => match pick(&mac, cfg, st) {
+            Some(ip) => {
+                out.log = format!("client {} ({}) DHCP offer {ip} - mac {mac}", who(&mac, st), k.label());
+                out.reply = Some((full_reply(req, OFFER, ip, &mac, k, cfg, st), Dest::Broadcast));
+                out.lease = set(ip, OFFER_HOLD_S);
+            }
+            None => {
+                out.log = format!("client {mac}: no free IP in {}-{}", cfg.start, cfg.end);
+                out.warn = true;
+            }
+        },
+        REQUEST => {
+            if req.opt_ip(54).is_some_and(|s| s != cfg.server) {
+                return out; // client took another server's offer
+            }
+            match want {
+                Some(ip) if allowed(&mac, ip, cfg, st) => {
+                    out.log = format!("client {} ({}) got IP {ip} - mac {mac}", who(&mac, st), k.label());
+                    let dest = if req.ciaddr.is_unspecified() {
+                        Dest::Broadcast
+                    } else {
+                        Dest::Unicast(SocketAddrV4::new(req.ciaddr, 68))
+                    };
+                    out.reply = Some((full_reply(req, ACK, ip, &mac, k, cfg, st), dest));
+                    out.lease = set(ip, cfg.lease_s as u64);
+                }
+                Some(ip) => {
+                    out.log = format!("client {mac} asked for {ip}: refused (NAK)");
+                    out.warn = true;
+                    out.reply = Some((reply(req, NAK, cfg), Dest::Broadcast));
+                }
+                None => {}
+            }
+        }
+        DECLINE => {
+            if let Some(ip) = req.opt_ip(50) {
+                out.log = format!("client {mac} declined {ip} (address in use on the LAN): held for one lease");
+                out.warn = true;
+                out.lease = LeaseOp::Set {
+                    mac: format!("declined-{ip}"),
+                    ip: Some(ip),
+                    hostname: None,
+                    expires: st.now + cfg.lease_s as u64,
+                    source: "full",
+                };
+            }
+        }
+        RELEASE => {
+            out.log = format!("client {} released its IP - mac {mac}", who(&mac, st));
+            out.lease = LeaseOp::Remove(mac.clone());
+        }
+        INFORM if !req.ciaddr.is_unspecified() => {
+            let mut p = full_reply(req, ACK, Ipv4Addr::UNSPECIFIED, &mac, k, cfg, st);
+            p.opts.retain(|(c, _)| ![51, 58, 59].contains(c)); // INFORM: no lease
+            out.reply = Some((p, Dest::Unicast(SocketAddrV4::new(req.ciaddr, 68))));
+        }
+        _ => {}
+    }
+    out
+}
+
+fn apply_lease(db: &dyn Db, op: LeaseOp) {
+    let r = match op {
+        LeaseOp::None => return,
+        LeaseOp::Set { mac, ip, hostname, expires, source } => db.put_lease(&Lease {
+            mac,
+            ip: ip.map(|i| i.to_string()),
+            hostname,
+            expires: expires as i64,
+            source: source.into(),
+        }),
+        LeaseOp::Remove(mac) => db.delete_lease(&mac),
+    };
+    if let Err(e) = r {
+        tracing::error!("dhcp: lease write failed: {e}");
+    }
+}
+
+fn now() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs())
+}
+
+/// UDP socket bound to `addr`, optionally pinned to one interface (SO_BINDTODEVICE) and allowed to broadcast.
+pub(crate) fn udp(addr: SocketAddrV4, iface: &str, broadcast: bool) -> std::io::Result<tokio::net::UdpSocket> {
+    use socket2::{Domain, Protocol, Socket, Type};
+    let s = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
+    if broadcast {
+        s.set_broadcast(true)?;
+    }
+    if !iface.is_empty() {
+        s.bind_device(Some(iface.as_bytes()))?;
+    }
+    s.bind(&addr.into())?;
+    s.set_nonblocking(true)?;
+    tokio::net::UdpSocket::from_std(s.into())
+}
+
+async fn serve(sock: tokio::net::UdpSocket, port: u16, st: SharedState) {
+    let mut buf = [0u8; 1500];
+    loop {
+        let (n, from) = match sock.recv_from(&mut buf).await {
+            Ok(x) => x,
+            Err(e) => {
+                tracing::warn!("dhcp :{port} recv: {e}");
+                continue;
+            }
+        };
+        let (SocketAddr::V4(from), Some(req)) = (from, parse(&buf[..n])) else {
+            continue;
+        };
+        let Ok(cfg) = Cfg::load(&*st.db) else { continue };
+        let out = handle(&req, from, port, &cfg, &Store::load(&*st.db, now()));
+        if !out.log.is_empty() {
+            if out.warn {
+                tracing::warn!("{}", out.log);
+            } else {
+                tracing::info!("{}", out.log);
+            }
+        }
+        apply_lease(&*st.db, out.lease);
+        if let Some((p, dest)) = out.reply {
+            let to = match dest {
+                Dest::Broadcast => SocketAddrV4::new(Ipv4Addr::BROADCAST, 68),
+                Dest::Unicast(a) => a,
+            };
+            if let Err(e) = sock.send_to(&build(&p), to).await {
+                tracing::warn!("dhcp send to {to}: {e}");
+            }
+        }
+    }
+}
+
+/// (Re)start the network boot services: DHCP :67 (+ :4011 in proxy mode) and TFTP :69.
+/// Stops the previous listeners first (config change from the web). Returns a status line.
+pub async fn start(st: &SharedState) -> Result<String, String> {
+    let old: Vec<_> = std::mem::take(&mut *st.net.lock().unwrap());
+    for h in old {
+        h.abort();
+        let _ = h.await;
+    }
+    let cfg = Cfg::load(&*st.db)?;
+    let bind = |port: u16, bcast: bool| {
+        udp(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, port), &cfg.iface, bcast).map_err(|e| {
+            let hint = if e.kind() == std::io::ErrorKind::AddrInUse { " — another DHCP/TFTP server is running" } else { "" };
+            format!("bind udp :{port} on '{}': {e}{hint}", cfg.iface)
+        })
+    };
+    // Bind everything first: a failure must not leave half the listeners running.
+    let dhcp = bind(67, true)?;
+    let boot_server = if cfg.full { None } else { Some(bind(4011, true)?) };
+    let tftp = bind(69, false)?;
+    let mut handles = vec![
+        tokio::spawn(serve(dhcp, 67, st.clone())),
+        tokio::spawn(crate::tftp::serve(tftp, cfg.server, cfg.iface.clone())),
+    ];
+    if let Some(s) = boot_server {
+        handles.push(tokio::spawn(serve(s, 4011, st.clone())));
+    }
+    st.net.lock().unwrap().extend(handles);
+    Ok(format!(
+        "DHCP {} on {} (server {}), TFTP :69",
+        if cfg.full { format!("full {}-{}", cfg.start, cfg.end) } else { "proxy".into() },
+        if cfg.iface.is_empty() { "all interfaces" } else { &cfg.iface },
+        cfg.server
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const MAC: [u8; 6] = [0x34, 0x5a, 0x60, 0x7b, 0x2b, 0x1d];
+
+    fn cfg(full: bool) -> Cfg {
+        Cfg {
+            full,
+            iface: String::new(),
+            server: Ipv4Addr::new(10, 0, 0, 12),
+            start: Ipv4Addr::new(10, 0, 0, 100),
+            end: Ipv4Addr::new(10, 0, 0, 102),
+            netmask: Ipv4Addr::new(255, 255, 255, 0),
+            gateway: Some(Ipv4Addr::new(10, 0, 0, 1)),
+            dns: vec![Ipv4Addr::new(1, 1, 1, 1)],
+            lease_s: 3600,
+        }
+    }
+
+    fn store() -> Store {
+        Store { bindings: HashMap::new(), leases: HashMap::new(), now: 1000 }
+    }
+
+    /// UEFI x64 PXE firmware request (option 60 PXEClient, 93 = 7, 97 GUID).
+    fn req(mt: u8, extra: &[(u8, &[u8])]) -> Packet {
+        let mut chaddr = [0u8; 16];
+        chaddr[..6].copy_from_slice(&MAC);
+        let mut p = Packet {
+            op: 1,
+            htype: 1,
+            hlen: 6,
+            xid: [1, 2, 3, 4],
+            flags: [0x80, 0],
+            ciaddr: Ipv4Addr::UNSPECIFIED,
+            yiaddr: Ipv4Addr::UNSPECIFIED,
+            siaddr: Ipv4Addr::UNSPECIFIED,
+            giaddr: Ipv4Addr::UNSPECIFIED,
+            chaddr,
+            file: String::new(),
+            opts: vec![],
+        };
+        p.push(53, [mt]);
+        p.push(60, *b"PXEClient:Arch:00007:UNDI:003016");
+        p.push(93, [0, 7]);
+        p.push(97, [0; 17]);
+        for (c, v) in extra {
+            p.push(*c, v.to_vec());
+        }
+        p
+    }
+
+    const FROM: SocketAddrV4 = SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 68);
+    const MACS: &str = "34:5a:60:7b:2b:1d";
+
+    #[test]
+    fn roundtrip() {
+        let mut p = req(DISCOVER, &[(12, b"pc01")]);
+        p.file = "snponly.efi".into();
+        let b = build(&p);
+        assert!(b.len() >= 300);
+        assert_eq!(parse(&b).unwrap(), p);
+        assert!(parse(&b[..239]).is_none());
+    }
+
+    #[test]
+    fn full_offer_first_free_ip_and_pxe_bootfile() {
+        let out = handle(&req(DISCOVER, &[]), FROM, 67, &cfg(true), &store());
+        let (p, dest) = out.reply.unwrap();
+        assert_eq!(dest, Dest::Broadcast);
+        assert_eq!(p.opt(53), Some(&[OFFER][..]));
+        assert_eq!(p.yiaddr, Ipv4Addr::new(10, 0, 0, 100));
+        assert_eq!((p.siaddr, p.file.as_str()), (Ipv4Addr::new(10, 0, 0, 12), "snponly.efi"));
+        assert_eq!(p.opt(3), Some(&[10, 0, 0, 1][..]));
+        assert_eq!(p.opt(51), Some(&3600u32.to_be_bytes()[..]));
+        assert!(matches!(out.lease, LeaseOp::Set { expires: 1060, source: "full", .. }));
+    }
+
+    #[test]
+    fn ipxe_gets_menu_url() {
+        let out = handle(&req(DISCOVER, &[(175, &[1])]), FROM, 67, &cfg(true), &store());
+        let p = out.reply.unwrap().0;
+        assert_eq!(p.file, "http://10.0.0.12/boot.ipxe?mac=${net0/mac}&ip=${net0/ip}");
+        assert_eq!(p.opt(175), Some(&[0xb0, 1, 1][..])); // no-pxedhcp: don't wait for ProxyDHCP
+        let plain = handle(&req(DISCOVER, &[]), FROM, 67, &cfg(true), &store()).reply.unwrap().0;
+        assert_eq!(plain.opt(175), None);
+    }
+
+    #[test]
+    fn binding_wins_and_sends_hostname() {
+        let mut st = store();
+        st.bindings.insert(MACS.into(), (Ipv4Addr::new(10, 0, 0, 50), Some("PC01".into())));
+        let (p, _) = handle(&req(DISCOVER, &[]), FROM, 67, &cfg(true), &st).reply.unwrap();
+        assert_eq!(p.yiaddr, Ipv4Addr::new(10, 0, 0, 50));
+        assert_eq!(p.opt(12), Some(&b"PC01"[..]));
+    }
+
+    #[test]
+    fn skips_ips_in_use() {
+        let mut st = store();
+        st.leases.insert("aa:aa:aa:aa:aa:aa".into(), (Ipv4Addr::new(10, 0, 0, 100), 2000)); // active
+        st.bindings.insert("bb:bb:bb:bb:bb:bb".into(), (Ipv4Addr::new(10, 0, 0, 101), None));
+        let (p, _) = handle(&req(DISCOVER, &[]), FROM, 67, &cfg(true), &st).reply.unwrap();
+        assert_eq!(p.yiaddr, Ipv4Addr::new(10, 0, 0, 102));
+        // Expired lease of another machine → its IP is free again.
+        st.leases.insert("aa:aa:aa:aa:aa:aa".into(), (Ipv4Addr::new(10, 0, 0, 100), 500));
+        let (p, _) = handle(&req(DISCOVER, &[]), FROM, 67, &cfg(true), &st).reply.unwrap();
+        assert_eq!(p.yiaddr, Ipv4Addr::new(10, 0, 0, 100));
+        // Pool full → no offer.
+        let mut st = store();
+        for (i, m) in ["a", "b", "c"].iter().enumerate() {
+            st.leases.insert(m.to_string(), (Ipv4Addr::new(10, 0, 0, 100 + i as u8), 2000));
+        }
+        assert!(handle(&req(DISCOVER, &[]), FROM, 67, &cfg(true), &st).reply.is_none());
+    }
+
+    #[test]
+    fn request_ack_nak_and_other_server() {
+        let ok = handle(&req(REQUEST, &[(50, &[10, 0, 0, 101])]), FROM, 67, &cfg(true), &store());
+        let (p, _) = ok.reply.unwrap();
+        assert_eq!((p.opt(53), p.yiaddr), (Some(&[ACK][..]), Ipv4Addr::new(10, 0, 0, 101)));
+        assert!(matches!(ok.lease, LeaseOp::Set { expires: 4600, .. }));
+        let bad = handle(&req(REQUEST, &[(50, &[192, 168, 1, 5])]), FROM, 67, &cfg(true), &store());
+        assert_eq!(bad.reply.unwrap().0.opt(53), Some(&[NAK][..]));
+        let other = handle(&req(REQUEST, &[(50, &[10, 0, 0, 101]), (54, &[10, 0, 0, 9])]), FROM, 67, &cfg(true), &store());
+        assert!(other.reply.is_none());
+    }
+
+    #[test]
+    fn proxy_offer_and_boot_server() {
+        let out = handle(&req(DISCOVER, &[]), FROM, 67, &cfg(false), &store());
+        let (p, dest) = out.reply.unwrap();
+        assert_eq!((dest, p.yiaddr), (Dest::Broadcast, Ipv4Addr::UNSPECIFIED));
+        assert_eq!(p.opt(60), Some(&b"PXEClient"[..]));
+        assert_eq!(p.opt(43), Some(&[6, 1, 8, 255][..]));
+        assert_eq!(p.opt(97), Some(&[0; 17][..]));
+        assert_eq!(p.file, "snponly.efi");
+        assert!(matches!(out.lease, LeaseOp::Set { source: "proxy", .. }));
+        // Non-PXE clients are left to the real DHCP server.
+        let mut plain = req(DISCOVER, &[]);
+        plain.opts.retain(|(c, _)| *c == 53);
+        assert!(handle(&plain, FROM, 67, &cfg(false), &store()).reply.is_none());
+        // Boot server on 4011: ACK unicast back to the sender.
+        let from = SocketAddrV4::new(Ipv4Addr::new(10, 0, 0, 77), 68);
+        let (p, dest) = handle(&req(REQUEST, &[(175, &[1])]), from, 4011, &cfg(false), &store()).reply.unwrap();
+        assert_eq!((dest, p.opt(53)), (Dest::Unicast(from), Some(&[ACK][..])));
+        assert_eq!(p.file, "http://10.0.0.12/boot.ipxe?mac=${net0/mac}&ip=${net0/ip}");
+    }
+
+    #[test]
+    fn lease_parse() {
+        assert_eq!((lease_secs("12h"), lease_secs("30m"), lease_secs("1d"), lease_secs("600")), (43200, 1800, 86400, 600));
+        assert_eq!(lease_secs("junk"), 43200);
+    }
+}

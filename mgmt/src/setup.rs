@@ -1,13 +1,39 @@
-// setup.rs — auto-fix called from main() when preflight FAILS (no longer a separate subcommand).
-// Detect IFACE/IP/SUBNET → install packages → write snponly.efi (embedded) → seed DHCP config into the DB →
-// dnsmasq::apply (generate pxe.conf + restart). main() runs preflight again afterwards.
+// setup.rs — auto-fix called from main() when preflight FAILS or the network isn't configured yet
+// (no separate subcommand). Detect IFACE/IP/SUBNET → install packages → seed the DHCP config into
+// the DB. The DHCP/TFTP servers themselves are built in (dhcp.rs/tftp.rs) and started by main().
 //
 // Flags (read from the args of the main command, e.g. `sudo ./bootrom-mgmt --mode full`):
 //   --iface --ip --subnet --mode <proxy|full>
 //   --range-start --range-end --netmask --gateway --dns
 use std::process::Command;
 
-use crate::{db, dnsmasq, preflight};
+use crate::{db, preflight};
+
+/// Distro services that older versions installed and the binary now replaces: stop + disable them
+/// if running so their ports (67/69/4011) are free. Anything else holding a port is left alone
+/// (the bind error then names the port).
+pub fn takeover(services: &[&str]) {
+    // Probes only: a unit that isn't installed makes systemctl print "Failed to get unit file state" even
+    // with --quiet → stderr dropped.
+    let probe = |verb: &str, s: &str| {
+        Command::new("systemctl")
+            .args([verb, "--quiet", s])
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok_and(|x| x.success())
+    };
+    for s in services {
+        let (active, enabled) = (probe("is-active", s), probe("is-enabled", s));
+        if active || enabled {
+            let ok = Command::new("systemctl").args(["disable", "--now", s]).status().is_ok_and(|x| x.success());
+            if ok {
+                tracing::info!("takeover: {s} stopped + disabled (now built into bootrom-mgmt)");
+            } else {
+                tracing::warn!("takeover: failed to stop {s}");
+            }
+        }
+    }
+}
 
 fn sh(cmd: &str) -> String {
     Command::new("sh")
@@ -41,7 +67,7 @@ fn detect_subnet(iface: &str) -> Option<String> {
 }
 
 fn run_cmd(bin: &str, args: &[&str]) -> bool {
-    println!("  $ {bin} {}", args.join(" "));
+    tracing::info!("setup: running {bin} {}", args.join(" "));
     Command::new(bin)
         .args(args)
         .status()
@@ -58,7 +84,7 @@ fn flag(args: &[String], name: &str) -> Option<String> {
 }
 
 pub fn run(args: &[String]) {
-    println!("== bootrom-mgmt setup ==");
+    tracing::info!("setup: detecting network + installing packages");
 
     // 1. Network parameters (flags override detection).
     let (d_iface, d_ip) = detect_iface_ip();
@@ -69,45 +95,47 @@ pub fn run(args: &[String]) {
     let (iface, ip, subnet) = match (iface, ip, subnet) {
         (Some(i), Some(p), Some(s)) => (i, p, s),
         (i, p, s) => {
-            eprintln!("Could not detect all network parameters: IFACE={i:?} IP={p:?} SUBNET={s:?}");
-            eprintln!("Specify them by hand: setup --iface ens33 --ip 10.0.0.12 --subnet 10.0.0.0");
+            tracing::error!("setup: could not detect all network parameters: IFACE={i:?} IP={p:?} SUBNET={s:?}");
+            tracing::error!("setup: give them by hand, e.g. --iface ens33 --ip 10.0.0.12 --subnet 10.0.0.0");
             std::process::exit(1);
         }
     };
     let mode = flag(args, "--mode").unwrap_or_else(|| "proxy".into());
-    println!("IFACE={iface}  IP={ip}  SUBNET={subnet}  MODE={mode}");
+    tracing::info!("setup: iface {iface} - ip {ip} - subnet {subnet} - DHCP mode {mode}");
 
     // 2. Root.
     if !preflight::is_root() {
-        eprintln!("\nRoot required. Run: sudo bootrom-mgmt setup ...");
+        tracing::error!("setup: root required — run: sudo ./bootrom-mgmt [--mode full]");
         std::process::exit(1);
     }
 
     // 3. Install missing packages.
     let pkgs = preflight::missing_pkgs();
     if pkgs.is_empty() {
-        println!("[packages] all present");
+        tracing::info!("setup: all packages present");
     } else {
-        println!("[packages] installing: {}", pkgs.join(" "));
+        tracing::info!("setup: installing packages: {}", pkgs.join(" "));
         run_cmd("apt-get", &["update", "-y"]);
         let mut a = vec!["install", "-y"];
         a.extend(pkgs.iter().map(|s| s.as_str()));
         if !run_cmd("apt-get", &a) {
-            eprintln!("apt install failed");
+            tracing::error!("setup: apt install failed");
             std::process::exit(1);
         }
     }
 
-    // 4. iPXE (UEFI snponly.efi) embedded in the binary → /srv/tftp.
-    match crate::boot::install_ipxe() {
-        Ok(_) => println!("[tftp] snponly.efi (embedded iPXE) ready"),
-        Err(e) => eprintln!("[tftp] writing snponly.efi failed: {e}"),
+    // 4. Boot asset directory (kernels/initrds/golden files served over HTTP /tftp/...).
+    if let Err(e) = std::fs::create_dir_all(crate::tftp_dir()) {
+        tracing::error!("setup: mkdir {} failed: {e}", crate::tftp_dir().display());
     }
 
-    // 5. Seed the DHCP config into the DB (source of truth for dnsmasq.rs).
-    let conn = db::open("bootrom.db").expect("open DB");
+    // 5. Seed the DHCP config into the DB (source of truth for dhcp.rs).
+    let database = db::open(&db::url()).unwrap_or_else(|e| {
+        tracing::error!("database: {e}");
+        std::process::exit(1)
+    });
     let seed = |k: &str, v: &str| {
-        db::set_config(&conn, k, v).ok();
+        database.set_config(k, v).ok();
     };
     seed("dhcp_iface", &iface);
     seed("dhcp_server_ip", &ip);
@@ -125,14 +153,5 @@ pub fn run(args: &[String]) {
         }
     }
 
-    // 6. Generate pxe.conf + restart dnsmasq. (main() runs preflight again after return.)
-    match dnsmasq::apply(&conn) {
-        Ok(true) => println!("[dnsmasq] pxe.conf ghi + restart OK ({mode})"),
-        Ok(false) => eprintln!("[dnsmasq] pxe.conf written but restart FAILED — check journalctl -u dnsmasq"),
-        Err(e) => {
-            eprintln!("[dnsmasq] writing config failed: {e}");
-            std::process::exit(1);
-        }
-    }
-    println!("== setup done ==");
+    tracing::info!("setup done (DHCP {mode} starts with the server)");
 }

@@ -6,153 +6,26 @@
 // lower → build the local SSD writeback (reset every boot) → overlayfs → boot. Writeback goes to the SSD,
 // not RAM. Users/apps are baked into the img.
 //
-// Server side: uses **libguestfs** (virt-ls/virt-copy-out/guestfish) to read the golden — an ISOLATED
-// appliance that handles LVM/ext4/xfs itself and does NOT touch the host's LVM/mounts (the server runs LVM too;
-// mounting the partition directly hits 'LVM2_member' + risk of duplicate VGs). Extracts the newest vmlinuz+initrd to
-// /srv/tftp/broom/<name>/ + reads the root UUID (for boot_script root=UUID=).
+// Server side: reads the golden with linuxfs.rs (partitions → ext4 / LVM2 linear → ext4, read-only, no
+// mount/loop — so the server's own LVM never sees the golden's VG). Copies the newest vmlinuz+initrd to
+// <home>/tftp/broom/<name>/ + reads the root UUID (for boot_script root=UUID=).
 //
 // ⚠ The overlay/iSCSI part inside the initrd (PREP_SCRIPT) is the riskiest part — MUST be PoC'd + tuned on
 // a real server (B5).
 use std::path::Path;
 use std::process::Command;
 
-/// Run a command, return stdout (trimmed). Failure → Err(stderr).
-fn out(bin: &str, args: &[&str]) -> Result<String, String> {
-    let o = Command::new(bin)
-        .args(args)
-        .output()
-        .map_err(|e| format!("{bin}: {e}"))?;
-    if o.status.success() {
-        Ok(String::from_utf8_lossy(&o.stdout).trim().to_string())
-    } else {
-        Err(format!("{bin} {}: {}", args.join(" "), String::from_utf8_lossy(&o.stderr).trim()))
-    }
-}
-
-/// Run guestfish --ro with a script on stdin, return stdout. Failure → Err(stderr).
-fn guestfish_stdin(img: &str, script: &str) -> Result<String, String> {
-    use std::io::Write;
-    let mut child = Command::new("guestfish")
-        .args(["--ro", "-a", img])
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .map_err(|e| format!("guestfish: {e}"))?;
-    child.stdin.take().ok_or("stdin")?.write_all(script.as_bytes()).map_err(|e| e.to_string())?;
-    let o = child.wait_with_output().map_err(|e| e.to_string())?;
-    if o.status.success() {
-        Ok(String::from_utf8_lossy(&o.stdout).to_string())
-    } else {
-        Err(String::from_utf8_lossy(&o.stderr).trim().to_string())
-    }
-}
-
-/// From guestfish output ("@@<fs>" then vmlinuz-* paths) pick (fs, path) of the NEWEST kernel version.
-fn pick_kernel(listing: &str) -> Option<(String, String)> {
-    let mut fs = "";
-    let mut best: Option<(String, String)> = None;
-    for l in listing.lines().map(str::trim) {
-        if let Some(f) = l.strip_prefix("@@") {
-            fs = f;
-        } else if let Some((_, kv)) = l.rsplit_once("/vmlinuz-") {
-            let newer = best.as_ref().map_or(true, |(_, p)| {
-                ver_key(kv) > ver_key(p.rsplit_once("/vmlinuz-").unwrap().1)
-            });
-            if newer {
-                best = Some((fs.to_string(), l.to_string()));
-            }
-        }
-    }
-    best
-}
-
-/// Version sort key like `sort -V`: split digits/letters, digits compare by value (5.15.0-119 > 5.15.0-91).
-fn ver_key(v: &str) -> Vec<(u64, String)> {
-    let mut out = Vec::new();
-    let mut cur = String::new();
-    let mut digit = false;
-    for c in v.chars() {
-        if !cur.is_empty() && c.is_ascii_digit() != digit {
-            out.push(if digit { (cur.parse().unwrap_or(0), String::new()) } else { (0, cur.clone()) });
-            cur.clear();
-        }
-        digit = c.is_ascii_digit();
-        cur.push(c);
-    }
-    if !cur.is_empty() {
-        out.push(if digit { (cur.parse().unwrap_or(0), String::new()) } else { (0, cur) });
-    }
-    out
-}
-
-/// Extract vmlinuz + initrd.img from the golden (via libguestfs) → /srv/tftp/broom/<name>/. Returns the root UUID.
-/// Blocking, needs root (libguestfs appliance).
+/// Extract vmlinuz + initrd.img from the golden → <home>/tftp/broom/<name>/, inject the broom hook into the
+/// initrd. Returns the root UUID. Blocking.
 pub fn build_boot(img: &Path, name: &str) -> Result<String, String> {
-    let img = img.to_string_lossy().to_string();
-    let dst = format!("/srv/tftp/broom/{name}");
-    std::fs::create_dir_all(&dst).map_err(|e| e.to_string())?;
-
-    // 1. Look for the kernel on EVERY filesystem (not via fstab: /boot may be its own partition —
-    //    Ubuntu Server LVM — and commented out in fstab → inspect doesn't mount it → empty /boot).
-    //    One guestfish session: mount-ro each fs, glob /vmlinuz-* (/boot partition) + /boot/vmlinuz-* (inside root).
-    let fss = out("virt-filesystems", &["-a", &img])
-        .map_err(|e| format!("virt-filesystems: {e} (is libguestfs-tools installed?)"))?;
-    let mut script = String::from("run\n");
-    for fs in fss.lines().map(str::trim).filter(|s| !s.is_empty()) {
-        script.push_str(&format!(
-            "echo @@{fs}\n-mount-ro {fs} /\n-glob-expand /vmlinuz-*\n-glob-expand /boot/vmlinuz-*\n-umount-all\n"
-        ));
-    }
-    let listing = guestfish_stdin(&img, &script)?;
-    let (fs, kpath) = pick_kernel(&listing).ok_or(format!(
-        "golden has no vmlinuz-* on any filesystem (fs: {}) — does the golden have a kernel installed?",
-        fss.replace('\n', " ")
-    ))?;
-    // kpath = /boot/vmlinuz-X or /vmlinuz-X → initrd in the same directory.
-    let (kdir, kv) = kpath.rsplit_once("/vmlinuz-").ok_or("unexpected kernel path")?;
-
-    // 2. Copy kernel + initrd to dst (one guestfish session) then rename to the standard names.
-    guestfish_stdin(
-        &img,
-        &format!(
-            "run\nmount-ro {fs} /\ncopy-out {kdir}/vmlinuz-{kv} {dst}\ncopy-out {kdir}/initrd.img-{kv} {dst}\n"
-        ),
-    )
-    .map_err(|e| format!("copy kernel/initrd from {fs}: {e}"))?;
-    let vm_src = format!("{dst}/vmlinuz-{kv}");
-    let ir_src = format!("{dst}/initrd.img-{kv}");
-    if !Path::new(&vm_src).exists() {
-        return Err(format!("virt-copy-out did not create {vm_src} (wrong kernel version detected?)"));
-    }
-    if !Path::new(&ir_src).exists() {
-        return Err(format!("virt-copy-out did not create {ir_src}"));
-    }
-    std::fs::rename(&vm_src, format!("{dst}/vmlinuz"))
-        .map_err(|e| format!("rename {vm_src}: {e}"))?;
-    let initrd = format!("{dst}/initrd.img");
-    std::fs::rename(&ir_src, &initrd)
-        .map_err(|e| format!("rename {ir_src}: {e}"))?;
+    let dst = crate::tftp_dir().join("broom").join(name).to_string_lossy().into_owned();
+    let b = crate::linuxfs::extract_boot(&img.to_string_lossy(), &dst)?;
+    tracing::info!("image {name}: kernel {} + initrd copied, root UUID {}", b.kver, b.root_uuid);
 
     // Inject the broom-wb hook + overlayroot.conf into the initrd (append a cpio → overrides the golden's copy).
     // → tuning reset/overlay = edit Rust + Publish again, NO golden rebuild.
-    inject_initrd(&initrd, name)?;
-
-    // 3. Root UUID: guestfish inspect-os → root device (LV or partition) → vfs-uuid.
-    let root_dev = out("guestfish", &["--ro", "-a", &img, "run", ":", "inspect-os"])
-        .map_err(|e| format!("guestfish inspect-os: {e}"))?;
-    let root_dev = root_dev
-        .lines()
-        .next()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .ok_or("inspect-os returned no root device".to_string())?;
-    let uuid = out("guestfish", &["--ro", "-a", &img, "run", ":", "vfs-uuid", &root_dev])
-        .map_err(|e| format!("guestfish vfs-uuid {root_dev}: {e}"))?;
-    if uuid.is_empty() {
-        return Err(format!("could not read the root UUID ({root_dev})"));
-    }
-    Ok(uuid)
+    inject_initrd(&format!("{dst}/initrd.img"), name)?;
+    Ok(b.root_uuid)
 }
 
 /// overlayroot.conf injected into the initrd (owned by the server → tune without rebuilding the golden).
@@ -320,7 +193,7 @@ fi
 /// Append one cpio.gz (overrides local-top/iscsi = attach golden + SSD writeback; + /etc/overlayroot.conf)
 /// to the end of the initrd → the kernel concatenates cpios, the later one overrides the golden's.
 fn inject_initrd(initrd: &str, name: &str) -> Result<(), String> {
-    let work = format!("/tmp/broom-inject-{name}");
+    let work = crate::work_dir().join(format!("inject-{name}")).to_string_lossy().into_owned();
     let _ = std::fs::remove_dir_all(&work);
     std::fs::create_dir_all(format!("{work}/scripts/local-top")).map_err(|e| e.to_string())?;
     std::fs::create_dir_all(format!("{work}/etc")).map_err(|e| e.to_string())?;
@@ -331,7 +204,10 @@ fn inject_initrd(initrd: &str, name: &str) -> Result<(), String> {
         .map_err(|e| e.to_string())?;
     std::fs::write(format!("{work}/etc/overlayroot.conf"), OVERLAYROOT_CONF)
         .map_err(|e| e.to_string())?;
-    let _ = Command::new("chmod").args(["0755", &iscsi_hook]).status();
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&iscsi_hook, std::fs::Permissions::from_mode(0o755));
+    }
     // cd work → cpio newc gzip → append to the initrd (absolute path).
     let sh = format!(
         "cd '{work}' && find . -mindepth 1 -print0 | cpio --null -o -H newc 2>/dev/null | gzip -9 >> '{initrd}'"
@@ -456,20 +332,5 @@ mod tests {
             let ok = std::process::Command::new("sh").args(["-n", "-c", s]).status().unwrap();
             assert!(ok.success());
         }
-    }
-
-    /// Separate /boot partition (Ubuntu Server LVM) + pick the newest version numerically.
-    #[test]
-    fn pick_kernel_newest() {
-        let l = "@@/dev/sda1\n@@/dev/sda2\n/vmlinuz-5.15.0-91-generic\n/vmlinuz-5.15.0-119-generic\n\
-                 @@/dev/ubuntu-vg/ubuntu-lv\n";
-        assert_eq!(
-            super::pick_kernel(l),
-            Some(("/dev/sda2".into(), "/vmlinuz-5.15.0-119-generic".into()))
-        );
-        // kernel inside the root's /boot.
-        let l = "@@/dev/sda1\n/boot/vmlinuz-6.8.0-45-generic\n";
-        assert_eq!(super::pick_kernel(l).unwrap().1, "/boot/vmlinuz-6.8.0-45-generic");
-        assert_eq!(super::pick_kernel("@@/dev/sda1\n"), None);
     }
 }

@@ -33,13 +33,15 @@ NFS root). Windows diskless was removed from the codebase (hard, needs commercia
 [Site router/DHCP] ---- LAN (2.5/10GbE uplink from server) ---- [Switch] ---- [Client x10-30]
                                                                               UEFI, no SecureBoot
                                                                               + local SSD (/games)
-        [SERVER Debian]
-        ├── dnsmasq       : proxyDHCP/full DHCP + TFTP + binding/hostname
-        ├── iPXE          : snponly.efi (UEFI), chainloads a script over HTTP
-        ├── NFS (Linux)   : read-only root for Linux clients (LTSP)
-        └── Mgmt app      : Rust/axum + SQLite — web admin + HTTP boot serving
-                            (dynamic /boot.ipxe + kernel/initrd/assets via ServeDir)
+        [SERVER Debian/Ubuntu] — one binary, no distro services (Phase S):
+        └── bootrom-mgmt  : Rust/axum, storage via the db/ driver (SQLite built in)
+            ├── HTTP :80        web admin + dynamic /boot.ipxe + kernel/initrd/golden files
+            ├── DHCP :67/:4011  full DHCP or proxyDHCP + PXE boot server (dhcp.rs)
+            ├── TFTP :69        snponly.efi straight from the binary (tftp.rs)
+            ├── iSCSI           shared RO targets, kernel LIO via configfs (iscsi.rs)
+            └── iPXE            snponly.efi built from mgmt/ipxe/ipxe-src, embedded
 ```
+(The LTSP/NFS text below is the original Phase 2 design, since replaced — see Phase 6 and Phase W.)
 
 **Write policy (Linux LTSP):**
 - LTSP diskless — RO golden squashfs + **RAM overlay** (native LTSP), reset every boot.
@@ -60,12 +62,12 @@ machine may see which image, and what the default is).
 
 | Module | Responsibility | Main components |
 |---|---|---|
-| **M1 net-boot** | DHCP/PXE/iPXE chainload; DHCP binding + hostname | dnsmasq (**proxyDHCP or full DHCP**) + TFTP, snponly.efi, `dhcp-host` binding |
+| **M1 net-boot** | DHCP/PXE/iPXE chainload; DHCP binding + hostname | built-in DHCP (**proxyDHCP or full DHCP**) + TFTP (`dhcp.rs`, `tftp.rs`), snponly.efi, Machines-table binding |
 | **M2 image-store** | Store golden images, versions, snapshots | ZFS pool / files on ZFS |
 | **M3 linux-diskless** | Boot Linux RO + RAM overlay + SSD `/games` | LTSP, NFS root, RAM overlay |
 | **M5 boot-menu** | Generate the dynamic iPXE menu + countdown + default | `ipxe_render` (HTTP endpoint) |
 | **M6 mgmt-image** | Image CRUD/version/rollback (web) | Rust/axum + ZFS snapshot |
-| **M7 mgmt-monitor** | On/off monitoring + WOL + reboot | Rust/axum + ping/agent + WOL |
+| **M7 mgmt-monitor** | Machine list (registered + seen via DHCP) + on/off + WOL | Rust/axum + ICMP ping (not logged) + WOL |
 | **M8 mgmt-config** | Client machines, image assignment, default, timeout | Rust/axum + SQLite |
 
 M5–M8 share one **Rust (axum)** app, deployed as one binary, but **each module is its own mod/file**
@@ -101,18 +103,12 @@ At startup (and in the Phase 1 install script) the mgmt app **checks every depen
 missing is printed clearly with the package + install command, and it **refuses to run** instead of half-failing.
 One preflight function: walks a list of `(binary/service, package, purpose)` → checks `which` + `systemctl is-enabled/active`.
 
-| Needed | Package (Debian/Ubuntu) | Used for |
-|---|---|---|
-| `dnsmasq` | dnsmasq | DHCP (proxy/full) + TFTP + DNS/hostname |
-| `exportfs`/nfsd | nfs-kernel-server | NFS root for Linux diskless |
-| `zfs`/`zpool` | zfsutils-linux (+zfs-dkms on Debian) | image store + snapshot/rollback |
-| `unzip` | unzip | unpack Linux golden bundles (.zip) |
-| `etherwake`/`wakeonlan` | etherwake | WOL power-on (M7) |
-| `ping` | iputils-ping | on/off monitoring (M7) |
-| `snponly.efi` | ipxe / build iPXE | UEFI boot binary |
+Since Phase S the list only holds **tools** the binary still shells out to (the source of truth is
+`BINS` in `mgmt/src/preflight.rs`): qemu-utils, libguestfs-tools, open-iscsi, zfsutils-linux
+(optional), fdisk, ntfs-3g, dosfstools, efibootmgr, initramfs-tools, wget, libwin-hivex-perl.
+Built in, no package: DHCP, TFTP, iSCSI target config, iPXE, sha256, unzip, zram setup, ping, WOL.
 
-The app also checks: `/srv/tftp/snponly.efi` exists, dnsmasq is running, the ZFS pool is
-mounted, permission to run `zfs` (usually needs root/systemd service). Fail → exit code ≠ 0 + message.
+The app also checks it runs as root. Fail → exit code ≠ 0 + message.
 
 ## Phases
 
@@ -196,12 +192,51 @@ Deploy = **one binary**, no runtime needed. Split by module (one mod/file each):
   - generates `/etc/dnsmasq.d/pxe.conf` (proxyDHCP by default) + `enable --now dnsmasq`.
   - runs preflight at the end; PASS = done. → deploy one file, one setup command.
 
-Layout: `mgmt/` (Cargo) → `src/main.rs`, `src/db.rs`, `src/preflight.rs`, `src/{boot,images,publish,ltsp,zfs,monitor,wol,machines,dnsmasq,setup}.rs`, `static/`.
+Layout: `mgmt/` (Cargo) → `src/main.rs`, `src/db/{mod,sqlite}.rs`, `src/preflight.rs`,
+`src/{boot,images,publish,overlay,winstage,vhdx,dhcp,tftp,iscsi,zfs,monitor,wol,machines,setup}.rs`, `static/`.
+
+### Phase S — Built-in services, storage driver, latest toolchain (2026-09-24)
+Goal: the binary does the service work itself instead of relying on distro services.
+- **DHCP** (`dhcp.rs`, replaces dnsmasq): full DHCP (binding from the Machines table > previous lease >
+  first free IP in range; leases in the DB) or proxyDHCP (answers PXE/iPXE clients only: offer with
+  PXEClient + discovery control 8, boot server on UDP 4011). Protocol logic is one pure `handle()` function.
+- **TFTP** (`tftp.rs`): read-only, blksize/tsize/timeout options, snponly.efi served from the binary.
+- **iSCSI** (`iscsi.rs`, replaces targetcli + target.service): kernel LIO configured through configfs;
+  targets re-exported at start (configfs doesn't survive a reboot), live ones left alone.
+- **Small tools in Rust**: sha256 (sha2), unzip (zip), zram via sysfs, ICMP ping (raw socket),
+  fallocate punch-hole, touch/chmod/uname/geteuid.
+- **Storage driver** (`db/`): the `Db` trait + SQLite driver hold every SQL statement; MySQL/Postgres =
+  a new driver file + a branch in `db::open()` (`BOOTROM_DB` URL).
+- **Toolchain**: Rust stable (rustup, `rust-toolchain.toml`), edition 2024, all crates at the latest stable release.
+- **Logging** (`tracing`): events, not requests — `client PC01 started - mac … - ip … - hostname … - image …`,
+  DHCP offer/ack/NAK, TFTP loads, boot menu, publish steps + result, config changes, iSCSI/zram, errors.
+  INFO/DEBUG → stdout, WARN/ERROR → stderr; `RUST_LOG=debug` adds every external command. A menu choice
+  chains `/boot/start?image=&mac=&ip=` so the server knows (and logs) which image each client boots.
+- On/off ping (every 15 s from the Machines page) is never logged — only real events are.
+- Takeover: dnsmasq / tftpd-hpa / rtslib-fb-targetctl / target are stopped + disabled at start if present.
+- Out of scope (kept as distro tools): qemu-img, libguestfs, hivexregedit, mkinitramfs, ntfs-3g, sfdisk,
+  losetup/mount, tar, zfs, and the tools copied into the Windows stage initrd.
+
+### Phase T — Fewer external tools, selectively (2026-09-25)
+Review: preflight installs packages automatically and offline install is not required → only replace tools
+that are heavy/fragile or where replacing lowers risk. Kept on purpose: qemu-img (proven converter; a
+bug would corrupt goldens), the shell stage + mkinitramfs + stage tools (works on real hardware; a rewrite
+is high risk on the boot path), ntfs-3g, sfdisk, tar, cpio, gzip, ip, modprobe, mount (base system).
+- **T1 — libguestfs gone** (`linuxfs.rs`): partitions (sfdisk -J) → ext4, or LVM2 PV → linear LVs → ext4
+  (crate `ext4-view`), read straight from image.img (no mount/loop, the server's LVM never sees the VG).
+  Newest kernel + initrd + root UUID for `overlay::build_boot`. xfs/btrfs/non-linear LVM → clear error.
+- **T2 — ZFS gone, built-in versions** (`versions.rs`): 4 MB chunks, blake3, dedup, zero chunks not stored
+  (`storage/chunks/<ab>/<hash>`), manifest per version (`storage/manifests/<name>/vN.json`). Snapshot /
+  rollback run as image jobs; rollback removes the iSCSI target first, rewrites only differing chunks
+  (holes kept), then publishes again. Delete version + garbage collection; web "Versions" panel.
+  DB: `dataset` column dropped, `active_version` added. (ZFS versioning never worked: no dataset was ever set.)
+- **T3 — later** (user decision): server stops writing into Windows goldens (edits move into prep; server
+  reads NTFS read-only) → drops hivexregedit + the read-write mount.
 
 ### Phase 5 — Operations & hardening
 - Golden update procedure: snapshot before changing → change it in a "maintenance boot" (RW) →
   test → publish the new version → roll back if broken.
-- Backup: the server ZFS pool + config (`/etc/dnsmasq.d`, mgmt DB). Push golden snapshots
+- Backup: `images/` + `storage/` (image versions) + the mgmt DB (all config lives there). Push them
   to an external disk/NAS regularly.
 - **SPOF**: one dead server = the whole site stops. Acceptable at small scale, but there must be an
   **external golden image + config backup** for a quick rebuild; consider a cold standby server.

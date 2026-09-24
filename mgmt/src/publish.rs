@@ -2,12 +2,10 @@
 // Linux: golden raw (from vmdk) → shared RO iSCSI (disk or zram) + kernel/initrd (overlay.rs)
 // → iPXE boot_script loads kernel+initrd + attaches iSCSI + SSD overlay.
 // Windows: winstage.rs (native VHDX boot from the client SSD).
-use rusqlite::params;
-use std::io::Write;
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::Command;
 
-use crate::{db, images_dir, SharedState};
+use crate::{images_dir, SharedState};
 
 /// Publish job progress: each step shows "⏳ <step>..." on the web + is timed; the ✓ result includes
 /// a per-step timing table → you see right away where it is slow.
@@ -25,8 +23,8 @@ impl<'a> Steps<'a> {
     /// Finish the running step (record its time), start a new one.
     pub fn go(&mut self, label: &str) {
         self.end();
-        eprintln!("[publish {}] {label}...", self.name);
-        self.st.jobs.lock().unwrap().insert(self.name.clone(), format!("⏳ {label}..."));
+        tracing::info!("image {}: {label}", self.name);
+        self.st.set_job(&self.name, format!("⏳ {label}..."));
         self.cur = Some((label.to_string(), std::time::Instant::now()));
     }
     fn end(&mut self) {
@@ -54,83 +52,94 @@ fn mv(src: &Path, dst: &Path) -> Result<(), String> {
 
 /// sha256 of a file (clients compare it to detect a golden change). None on error.
 pub(crate) fn file_hash(path: &str) -> Option<String> {
-    let out = Command::new("sha256sum").arg(path).output().ok()?;
-    if !out.status.success() {
-        return None;
+    use sha2::{Digest, Sha256};
+    use std::io::Read;
+    let mut f = std::fs::File::open(path).ok()?;
+    let mut h = Sha256::new(); // SHA-NI when the CPU has it (same speed as sha256sum)
+    let mut buf = vec![0u8; 4 << 20];
+    loop {
+        match f.read(&mut buf).ok()? {
+            0 => break,
+            n => h.update(&buf[..n]),
+        }
     }
-    String::from_utf8_lossy(&out.stdout)
-        .split_whitespace()
-        .next()
-        .map(|s| s.to_string())
+    Some(h.finalize().iter().map(|b| format!("{b:02x}")).collect())
 }
 
-/// Normalize the uploaded source into raw `dest` (image.img). Blocking.
-/// src: "raw" (already an img → rename) | "vmdk" (qemu-img convert) | "zip" (unzip → vmdk/img → convert).
-pub fn prepare_golden(src: &str, uploaded: &Path, dest: &Path) -> Result<(), String> {
-    match src {
-        "raw" => {
-            // uploaded == <dest>.uploading → rename to image.img.
-            mv(uploaded, dest)
+/// Extract a .zip into `dir` (entries with unsafe paths are skipped).
+fn unzip(zip_path: &Path, dir: &Path) -> Result<(), String> {
+    let f = std::fs::File::open(zip_path).map_err(|e| format!("{}: {e}", zip_path.display()))?;
+    let mut z = zip::ZipArchive::new(f).map_err(|e| format!("zip: {e}"))?;
+    for i in 0..z.len() {
+        let mut entry = z.by_index(i).map_err(|e| format!("zip entry {i}: {e}"))?;
+        let Some(rel) = entry.enclosed_name() else { continue };
+        let out = dir.join(rel);
+        if entry.is_dir() {
+            std::fs::create_dir_all(&out).map_err(|e| e.to_string())?;
+            continue;
         }
-        "vmdk" => {
-            // -m 16: 16 parallel I/O coroutines (default 8); -W: out-of-order writes (sparse raw target).
-            run("qemu-img", &["convert", "-m", "16", "-W", "-O", "raw",
-                &uploaded.to_string_lossy(), &dest.to_string_lossy()])?;
-            let _ = std::fs::remove_file(uploaded);
-            Ok(())
+        if let Some(p) = out.parent() {
+            std::fs::create_dir_all(p).map_err(|e| e.to_string())?;
         }
-        "zip" => {
-            let exdir = uploaded.with_file_name("unzip");
-            let _ = std::fs::remove_dir_all(&exdir);
-            std::fs::create_dir_all(&exdir).map_err(|e| e.to_string())?;
-            run("unzip", &["-o", &uploaded.to_string_lossy(), "-d", &exdir.to_string_lossy()])?;
-            // Gom .vmdk + .img/.raw.
-            let mut vmdks = Vec::new();
-            let mut raw = None;
-            for e in walk(&exdir) {
-                match e.extension().and_then(|s| s.to_str()) {
-                    Some("vmdk") => vmdks.push(e),
-                    Some("img") | Some("raw") => { if raw.is_none() { raw = Some(e); } }
-                    _ => {}
-                }
-            }
-            // Pick the vmdk to convert: a .vmx in the zip names the disk the VM ACTUALLY uses (even with a
-            // branching snapshot tree) → preferred. No .vmx: one file → use it; several → pick_vmdk.
-            // qemu-img reads extents/parents from the same directory.
-            let from_vmx = walk(&exdir)
-                .into_iter()
-                .filter(|p| p.extension().and_then(|s| s.to_str()) == Some("vmx"))
-                .find_map(|vmx| {
-                    let disk = vmx_disk(&std::fs::read_to_string(&vmx).ok()?)?;
-                    let p = vmx.with_file_name(disk);
-                    p.exists().then_some(p)
-                });
-            let chosen_vmdk = if from_vmx.is_some() {
-                from_vmx
-            } else if vmdks.len() == 1 {
-                Some(vmdks.remove(0))
-            } else {
-                pick_vmdk(&vmdks)
-            };
-            if let Some(v) = &chosen_vmdk {
-                eprintln!("[golden] zip: convert {}", v.display());
-            }
-            let out = if let Some(v) = chosen_vmdk {
-                run("qemu-img", &["convert", "-m", "16", "-W", "-O", "raw",
-                    &v.to_string_lossy(), &dest.to_string_lossy()])?;
-                Ok(())
-            } else if let Some(r) = raw {
-                mv(&r, dest)
-            } else if !vmdks.is_empty() {
-                Err("zip has several .vmdk files but no descriptor file — export the VM as a single monolithic vmdk and upload again".into())
-            } else {
-                Err("zip contains no .vmdk/.img/.raw".into())
-            };
-            let _ = std::fs::remove_dir_all(&exdir);
-            let _ = std::fs::remove_file(uploaded);
-            out
-        }
-        other => Err(format!("invalid src: {other}")),
+        let mut w = std::fs::File::create(&out).map_err(|e| format!("{}: {e}", out.display()))?;
+        std::io::copy(&mut entry, &mut w).map_err(|e| format!("unzip {}: {e}", out.display()))?;
+    }
+    Ok(())
+}
+
+/// Turn the upload folder into raw `dest` (image.img), then delete the folder. Blocking.
+/// The folder holds one .img/.raw/.vmdk, a VM folder (.vmx + .vmdk files), or a .zip of either.
+/// Written to a temp file, then renamed over `dest`: a live iSCSI target (disk mode) keeps the old file open,
+/// so running clients still read the old golden until publish swaps the target (never a half-written image).
+pub fn prepare_golden(dir: &Path, dest: &Path) -> Result<(), String> {
+    let tmp = dest.with_extension("img.new");
+    let _ = std::fs::remove_file(&tmp);
+    let out = golden_from(dir, &tmp).and_then(|()| std::fs::rename(&tmp, dest).map_err(|e| format!("rename {}: {e}", tmp.display())));
+    if out.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    let _ = std::fs::remove_dir_all(dir);
+    out
+}
+
+fn ext(p: &Path) -> String {
+    p.extension().map(|s| s.to_string_lossy().to_ascii_lowercase()).unwrap_or_default()
+}
+
+fn golden_from(dir: &Path, dest: &Path) -> Result<(), String> {
+    // A zipped VM folder → extract first (drop the zip right away: disk space).
+    if let Some(z) = walk(dir).into_iter().find(|p| ext(p) == "zip") {
+        unzip(&z, &dir.join("unzip"))?;
+        let _ = std::fs::remove_file(&z);
+    }
+    let files = walk(dir);
+    let mut vmdks: Vec<_> = files.iter().filter(|p| ext(p) == "vmdk").cloned().collect();
+    let raw = files.iter().find(|p| ext(p) == "img" || ext(p) == "raw");
+    // Pick the vmdk to convert: a .vmx names the disk the VM ACTUALLY uses (even with a branching
+    // snapshot tree) → preferred. No .vmx: one file → use it; several → pick_vmdk.
+    // qemu-img reads extents/parents from the same directory.
+    let from_vmx = files.iter().filter(|p| ext(p) == "vmx").find_map(|vmx| {
+        let disk = vmx_disk(&std::fs::read_to_string(vmx).ok()?)?;
+        let p = vmx.with_file_name(disk);
+        p.exists().then_some(p)
+    });
+    let chosen_vmdk = if from_vmx.is_some() {
+        from_vmx
+    } else if vmdks.len() == 1 {
+        Some(vmdks.remove(0))
+    } else {
+        pick_vmdk(&vmdks)
+    };
+    if let Some(v) = chosen_vmdk {
+        tracing::info!("golden: converting {}", v.display());
+        // -m 16: 16 parallel I/O coroutines (default 8); -W: out-of-order writes (sparse raw target).
+        run("qemu-img", &["convert", "-m", "16", "-W", "-O", "raw", &v.to_string_lossy(), &dest.to_string_lossy()])
+    } else if let Some(r) = raw {
+        mv(r, dest)
+    } else if !vmdks.is_empty() {
+        Err("several .vmdk files but no descriptor file — upload the whole VM folder (with the .vmx) or a single monolithic vmdk".into())
+    } else {
+        Err("upload contains no .vmdk/.img/.raw".into())
     }
 }
 
@@ -223,6 +232,7 @@ fn walk(dir: &Path) -> Vec<std::path::PathBuf> {
 }
 
 fn run(bin: &str, args: &[&str]) -> Result<(), String> {
+    tracing::debug!("exec: {bin} {}", args.join(" "));
     let out = Command::new(bin)
         .args(args)
         .output()
@@ -240,13 +250,8 @@ fn run(bin: &str, args: &[&str]) -> Result<(), String> {
 
 /// Publish an image according to its os. Blocking (called from spawn_blocking).
 pub fn run_publish(st: &SharedState, name: &str, steps: &mut Steps) -> Result<String, String> {
-    let (id, os): (i64, String) = {
-        let c = st.db.lock().unwrap();
-        c.query_row("SELECT id, os FROM images WHERE name=?1", [name], |r| {
-            Ok((r.get(0)?, r.get(1)?))
-        })
-        .map_err(|e| format!("image '{name}' not found in DB: {e}"))?
-    };
+    let img = st.db.image_by_name(name)?.ok_or(format!("image '{name}' not found in DB"))?;
+    let (id, os) = (img.id, img.os);
     match os.as_str() {
         "linux" => {
             steps.go("publish linux (kernel/initrd + iSCSI)");
@@ -257,23 +262,51 @@ pub fn run_publish(st: &SharedState, name: &str, steps: &mut Steps) -> Result<St
     }
 }
 
-/// Run a batch of targetcli commands via stdin.
-fn targetcli_script(script: &str) -> Result<(), String> {
-    let mut child = Command::new("targetcli")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| format!("targetcli: {e}"))?;
-    {
-        let mut si = child.stdin.take().ok_or("stdin")?;
-        si.write_all(script.as_bytes()).map_err(|e| e.to_string())?;
-    } // close stdin → targetcli processes and exits
-    let out = child.wait_with_output().map_err(|e| e.to_string())?;
-    if out.status.success() {
-        Ok(())
+/// Shared RO iSCSI target for an image (kernel LIO via configfs, iscsi.rs). `backing` = golden
+/// file (disk) or /dev/zramN (zram). Idempotent (re-creates). Returns the IQN.
+fn export_target(st: &SharedState, name: &str, cache_mode: &str, backing: &str) -> Result<String, String> {
+    let iqn = iqn_of(st, name);
+    let lio = crate::iscsi::Lio::system()?;
+    // ponytail: target named by the old fixed IQN (before iqn_base) — remove it too; drop this line later.
+    lio.remove(name, &format!("iqn.2026-08.net.tiem:{name}"));
+    let b = if cache_mode == "zram" {
+        crate::iscsi::Backing::Block { dev: backing }
     } else {
-        Err(String::from_utf8_lossy(&out.stderr).trim().to_string())
+        let size = std::fs::metadata(backing).map_err(|e| format!("{backing}: {e}"))?.len();
+        crate::iscsi::Backing::File { path: backing, size }
+    };
+    lio.export(name, b, &iqn).map_err(|e| format!("iSCSI target: {e}"))?;
+    tracing::info!("iSCSI target {iqn} ready ({cache_mode}: {backing})");
+    Ok(iqn)
+}
+
+/// configfs targets are gone after a server reboot → re-export every published Linux image at
+/// start (disk: target only; zram: publish again = new RAM copy + target).
+/// An mgmt restart (new binary) keeps both → live targets are left alone (clients stay connected).
+pub fn restore_targets(st: &SharedState) {
+    let lio = match crate::iscsi::Lio::system() {
+        Ok(l) => l,
+        Err(e) => return tracing::error!("iSCSI targets not restored: {e}"),
+    };
+    for img in st.db.images().unwrap_or_default() {
+        if img.os != "linux" || img.boot_script.is_none() || lio.has_target(&iqn_of(st, &img.name)) {
+            continue;
+        }
+        let r = if img.cache_mode == "zram" {
+            // The RAM copy died with the reboot (the old /dev/zramN may now be someone else's) →
+            // forget it, publish again = new zram + target. Falls back to disk by itself on RAM overflow.
+            let _ = st.db.set_config(&format!("zram_dev:{}", img.name), "");
+            publish_iscsi(st, img.id, &img.name)
+        } else {
+            let path = images_dir().join(&img.name).join("image.img");
+            std::fs::canonicalize(&path)
+                .map_err(|e| format!("{}: {e}", path.display()))
+                .and_then(|p| export_target(st, &img.name, "disk", &p.to_string_lossy()))
+        };
+        match r {
+            Ok(_) => tracing::info!("iSCSI target for image {} restored ({})", img.name, img.cache_mode),
+            Err(e) => tracing::error!("iSCSI target for image {} not restored: {e}", img.name),
+        }
     }
 }
 
@@ -284,23 +317,18 @@ fn publish_iscsi(st: &SharedState, id: i64, name: &str) -> Result<String, String
     let img_abs = std::fs::canonicalize(&img)
         .map_err(|e| format!("no golden raw yet ({}): {e}", img.display()))?;
 
-    // 1. Extract kernel + initrd from the golden → /srv/tftp/broom/<name>/, read the root UUID.
+    // 1. Extract kernel + initrd from the golden → <home>/tftp/broom/<name>/, read the root UUID.
     let root_uuid = crate::overlay::build_boot(&img_abs, name)?;
 
     // 2. cache_mode (images column): disk → serve the file directly; zram → load the img into /dev/zramN.
     // zram fails (RAM overflow / error) → fall back to disk BY ITSELF (DB updated) so the image always boots.
-    let want = {
-        let c = st.db.lock().unwrap();
-        c.query_row("SELECT cache_mode FROM images WHERE id=?1", [id], |r| r.get::<_, String>(0))
-            .unwrap_or_else(|_| "disk".into())
-    };
+    let want = st.db.image(id)?.map_or_else(|| "disk".into(), |i| i.cache_mode);
     let (cache_mode, backing) = if want == "zram" {
         match ensure_zram(st, name, &img_abs) {
             Ok(dev) => ("zram".to_string(), dev),
             Err(e) => {
-                eprintln!("[zram] '{name}': {e} → falling back to cache_mode=disk");
-                let c = st.db.lock().unwrap();
-                let _ = c.execute("UPDATE images SET cache_mode='disk' WHERE id=?1", [id]);
+                tracing::warn!("image {name}: zram failed ({e}) → falling back to cache_mode=disk");
+                let _ = st.db.set_cache_mode(id, "disk");
                 ("disk".to_string(), img_abs.to_string_lossy().to_string())
             }
         }
@@ -308,41 +336,11 @@ fn publish_iscsi(st: &SharedState, id: i64, name: &str) -> Result<String, String
         ("disk".to_string(), img_abs.to_string_lossy().to_string())
     };
 
-    // 3. Shared RO iSCSI target. Idempotent: remove the old one first.
-    let iqn = {
-        let c = st.db.lock().unwrap();
-        format!("{}:{name}", db::get_config(&c, "iqn_base", "iqn.2026-01.local.broom"))
-    };
-    let _ = targetcli_script(&format!("cd /iscsi\ndelete {iqn}\nexit\n"));
-    // ponytail: target named by the old fixed IQN (before iqn_base) — remove it too; drop this line later.
-    let _ = targetcli_script(&format!("cd /iscsi\ndelete iqn.2026-08.net.tiem:{name}\nexit\n"));
-    let _ = targetcli_script(&format!("cd /backstores/fileio\ndelete {name}\nexit\n"));
-    let _ = targetcli_script(&format!("cd /backstores/block\ndelete {name}\nexit\n"));
-    // zram = block device → backstore block; disk = file → backstore fileio.
-    let backstore = if cache_mode == "zram" {
-        format!("/backstores/block create {name} {backing}\n")
-    } else {
-        format!("/backstores/fileio create {name} {backing}\n")
-    };
-    let bs_path = if cache_mode == "zram" {
-        format!("/backstores/block/{name}")
-    } else {
-        format!("/backstores/fileio/{name}")
-    };
-    let script = format!(
-        "{backstore}\
-         /iscsi create {iqn}\n\
-         /iscsi/{iqn}/tpg1/luns create {bs_path}\n\
-         /iscsi/{iqn}/tpg1 set attribute authentication=0 generate_node_acls=1 demo_mode_write_protect=1\n\
-         saveconfig\nexit\n"
-    );
-    targetcli_script(&script).map_err(|e| format!("targetcli create target: {e}"))?;
+    // 3. Shared RO iSCSI target (zram = block backstore, disk = fileio).
+    let iqn = export_target(st, name, &cache_mode, &backing)?;
 
     // 4. iPXE boot_script. The initrd reads broom.iscsi / broom.ssd from the cmdline.
-    let ip = {
-        let c = st.db.lock().unwrap();
-        db::get_config(&c, "dhcp_server_ip", "")
-    };
+    let ip = st.db.get_config("dhcp_server_ip", "");
     if ip.is_empty() {
         return Err("dhcp_server_ip is empty — run `setup` first".into());
     }
@@ -362,39 +360,49 @@ fn publish_iscsi(st: &SharedState, id: i64, name: &str) -> Result<String, String
          initrd http://{ip}/tftp/broom/{name}/initrd.img\n\
          boot"
     );
-    {
-        let c = st.db.lock().unwrap();
-        c.execute("UPDATE images SET boot_script=?1, hash=?2 WHERE id=?3", params![bs, hash, id])
-            .map_err(|e| e.to_string())?;
-    }
+    st.db.set_published(id, &bs, &hash)?;
     Ok(format!(
         "Publish OK — golden '{name}' iSCSI RO ({cache_mode}) + kernel/initrd + boot_script overlay"
     ))
 }
 
+/// Undo everything publish made for an image (image deleted): iSCSI target, zram device, boot files
+/// (Linux kernel/initrd, Windows golden.vhdx + templates). Blocking.
+pub fn unpublish(st: &SharedState, name: &str) {
+    if let Ok(lio) = crate::iscsi::Lio::system() {
+        lio.remove(name, &iqn_of(st, name));
+    }
+    let key = format!("zram_dev:{name}");
+    let dev = st.db.get_config(&key, "");
+    if !dev.is_empty() {
+        zram_remove(&dev);
+        let _ = st.db.set_config(&key, "");
+    }
+    for d in ["broom", "broom-win"] {
+        let _ = std::fs::remove_dir_all(crate::tftp_dir().join(d).join(name));
+    }
+}
+
 /// Load the golden img into a zram device (zstd compressed), return /dev/zramN. Map stored in DB config.
 /// Reset the image's old device (if any) before creating a new one.
 fn ensure_zram(st: &SharedState, name: &str, img: &Path) -> Result<String, String> {
-    // Reset the old device if the image was on zram before.
-    let old = {
-        let c = st.db.lock().unwrap();
-        db::get_config(&c, &format!("zram_dev:{name}"), "")
-    };
+    // Free the old device if the image was on zram before — its iSCSI backstore holds it open,
+    // so drop the target first (export_target re-creates it right after).
+    let old = st.db.get_config(&format!("zram_dev:{name}"), "");
     if !old.is_empty() {
-        let _ = Command::new("zramctl").args(["--reset", &old]).status();
+        if let Ok(lio) = crate::iscsi::Lio::system() {
+            lio.remove(name, &iqn_of(st, name));
+        }
+        zram_remove(&old);
+        let _ = st.db.set_config(&format!("zram_dev:{name}"), "");
     }
-    // zram module (zramctl --find needs it); ignore errors if already loaded/builtin.
-    let _ = Command::new("modprobe").arg("zram").status();
     let size = std::fs::metadata(img).map_err(|e| e.to_string())?.len();
 
     // VALIDATE RAM overflow: zram compresses but worst case (incompressible data) = full img size.
     // Require MemAvailable > img size + reserve (kept for the OS + iSCSI serving). The old device
     // was reset above so its RAM is returned; MemAvailable also reflects OTHER zram images being held.
     // reserve is set via the zram_reserve_mb config (web System page).
-    let reserve = {
-        let c = st.db.lock().unwrap();
-        db::get_config(&c, "zram_reserve_mb", "2048").parse::<u64>().unwrap_or(2048) * 1024 * 1024
-    };
+    let reserve = st.db.get_config("zram_reserve_mb", "2048").parse::<u64>().unwrap_or(2048) * 1024 * 1024;
     let avail = mem_available_bytes();
     if !zram_fits(size, avail, reserve) {
         let gb = |b: u64| b as f64 / (1024.0 * 1024.0 * 1024.0);
@@ -405,77 +413,134 @@ fn ensure_zram(st: &SharedState, name: &str, img: &Path) -> Result<String, Strin
         ));
     }
 
-    // zramctl --find --size <bytes> --algorithm zstd → in /dev/zramN.
-    let out = Command::new("zramctl")
-        .args(["--find", "--size", &size.to_string(), "--algorithm", "zstd"])
-        .output()
-        .map_err(|e| format!("zramctl: {e} (modprobe zram needed?)"))?;
-    if !out.status.success() {
-        return Err(format!("zramctl --find: {}", String::from_utf8_lossy(&out.stderr).trim()));
+    // New zram device (zstd) + load the raw img into it.
+    let dev = zram_add(size)?;
+    let copy = || -> std::io::Result<()> {
+        let mut r = std::fs::File::open(img)?;
+        let mut w = std::fs::OpenOptions::new().write(true).open(&dev)?;
+        std::io::copy(&mut r, &mut w)?;
+        w.sync_all()
+    };
+    if let Err(e) = copy() {
+        zram_remove(&dev);
+        return Err(format!("copy golden → {dev}: {e}"));
     }
-    let dev = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    if dev.is_empty() {
-        return Err("zramctl returned no device".into());
+    let _ = st.db.set_config(&format!("zram_dev:{name}"), &dev);
+    tracing::info!("image {name}: golden loaded into {dev} ({:.1} GB, zstd)", size as f64 / 1e9);
+    Ok(dev)
+}
+
+/// New zram device of `size` bytes via sysfs (replaces zramctl) → "/dev/zramN". zstd when the
+/// kernel has it, else the kernel default.
+fn zram_add(size: u64) -> Result<String, String> {
+    let _ = Command::new("modprobe").arg("zram").status(); // may be built in
+    let n = std::fs::read_to_string("/sys/class/zram-control/hot_add")
+        .map_err(|e| format!("zram hot_add: {e} (kernel without zram?)"))?;
+    let n = n.trim();
+    let dev = format!("/dev/zram{n}");
+    let _ = std::fs::write(format!("/sys/block/zram{n}/comp_algorithm"), "zstd");
+    if let Err(e) = std::fs::write(format!("/sys/block/zram{n}/disksize"), size.to_string()) {
+        zram_remove(&dev);
+        return Err(format!("zram{n} disksize {size}: {e}"));
     }
-    // Load the raw img into the zram block device.
-    let ddout = Command::new("dd")
-        .arg(format!("if={}", img.display()))
-        .arg(format!("of={dev}"))
-        .arg("bs=4M")
-        .output()
-        .map_err(|e| format!("dd → zram: {e}"))?;
-    if !ddout.status.success() {
-        let _ = Command::new("zramctl").args(["--reset", &dev]).status();
-        return Err(format!("dd → zram: {}", String::from_utf8_lossy(&ddout.stderr).trim()));
-    }
-    {
-        let c = st.db.lock().unwrap();
-        let _ = db::set_config(&c, &format!("zram_dev:{name}"), &dev);
+    // udev creates the device node.
+    for _ in 0..50 {
+        if Path::new(&dev).exists() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
     }
     Ok(dev)
 }
 
-/// Rebuild zram for every image with cache_mode=zram (called at mgmt start — zram is lost on server reboot).
-pub fn repopulate_zram(st: &SharedState) {
-    let names: Vec<String> = {
-        let c = st.db.lock().unwrap();
-        let mut stmt = match c.prepare("SELECT name FROM images WHERE cache_mode='zram'") {
-            Ok(s) => s,
-            Err(_) => return,
-        };
-        let rows = stmt.query_map([], |r| r.get::<_, String>(0));
-        match rows {
-            Ok(rs) => rs.flatten().collect(),
-            Err(_) => return,
-        }
-    };
-    for name in names {
-        // The old device in the DB died with the reboot → clear the map then publish again (new zram + re-target).
-        {
-            let c = st.db.lock().unwrap();
-            let _ = db::set_config(&c, &format!("zram_dev:{name}"), "");
-        }
-        // publish_iscsi falls back zram→disk by itself on RAM overflow/error → the image always boots.
-        match publish_iscsi_by_name(st, &name) {
-            Ok(msg) => eprintln!("[zram] repopulate '{name}': {msg}"),
-            Err(e) => eprintln!("[zram] repopulate '{name}' failed: {e}"),
-        }
-    }
+/// Reset + remove a zram device made by zram_add (nothing may hold it open).
+fn zram_remove(dev: &str) {
+    let Some(n) = dev.strip_prefix("/dev/zram") else { return };
+    let _ = std::fs::write(format!("/sys/block/zram{n}/reset"), "1");
+    let _ = std::fs::write("/sys/class/zram-control/hot_remove", n);
 }
 
-/// publish_iscsi theo name (tra id) — cho repopulate.
-fn publish_iscsi_by_name(st: &SharedState, name: &str) -> Result<String, String> {
-    let id: i64 = {
-        let c = st.db.lock().unwrap();
-        c.query_row("SELECT id FROM images WHERE name=?1", [name], |r| r.get(0))
-            .map_err(|e| e.to_string())?
-    };
-    publish_iscsi(st, id, name)
+pub(crate) fn iqn_of(st: &SharedState, name: &str) -> String {
+    format!("{}:{name}", st.db.get_config("iqn_base", "iqn.2026-01.local.broom"))
 }
 
 #[cfg(test)]
 mod tests {
     use super::{is_vmdk_descriptor, pick_vmdk, vmx_disk, zram_fits};
+
+    #[test]
+    fn sha256_known_vector() {
+        let p = std::env::temp_dir().join("broom_test_sha.txt");
+        std::fs::write(&p, "abc").unwrap();
+        assert_eq!(
+            super::file_hash(p.to_str().unwrap()).unwrap(),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+        let _ = std::fs::remove_file(p);
+    }
+
+    #[test]
+    fn unzip_nested_and_skips_escape() {
+        use std::io::Write;
+        let d = std::env::temp_dir().join("broom_test_unzip");
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let zp = d.join("vm.zip");
+        let mut w = zip::ZipWriter::new(std::fs::File::create(&zp).unwrap());
+        let opt = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+        w.start_file("VM/disk.vmdk", opt).unwrap();
+        w.write_all(b"# Disk DescriptorFile").unwrap();
+        w.start_file("../escape.txt", opt).unwrap();
+        w.write_all(b"x").unwrap();
+        w.finish().unwrap();
+        let out = d.join("out");
+        super::unzip(&zp, &out).unwrap();
+        assert_eq!(std::fs::read(out.join("VM/disk.vmdk")).unwrap(), b"# Disk DescriptorFile");
+        assert!(!d.join("escape.txt").exists());
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// Upload folder → image.img: a plain .IMG (any case) is moved; a .zip holding one is extracted
+    /// first; the folder is removed either way.
+    #[test]
+    fn prepare_golden_raw_and_zip() {
+        use std::io::Write;
+        let d = std::env::temp_dir().join("broom_test_prep");
+        let _ = std::fs::remove_dir_all(&d);
+        let (up, dest) = (d.join("upload"), d.join("image.img"));
+        std::fs::create_dir_all(&up).unwrap();
+        std::fs::write(up.join("DISK.IMG"), b"RAW").unwrap();
+        super::prepare_golden(&up, &dest).unwrap();
+        assert_eq!(std::fs::read(&dest).unwrap(), b"RAW");
+        assert!(!up.exists());
+
+        std::fs::create_dir_all(&up).unwrap();
+        let mut w = zip::ZipWriter::new(std::fs::File::create(up.join("vm.zip")).unwrap());
+        w.start_file("VM/disk.raw", zip::write::SimpleFileOptions::default()).unwrap();
+        w.write_all(b"ZIPPED").unwrap();
+        w.finish().unwrap();
+        super::prepare_golden(&up, &dest).unwrap();
+        assert_eq!(std::fs::read(&dest).unwrap(), b"ZIPPED");
+        assert!(!up.exists());
+
+        std::fs::create_dir_all(&up).unwrap();
+        std::fs::write(up.join("notes.txt"), b"x").unwrap();
+        assert!(super::prepare_golden(&up, &dest).unwrap_err().contains("no .vmdk"));
+        assert_eq!(std::fs::read(&dest).unwrap(), b"ZIPPED"); // failed upload leaves the current golden alone
+        assert!(!d.join("image.img.new").exists());
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// Real zram via sysfs (root): `cargo test -- --ignored zram_live`.
+    #[test]
+    #[ignore]
+    fn zram_live() {
+        let dev = super::zram_add(16 << 20).unwrap();
+        std::fs::write(&dev, vec![7u8; 1 << 20]).unwrap();
+        assert_eq!(&std::fs::read(&dev).unwrap()[..4], &[7, 7, 7, 7]);
+        super::zram_remove(&dev);
+        assert!(!std::path::Path::new(&format!("/sys/block/{}", &dev[5..])).exists());
+    }
 
     /// .vmx: take the disk in use (current snapshot), skip CD/ISO.
     #[test]

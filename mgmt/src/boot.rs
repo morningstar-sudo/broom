@@ -1,74 +1,80 @@
-// boot.rs — M5 boot menu. Handler GET /boot.ipxe: generates a dynamic iPXE menu.
-// iPXE calls: chain http://SERVER/boot.ipxe?mac=${net0/mac}
-// The menu lists the images, marks the default item + countdown; on timeout → boot the default.
-// iPXE (snponly.efi) is embedded in the binary — install_ipxe() writes it to /srv/tftp.
+// boot.rs — M5 boot menu.
+// GET /boot.ipxe?mac=&ip=  (URL handed out by the built-in DHCP) → dynamic iPXE menu: images, default
+//   item + countdown; on timeout → the default.
+// GET /boot/start?image=&mac=&ip=  (a menu choice chains here) → logs "client … started" and returns
+//   that image's boot script.
+// iPXE (snponly.efi) is embedded in the binary — the built-in TFTP server (tftp.rs) serves it from memory.
 use axum::{
     extract::{Query, State},
     http::header,
     response::IntoResponse,
 };
 use std::collections::HashMap;
+use tracing::{info, warn};
 
-use crate::{db, SharedState};
+use crate::SharedState;
 
-/// Upstream iPXE built by mgmt/ipxe/build.sh (pinned commit in mgmt/ipxe/IPXE_COMMIT).
-const SNPONLY_EFI: &[u8] = include_bytes!("../ipxe/snponly.efi");
-const SNPONLY_PATH: &str = "/srv/tftp/snponly.efi";
+/// iPXE built by mgmt/ipxe/build.sh from mgmt/ipxe/ipxe-src (upgrading the mgmt binary = upgrading iPXE too).
+pub(crate) const SNPONLY_EFI: &[u8] = include_bytes!("../ipxe/snponly.efi");
 
-/// Write the embedded iPXE to /srv/tftp if missing/different (upgrading the mgmt binary = upgrading iPXE too).
-pub fn install_ipxe() -> std::io::Result<bool> {
-    if std::fs::read(SNPONLY_PATH).ok().as_deref() == Some(SNPONLY_EFI) {
-        return Ok(false);
-    }
-    std::fs::create_dir_all("/srv/tftp")?;
-    let tmp = format!("{SNPONLY_PATH}.tmp");
-    std::fs::write(&tmp, SNPONLY_EFI)?;
-    std::fs::rename(&tmp, SNPONLY_PATH)?;
-    Ok(true)
+type Q = Query<HashMap<String, String>>;
+
+/// Client identity from the query (iPXE expands ${net0/mac} = "34:5a:60:7b:2b:1d", ${net0/ip}):
+/// (mac, ip, hostname from the Machines table).
+fn client(st: &SharedState, q: &HashMap<String, String>) -> (String, String, Option<String>) {
+    let norm = |m: &str| m.to_lowercase().replace('-', ":");
+    let mac = q.get("mac").map(|m| norm(m)).unwrap_or_default();
+    let ip = q.get("ip").cloned().unwrap_or_else(|| "?".into());
+    let host = st.db.machines().unwrap_or_default().into_iter().find(|m| norm(&m.mac) == mac).and_then(|m| m.hostname);
+    (mac, ip, host)
 }
 
-pub async fn render(
-    State(st): State<SharedState>,
-    Query(q): Query<HashMap<String, String>>,
-) -> impl IntoResponse {
-    let conn = st.db.lock().unwrap();
-    // mac is appended to the URL by dnsmasq (iPXE expands ${net0/mac} = "34:5a:60:7b:2b:1d").
-    let mac = q.get("mac").map(|m| m.to_lowercase().replace('-', ":")).unwrap_or_default();
-    let host: Option<String> = conn
-        .query_row(
-            "SELECT hostname FROM machines WHERE lower(replace(mac,'-',':'))=?1",
-            [&mac],
-            |r| r.get(0),
-        )
-        .ok()
-        .flatten();
+fn script(body: String) -> impl IntoResponse {
+    ([(header::CONTENT_TYPE, "text/plain; charset=utf-8")], body)
+}
 
-    let timeout_s: u64 = db::get_config(&conn, "boot_timeout", "10")
-        .parse()
-        .unwrap_or(10);
+pub async fn render(State(st): State<SharedState>, Query(q): Q) -> impl IntoResponse {
+    let (mac, ip, host) = client(&st, &q);
+    let h = host.as_deref().unwrap_or("-");
+    info!("client {} boot menu - mac {mac} - ip {ip} - hostname {h}", host.as_deref().unwrap_or(&mac));
 
-    let mut stmt = conn
-        .prepare("SELECT name, is_default, boot_script FROM images ORDER BY id")
-        .unwrap();
-    let images: Vec<MenuImage> = stmt
-        .query_map([], |r| {
-            Ok(MenuImage {
-                name: r.get(0)?,
-                is_default: r.get::<_, i64>(1)? == 1,
-                boot_script: r.get(2)?,
-            })
-        })
-        .unwrap()
-        .filter_map(|r| r.ok())
+    let timeout_s: u64 = st.db.get_config("boot_timeout", "10").parse().unwrap_or(10);
+    let images: Vec<MenuImage> = st
+        .db
+        .images()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|i| MenuImage { name: i.name, is_default: i.is_default })
         .collect();
+    script(menu_script(&images, timeout_s, host.as_deref()))
+}
 
-    ([(header::CONTENT_TYPE, "text/plain; charset=utf-8")], menu_script(&images, timeout_s, host.as_deref()))
+/// A menu choice: log the boot + hand over the image's boot script.
+pub async fn start(State(st): State<SharedState>, Query(q): Q) -> impl IntoResponse {
+    let (mac, ip, host) = client(&st, &q);
+    let name = q.get("image").cloned().unwrap_or_default();
+    let who = host.clone().unwrap_or_else(|| mac.clone());
+    let h = host.as_deref().unwrap_or("-");
+    let img = st.db.image_by_name(&name).ok().flatten();
+    let boot = img.as_ref().and_then(|i| i.boot_script.as_deref()).map(str::trim).filter(|s| !s.is_empty());
+    script(match (&img, boot) {
+        (Some(i), Some(bs)) => {
+            info!("client {who} started - mac {mac} - ip {ip} - hostname {h} - image {name} ({})", i.os);
+            format!("#!ipxe\n{bs}\n")
+        }
+        _ => {
+            warn!("client {who} chose image {name:?} - mac {mac} - ip {ip}: not published, back to the menu");
+            format!(
+                "#!ipxe\necho Image '{name}' is not published yet (no boot_script)\nsleep 3\n\
+                 chain /boot.ipxe?mac=${{net0/mac}}&ip=${{net0/ip}}\n"
+            )
+        }
+    })
 }
 
 struct MenuImage {
     name: String,
     is_default: bool,
-    boot_script: Option<String>,
 }
 
 /// iPXE menu script. ASCII only (the iPXE console font has no accented characters).
@@ -83,15 +89,11 @@ fn menu_script(images: &[MenuImage], timeout_s: u64, host: Option<&str>) -> Stri
         let label = format!("img_{}", sanitize(&img.name));
         let key = if i < 9 { format!("--key {} ", i + 1) } else { String::new() };
         items.push_str(&format!("item {key}{label} [{}] {}\n", i + 1, img.name));
-        let body = match img.boot_script.as_deref().map(str::trim) {
-            Some(s) if !s.is_empty() => s.to_string(),
-            // Not published yet → tell the user + back to the menu (no hang).
-            _ => format!(
-                "echo Image '{}' is not published yet (no boot_script)\nsleep 3\ngoto start",
-                img.name
-            ),
-        };
-        targets.push_str(&format!(":{label}\n{body}\n\n"));
+        // The server logs the boot and returns the image's script (image names are URL-safe: [A-Za-z0-9_-]).
+        targets.push_str(&format!(
+            ":{label}\nchain /boot/start?image={}&mac=${{net0/mac}}&ip=${{net0/ip}} || goto start\n\n",
+            img.name
+        ));
         if img.is_default {
             default = Some(label);
         }
@@ -148,24 +150,20 @@ fn sanitize(s: &str) -> String {
 mod tests {
     use super::{menu_script, MenuImage};
 
-    fn img(name: &str, def: bool, bs: Option<&str>) -> MenuImage {
-        MenuImage { name: name.into(), is_default: def, boot_script: bs.map(Into::into) }
+    fn img(name: &str, def: bool) -> MenuImage {
+        MenuImage { name: name.into(), is_default: def }
     }
 
     #[test]
     fn menu_default_keys_ascii() {
-        let s = menu_script(
-            &[img("win-11", true, Some("kernel x\nboot")), img("ubuntu", false, None)],
-            5,
-            Some("FPS-43 $x|"),
-        );
+        let s = menu_script(&[img("win-11", true), img("ubuntu", false)], 5, Some("FPS-43 $x|"));
         assert!(s.starts_with("#!ipxe\n"));
         assert!(s.is_ascii(), "the iPXE font is ASCII only");
         assert!(s.contains("item --key 1 img_win_11 [1] win-11\n"));
         assert!(s.contains("item --key 2 img_ubuntu [2] ubuntu\n"));
         assert!(s.contains("choose --default img_win_11 --timeout 5000 sel || goto shell"));
-        assert!(s.contains(":img_win_11\nkernel x\nboot"));
-        assert!(s.contains(":img_ubuntu\necho Image 'ubuntu' is not published yet"));
+        // A choice goes through the server (boot log + the image's script).
+        assert!(s.contains(":img_win_11\nchain /boot/start?image=win-11&mac=${net0/mac}&ip=${net0/ip} || goto start\n"));
         assert!(s.contains("set menu-footer Host: FPS-43x|IP: ${net0/ip}|MAC: ${net0/mac}\n"));
         assert!(s.contains("set broom-host FPS-43x\n"));
         // menu_ui.c draws the countdown in the last 32 columns of the hint row (from col 46 on 80x25).
@@ -175,7 +173,7 @@ mod tests {
 
     #[test]
     fn menu_no_default_no_timeout() {
-        let s = menu_script(&[img("a", false, Some("boot"))], 10, None);
+        let s = menu_script(&[img("a", false)], 10, None);
         assert!(s.contains("choose  sel || goto shell"));
         assert!(s.contains("Host: not registered|"));
         assert!(!s.contains("broom-host"));

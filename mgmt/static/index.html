@@ -84,7 +84,7 @@
   button.danger:hover{border-color:var(--off);color:var(--off)}
   .row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
   .field{display:flex;flex-direction:column;gap:4px}
-  .msg{font:600 .82rem/1.4 var(--mono);color:var(--muted)}
+  .msg{font:600 .82rem/1.4 var(--mono);color:var(--muted);overflow-wrap:anywhere}  /* long job results (driver lists) wrap inside the card */
   .pill{font:700 .64rem/1 var(--mono);text-transform:uppercase;letter-spacing:.06em;
     padding:3px 7px;border-radius:20px;border:1px solid var(--line);color:var(--muted)}
   .pill.linux{color:var(--on);border-color:color-mix(in srgb,var(--on) 45%,transparent)}
@@ -199,11 +199,12 @@ async function regMachine(mac,ip,host){
   do{hostname=prompt('Hostname for '+mac+(hostOk(hostname)?'':'\n'+HOST_RULE)+':',hostname);if(hostname===null)return;hostname=hostname.trim();}
   while(!hostOk(hostname));
   await j('/api/machines',mk({mac,ip:ip||null,hostname}));
-  alert('Registered. Network → Apply (regenerates DHCP), then reboot the machine to get its IP/name.');loadStatus();
+  alert('Registered. Reboot the machine to get its IP/name (full DHCP mode).');loadStatus();
 }
 async function wake(mac){await j('/api/wake',mk({mac}));alert('WOL sent to '+mac)}
 
 // ---- images ----
+const gbs=b=>b>=1e9?(b/1e9).toFixed(1)+' GB':(b/1e6).toFixed(0)+' MB';
 async function loadImages(){
   const rows=await j('/api/images');
   document.querySelector('#images tbody').innerHTML=rows.map(i=>
@@ -211,14 +212,16 @@ async function loadImages(){
        <td class="mono">${esc(i.cache_mode||'disk')}</td>
        <td>${i.is_default?'<span class="ok">✓</span>':''}</td>
        <td>${i.boot_script?'<span class="ok">✓</span>':'<span class="mono">no</span>'}</td>
+       <td class="mono" title="used on disk / virtual disk">${i.size==null?'—':gbs(i.used)+' / '+gbs(i.size)}${i.active_version?' <span class="pill linux">'+esc(i.active_version)+'</span>':''}</td>
        <td class="mono" title="${esc(i.hash||'')}">${i.hash?esc(i.hash).slice(0,10):'—'}</td>
        <td class="row">
          <button class="ghost" onclick="setDefault(${i.id})">Default</button>
          <button class="ghost" onclick="toggleCache(${i.id},'${esc(i.cache_mode||'disk')}','${esc(i.name)}')">${(i.cache_mode==='zram')?'→disk':'→zram'}</button>
          <button class="ghost" onclick="republish(${i.id},'${esc(i.name)}')">Republish</button>
+         <button class="ghost" onclick="showVersions(${i.id},'${esc(i.name)}','${esc(i.os)}')">Versions</button>
          <button class="ghost" onclick="editBoot(${i.id},${JSON.stringify(esc(i.boot_script||''))})">Boot</button>
          <button class="ghost danger" onclick="delImage(${i.id},'${esc(i.name)}')">Delete</button>
-       </td></tr>`).join('') || '<tr><td colspan=7 class="mono">no images yet</td></tr>';
+       </td></tr>`).join('') || '<tr><td colspan=8 class="mono">no images yet</td></tr>';
   // srvhost inside the images fragment → set after it is injected.
   try{document.getElementById('srvhost2').textContent=location.host;}catch(_){}
   try{document.getElementById('srvhost3').textContent=location.host;}catch(_){}
@@ -226,44 +229,80 @@ async function loadImages(){
 async function toggleCache(id,cur,name){const mode=cur==='zram'?'disk':'zram';
   if(!confirm('Switch image cache to "'+mode+'"? (republish; zram loads the img into RAM)'))return;
   const el=document.getElementById('img_status');
-  try{await j('/api/images/cache-mode',mk({id,mode}));pollJob(name,el);}catch(e){el.textContent=' ✗ '+e.message;}}
+  try{await j('/api/images/cache-mode',mk({id,mode}));watchJob(name,el);}catch(e){el.textContent=' ✗ '+e.message;}}
 async function setDefault(id){await j('/api/images/default',mk({id}));loadImages()}
-// Poll the job status by image name → update the text of el; stop at ✓/✗.
-function pollJob(name,el){
-  el.textContent=' ⏳ publishing...';
-  const t=setInterval(async()=>{
-    let s='';try{s=(await j('/api/images/job?name='+encodeURIComponent(name))).status;}catch(_){}
-    if(!s)return;
-    el.textContent=' '+s;
-    if(s.startsWith('✓')||s.startsWith('✗')){clearInterval(t);loadImages();}
-  },2000);
+// Job status by image name, pushed over SSE (/api/events "job") → text of el until ✓/✗.
+// done(): optional, called when the job finishes (e.g. refresh the versions list).
+const jobWatch={};
+function showJob(name,s){const w=jobWatch[name];if(!w||!s)return;
+  w.el.textContent=' '+s;
+  if(s.startsWith('✓')||s.startsWith('✗')){delete jobWatch[name];loadImages();if(w.done)w.done();}}
+function watchJob(name,el,done){
+  el.textContent=' ⏳ working...';jobWatch[name]={el,done};
+  // catch up once: the job may have moved on (or finished) before this tab started watching
+  j('/api/images/job?name='+encodeURIComponent(name)).then(r=>showJob(name,r.status)).catch(()=>{});
 }
+// ---- image versions (versions.rs: dedup 4 MB chunks; snapshot/rollback run as jobs) ----
+let verImg=null;
+async function showVersions(id,name,os){verImg={id,name,os};
+  const r=await j('/api/images/snapshots?id='+id), el=document.getElementById('img_versions');
+  el.innerHTML=`<h2>Versions — ${esc(name)} <button class="ghost" onclick="snapshotImage()">+ Snapshot now</button></h2>
+    <div class="scroll"><table><thead><tr><th>Version</th><th>Label</th><th>Created</th><th title="data that differs from the active version (what a rollback to it rewrites)">vs active</th><th></th></tr></thead><tbody>${
+    r.versions.map(v=>`<tr><td class="mono">${esc(v.version)} ${v.version===r.active?'<span class="pill linux">active</span>':''}</td>
+      <td>${esc(v.label)}</td><td class="mono">${new Date(v.created*1000).toLocaleString()}</td><td class="mono" title="disk size ${gbs(v.size)}">${v.version===r.active?'—':v.diff==null?'<span title="no active version">?</span>':v.diff?'Δ '+gbs(v.diff):'same'}</td>
+      <td class="row"><button class="ghost" onclick="rollbackImage('${esc(v.version)}')">Rollback</button>
+        <button class="ghost danger" onclick="deleteVersion('${esc(v.version)}')">Delete</button></td></tr>`).join('')
+    || '<tr><td colspan=5 class="mono">no versions yet — Snapshot now saves the current golden</td></tr>'}</tbody></table></div>`;}
+async function snapshotImage(){const label=prompt('Label for this version (optional):','');if(label===null)return;
+  const el=document.getElementById('img_status');
+  try{await j('/api/images/snapshot',mk({id:verImg.id,label}));watchJob(verImg.name,el,()=>showVersions(verImg.id,verImg.name,verImg.os));}catch(e){el.textContent=' ✗ '+e.message;}}
+async function rollbackImage(version){
+  if(!confirm('Roll '+verImg.name+' back to '+version+'?'+(verImg.os==='windows'?' Every client will download the golden again.':' Running clients lose their iSCSI disk until publish finishes.')))return;
+  const el=document.getElementById('img_status');
+  try{await j('/api/images/rollback',mk({id:verImg.id,version}));watchJob(verImg.name,el,()=>showVersions(verImg.id,verImg.name,verImg.os));}catch(e){el.textContent=' ✗ '+e.message;}}
+async function deleteVersion(version){if(!confirm('Delete version '+version+' of '+verImg.name+'?'))return;
+  try{await j('/api/images/version-delete',mk({id:verImg.id,version}));}catch(e){alert(e.message);}
+  showVersions(verImg.id,verImg.name,verImg.os);}
 async function republish(id,name){const el=document.getElementById('img_status');
-  try{await j('/api/images/publish',mk({id}));pollJob(name,el);}catch(e){el.textContent=' ✗ '+e.message;}}
+  try{await j('/api/images/publish',mk({id}));watchJob(name,el);}catch(e){el.textContent=' ✗ '+e.message;}}
 async function editBoot(id,cur){const s=prompt('iPXE boot script:',cur||'');if(s===null)return;
   await j('/api/images/boot-script',mk({id,boot_script:s}));loadImages();}
 async function delImage(id,name){if(!confirm('Delete image "'+name+'"?'))return;
   await j('/api/images/delete',mk({id}));loadImages();}
-function upload(url,file,prog,msg,done){
-  const xhr=new XMLHttpRequest();xhr.open('PUT',url);
-  prog.style.display='';prog.value=0;msg.textContent=' uploading...';
-  xhr.upload.onprogress=e=>{if(e.lengthComputable){prog.value=e.loaded/e.total*100;msg.textContent=' upload '+Math.round(e.loaded/e.total*100)+'%';}};
-  xhr.onload=()=>{let r={};try{r=JSON.parse(xhr.responseText);}catch(_){}done(xhr.status,r,xhr.responseText);};
-  xhr.onerror=()=>{msg.textContent=' ✗ network error';};xhr.send(file);
+// Chunked upload: every file in 8 MB pieces, 4 in flight; a failed piece is retried (2,4,8,16,32 s).
+const CHUNK=8<<20,LANES=4;
+async function putChunk(name,f,off){
+  const url='/api/images/upload-chunk?name='+encodeURIComponent(name)+'&file='+encodeURIComponent(f.name)+'&offset='+off+'&total='+f.size;
+  for(let t=0;;t++){
+    let r=null;try{r=await fetch(url,{method:'PUT',body:f.slice(off,off+CHUNK)});}catch(_){}   // null = network error
+    if(r&&r.ok)return;
+    if(r&&r.status<500)throw new Error(await r.text());   // rejected: retrying won't help
+    if(t>=5)throw new Error(r?await r.text():'network error');
+    await new Promise(ok=>setTimeout(ok,2000<<t));
+  }
+}
+async function uploadFiles(name,files,prog,msg){
+  await j('/api/images/upload-start',mk({name}));
+  const q=[];for(const f of files)for(let o=0;o===0||o<f.size;o+=CHUNK)q.push([f,o]);
+  const total=files.reduce((s,f)=>s+f.size,0)||1,t0=Date.now();let done=0;
+  prog.style.display='';prog.value=0;
+  const lane=async()=>{while(q.length){const [f,o]=q.shift();
+    try{await putChunk(name,f,o);}catch(e){q.length=0;throw e;}   // one piece failed for good → stop all lanes
+    done+=Math.min(CHUNK,f.size-o);prog.value=done/total*100;
+    msg.textContent=' upload '+Math.round(done/total*100)+'% · '+(done/1e6/Math.max(1,(Date.now()-t0)/1000)).toFixed(0)+' MB/s';}};
+  await Promise.all(Array.from({length:LANES},lane));
+  await j('/api/images/upload-done',mk({name}));
 }
 async function addImage(){
-  const f=document.getElementById('up_file').files[0],name=v('up_name'),msg=document.getElementById('up_msg');
-  const cache=document.getElementById('up_cache').value;
-  if(!f||!name){alert('Enter a name + choose a file');return;}
-  // src from the file extension: .vmdk → convert; .zip → unzip; anything else → raw.
-  const ext=(f.name.split('.').pop()||'').toLowerCase();
-  const src=ext==='vmdk'?'vmdk':(ext==='zip'?'zip':'raw');
+  const dir=[...document.getElementById('up_dir').files].filter(f=>/\.(vmdk|vmx|img|raw)$/i.test(f.name));
+  const one=document.getElementById('up_file').files[0],files=dir.length?dir:(one?[one]:[]);
+  const name=v('up_name'),msg=document.getElementById('up_msg'),cache=document.getElementById('up_cache').value;
+  if(!files.length||!name){alert('Enter a name + choose a VM folder or a file');return;}
   const os=document.getElementById('up_os').value;
   try{await j('/api/images',mk({name,os,cache_mode:cache}));}catch(e){}
-  upload('/api/images/upload?name='+encodeURIComponent(name)+'&src='+src,f,document.getElementById('up_prog'),msg,(st,r,txt)=>{
-    if(st!==200){msg.textContent=' ✗ '+txt;return;}
-    msg.textContent=' ✓ upload done';loadImages();pollJob(name,msg);   // publish runs in the background → poll
-  });
+  try{await uploadFiles(name,files,document.getElementById('up_prog'),msg);}
+  catch(e){msg.textContent=' ✗ '+e.message;return;}
+  msg.textContent=' ✓ upload done';loadImages();watchJob(name,msg);   // convert + publish run in the background → SSE
 }
 
 // ---- network ----
@@ -272,7 +311,8 @@ async function loadDhcp(){const c=await j('/api/dhcp');
   const dm=document.getElementById('dhcp_mode');if(dm)dm.onchange=toggleFull;toggleFull();}
 function toggleFull(){const fo=document.getElementById('full_only'),dm=document.getElementById('dhcp_mode');if(fo&&dm)fo.style.display=dm.value==='full'?'':'none';}
 async function applyDhcp(){const b={};['mode','iface','server_ip','subnet','range_start','range_end','gateway','dns'].forEach(k=>b[k]=document.getElementById('dhcp_'+k).value);
-  const r=await j('/api/dhcp',mk(b));document.getElementById('dhcp_msg').textContent=r.reloaded?' ✓ reload OK':' ⚠ saved, reload failed';}
+  const m=document.getElementById('dhcp_msg');
+  try{const r=await j('/api/dhcp',mk(b));m.textContent=' ✓ '+(r.status||'applied');}catch(e){m.textContent=' ✗ '+e.message;}}
 
 // ---- system ----
 async function loadCafe(){const c=await j('/api/cafe-user');['user','password'].forEach(k=>{const e=document.getElementById('cafe_'+k);if(e)e.value=c[k]||'';});}
@@ -289,6 +329,7 @@ function setServer(up){const d=document.getElementById('srvdot');
   d.classList.toggle('up',up);d.classList.toggle('down',!up);d.title=up?'server online':'server offline';}
 const srvEvents=new EventSource('/api/events');
 srvEvents.addEventListener('ping',()=>{lastPing=Date.now();setServer(true);});
+srvEvents.addEventListener('job',e=>{const d=JSON.parse(e.data);showJob(d.name,d.status);});
 srvEvents.onerror=()=>setServer(false);
 setInterval(()=>{if(lastPing&&Date.now()-lastPing>12000)setServer(false);},3000);
 

@@ -1,0 +1,5 @@
+# Always build with the latest stable Rust (rustup picks it up automatically).
+# musl target: the release binary is fully static → runs on any x86_64 Linux, whatever its glibc.
+[toolchain]
+channel = "stable"
+targets = ["x86_64-unknown-linux-musl"]
