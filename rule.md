@@ -14,6 +14,9 @@
 - The golden image is shared **read-only**; runtime writes: a write layer on the **local SSD**, reset every
   boot (Linux: overlayroot; Windows: child VHDX). PXE first in BootOrder so every boot goes through the reset.
 - Preflight must pass before the app serves (missing packages → exit ≠ 0, reported clearly).
+- No distro services: DHCP/TFTP/iSCSI/HTTP run inside the binary. Storage only through the `db/`
+  driver (`Db` trait) — no SQL outside `mgmt/src/db/`.
+- Toolchain: Rust stable (rustup) + latest stable crates; code comments, logs and UI in English.
 - **Current scope:** Linux diskless (iSCSI + SSD writeback/cache) + **Windows design B** (native VHDX
   boot on the client SSD, child reset every boot — see plan.md section "Phase W", docs/phase-w-windows.md).
 

@@ -11,16 +11,20 @@
 //   write into it → broom-done.ps1 writes base.ok + reboots → stage renames child→base, patches the GUID
 //   into child-template (parent base) → from then on each boot only copies child-local → child (instant).
 //   Done → efibootmgr BootNext "Broom Windows" → reboot → Windows boots the child from the SSD.
-use rusqlite::params;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::Command;
 
-use crate::{db, images_dir, SharedState};
+use crate::db::Db;
+use crate::{images_dir, SharedState};
 
-const STAGE_DIR: &str = "/srv/tftp/broom-stage";
+/// Windows stage (kernel + initrd) served at /tftp/broom-stage/.
+fn stage_dir() -> String {
+    crate::tftp_dir().join("broom-stage").to_string_lossy().into_owned()
+}
 
 fn run(bin: &str, args: &[&str]) -> Result<String, String> {
+    tracing::debug!("exec: {bin} {}", args.join(" "));
     let o = Command::new(bin).args(args).output().map_err(|e| format!("{bin}: {e}"))?;
     if o.status.success() {
         Ok(String::from_utf8_lossy(&o.stdout).trim().to_string())
@@ -58,6 +62,7 @@ PATH=/broom/bin:$PATH
 log(){ echo "broom: $*"; echo "$*" >> /run/broom-stage.log; }
 # panic = shell (initramfs); fix by hand then `exit` → the script CONTINUES from the failed step (on-site debug).
 die(){ panic "broom stage ERROR: $*"; }
+restart(){ log "$*"; sleep 2; reboot -f 2>/dev/null || echo b > /proc/sysrq-trigger; sleep 30; }
 NAME=""; HASH=""; SRV=""; HOST=""
 for a in $(cat /proc/cmdline); do
   case "$a" in broom.name=*) NAME=${a#*=};; broom.hash=*) HASH=${a#*=};; broom.srv=*) SRV=${a#*=};;
@@ -109,6 +114,17 @@ mkdir -p $B
 if [ "$(cat $B/golden.sha256 2>/dev/null)" != "$HASH" ]; then
   log "new golden ($HASH) -> downloading from $SRV"
   configure_networking
+  # Server's golden.sha256: gone while a publish/rollback rebuilds the files → wait; another hash → this boot's
+  # hash is stale (image changed after iPXE) → reboot for the new boot script. Never mix files of two versions.
+  srv_hash(){ wget -q -O - http://$SRV/tftp/broom-win/$NAME/golden.sha256 2>/dev/null; }
+  i=0
+  while :; do
+    h=$(srv_hash)
+    [ "$h" = "$HASH" ] && break
+    [ -n "$h" ] && restart "image $NAME changed on the server -> reboot to get the new version"
+    i=$((i+1)); [ $i -gt 40 ] && die "server has no golden.sha256 for $NAME (publish failed?) -> Publish again, then reboot"
+    log "image $NAME is being published on the server -> waiting ($i/40)"; sleep 15
+  done
   D=$B/dl-$HASH
   for x in $B/dl-*; do [ "$x" = "$D" ] || rm -rf "$x"; done
   rm -f $B/golden.vhdx $B/golden.sha256 $B/base.vhdx $B/base.ok $B/first.pending $B/child.vhdx $B/child-local.vhdx
@@ -123,6 +139,7 @@ if [ "$(cat $B/golden.sha256 2>/dev/null)" != "$HASH" ]; then
     wget -c -O $D/$f $U || { rm -f $D/$f; wget -O $D/$f $U; } || die "download $f"
     touch $D/$f.ok
   done
+  [ "$(srv_hash)" = "$HASH" ] || { rm -rf $D; restart "image $NAME changed on the server during the download -> reboot to get the new version"; }
   log "checking golden sha256 - rereads the whole file, may take a few minutes, DO NOT power off..."
   [ "$(sha256sum $D/golden.vhdx | cut -d' ' -f1)" = "$HASH" ] || { rm -rf $D; die "golden sha256 mismatch"; }
   rm -f $D/*.ok
@@ -239,17 +256,16 @@ if [ "$want" != "$order" ]; then
   efibootmgr -q -o "$want" && log "BootOrder forced: PXE -> Broom Windows -> Windows Boot Manager [$want]"
 fi
 efibootmgr -q -n $n || die "efibootmgr BootNext"
-log "-> Windows ($MODE)"
-sleep 2
-reboot -f 2>/dev/null || echo b > /proc/sysrq-trigger
+restart "-> Windows ($MODE)"
 "#;
 
-/// Build the stage: the server's running kernel + initrd (mkinitramfs, own confdir) → STAGE_DIR.
+/// Build the stage: the server's running kernel + initrd (mkinitramfs, own confdir) → stage_dir().
 /// Kernel + script + hook unchanged → keep the previous build (mkinitramfs MODULES=most takes about a minute).
 /// Returns true if freshly built.
 pub fn build_stage() -> Result<bool, String> {
     use std::hash::{Hash, Hasher};
-    let kv = run("uname", &["-r"])?;
+    let kv = std::fs::read_to_string("/proc/sys/kernel/osrelease").map_err(|e| format!("kernel release: {e}"))?;
+    let kv = kv.trim().to_string();
     run("modinfo", &["ntfs3"]).map_err(|_| format!("server kernel {kv} has no ntfs3 module — the stage must write NTFS"))?;
     // zstd: multithreaded compression + faster decompression than gzip; server without zstd → gzip.
     let compress = if run("sh", &["-c", "command -v zstd"]).is_ok() { "zstd" } else { "gzip" };
@@ -259,12 +275,13 @@ pub fn build_stage() -> Result<bool, String> {
         (&kv, &initramfs_conf, STAGE_HOOK, STAGE_SCRIPT).hash(&mut h);
         format!("{:016x}", h.finish())
     };
-    let key_file = format!("{STAGE_DIR}/stage.key");
-    let have = |f: &str| Path::new(&format!("{STAGE_DIR}/{f}")).exists();
+    let sd = stage_dir();
+    let key_file = format!("{sd}/stage.key");
+    let have = |f: &str| Path::new(&format!("{sd}/{f}")).exists();
     if have("stage.img") && have("vmlinuz") && std::fs::read_to_string(&key_file).ok().as_deref() == Some(key.as_str()) {
         return Ok(false);
     }
-    let conf = "/tmp/broom-stage-conf";
+    let conf = &crate::work_dir().join("stage-conf").to_string_lossy().into_owned();
     let _ = std::fs::remove_dir_all(conf);
     for d in ["scripts/init-premount", "hooks", "conf.d"] {
         std::fs::create_dir_all(format!("{conf}/{d}")).map_err(|e| e.to_string())?;
@@ -273,8 +290,8 @@ pub fn build_stage() -> Result<bool, String> {
     std::fs::write(format!("{conf}/modules"), "").map_err(|e| e.to_string())?;
     write_exec(&format!("{conf}/hooks/broom-stage"), STAGE_HOOK)?;
     write_exec(&format!("{conf}/scripts/init-premount/broom-stage"), STAGE_SCRIPT)?;
-    std::fs::create_dir_all(STAGE_DIR).map_err(|e| e.to_string())?;
-    let tmp = format!("{STAGE_DIR}/stage.img.tmp");
+    std::fs::create_dir_all(&sd).map_err(|e| e.to_string())?;
+    let tmp = format!("{sd}/stage.img.tmp");
     run("mkinitramfs", &["-d", conf, "-o", &tmp, &kv])?;
     // Tools WITHOUT a busybox replacement must really be in the initrd — report missing ones now
     // at publish time, not when a client gets stuck in a shell.
@@ -286,8 +303,8 @@ pub fn build_stage() -> Result<bool, String> {
     if !missing.is_empty() {
         return Err(format!("stage initrd is missing {} — install the packages on the server (fdisk ntfs-3g dosfstools efibootmgr) then Publish again", missing.join(", ")));
     }
-    std::fs::rename(&tmp, format!("{STAGE_DIR}/stage.img")).map_err(|e| e.to_string())?;
-    std::fs::copy(format!("/boot/vmlinuz-{kv}"), format!("{STAGE_DIR}/vmlinuz"))
+    std::fs::rename(&tmp, format!("{sd}/stage.img")).map_err(|e| e.to_string())?;
+    std::fs::copy(format!("/boot/vmlinuz-{kv}"), format!("{sd}/vmlinuz"))
         .map_err(|e| format!("copy /boot/vmlinuz-{kv}: {e}"))?;
     let _ = std::fs::remove_dir_all(conf);
     std::fs::write(&key_file, &key).map_err(|e| e.to_string())?;
@@ -373,7 +390,7 @@ pub fn publish(st: &SharedState, id: i64, name: &str, steps: &mut crate::publish
     let raw = images_dir().join(name).join("image.img");
     let raw = std::fs::canonicalize(&raw).map_err(|e| format!("no golden raw yet ({}): {e}", raw.display()))?;
     let raw = raw.to_string_lossy().to_string();
-    let out = format!("/srv/tftp/broom-win/{name}");
+    let out = crate::tftp_dir().join("broom-win").join(name).to_string_lossy().into_owned();
     std::fs::create_dir_all(&out).map_err(|e| e.to_string())?;
     let golden = format!("{out}/golden.vhdx");
 
@@ -402,10 +419,7 @@ pub fn publish(st: &SharedState, id: i64, name: &str, steps: &mut crate::publish
     };
     steps.go("initrd stage");
     let stage = if build_stage()? { "rebuilt" } else { "kept" };
-    let ip = {
-        let c = st.db.lock().unwrap();
-        db::get_config(&c, "dhcp_server_ip", "")
-    };
+    let ip = st.db.get_config("dhcp_server_ip", "");
     if ip.is_empty() {
         return Err("dhcp_server_ip is empty — run `setup` first".into());
     }
@@ -414,11 +428,7 @@ pub fn publish(st: &SharedState, id: i64, name: &str, steps: &mut crate::publish
          initrd http://{ip}/tftp/broom-stage/stage.img\n\
          boot"
     );
-    {
-        let c = st.db.lock().unwrap();
-        c.execute("UPDATE images SET boot_script=?1, hash=?2 WHERE id=?3", params![bs, hash, id])
-            .map_err(|e| e.to_string())?;
-    }
+    st.db.set_published(id, &bs, &hash)?;
     Ok(format!(
         "Publish OK — Windows '{name}': golden.vhdx + EFI + child templates; stage {stage}; boot-start disk drivers: {drivers}"
     ))
@@ -445,10 +455,14 @@ fn golden_key() -> String {
 
 /// image.img (raw whole VM disk) → golden.vhdx + efi.tar.gz + 2 empty child VHDX. Returns the enabled drivers.
 fn build_golden(raw: &str, out: &str, name: &str, steps: &mut crate::publish::Steps) -> Result<String, String> {
-    let mnt = format!("/run/broom-win-{name}");
+    let mnt = crate::work_dir().join(format!("mnt-{name}")).to_string_lossy().into_owned();
     // 1. The partition holding Windows — check the hive (read-only) BEFORE any write.
     steps.go("find Windows partition");
     let (start, size) = find_windows(raw, &mnt)?;
+
+    // No golden.sha256 while the files below change: a client downloading now sees "publish running" (the stage
+    // compares it to its own hash before + after downloading) instead of mixing files of two versions.
+    let _ = std::fs::remove_file(format!("{out}/golden.sha256"));
 
     // 2. Edit image.img IN PLACE (no temporary full-disk copy): punch holes outside the Windows partition (ESP/
     //    MSR/Recovery don't go into the golden) + GPT with a single partition (standard native VHD boot), KEEP start →
@@ -460,7 +474,7 @@ fn build_golden(raw: &str, out: &str, name: &str, steps: &mut crate::publish::St
     // Keep the first 1MB (primary GPT) + the last 1MB (backup GPT).
     for (off, len) in [(MB, start.saturating_sub(MB)), (end, total.saturating_sub(MB).saturating_sub(end))] {
         if len > 0 {
-            run("fallocate", &["--punch-hole", "--keep-size", "-o", &off.to_string(), "-l", &len.to_string(), raw])?;
+            punch_hole(raw, off, len)?;
         }
     }
     let layout = format!(
@@ -505,6 +519,21 @@ fn build_golden(raw: &str, out: &str, name: &str, steps: &mut crate::publish::St
     std::fs::write(format!("{out}/child-template.off"), off.to_string()).map_err(|e| e.to_string())?;
     std::fs::write(format!("{out}/golden.key"), golden_key()).map_err(|e| e.to_string())?;
     Ok(drivers)
+}
+
+/// Free [off, off+len) of a file without changing its size (fallocate PUNCH_HOLE|KEEP_SIZE; replaces
+/// the util-linux `fallocate` binary). Reads there return zeros.
+pub(crate) fn punch_hole(path: &str, off: u64, len: u64) -> Result<(), String> {
+    use std::os::fd::AsRawFd;
+    let f = std::fs::OpenOptions::new().write(true).open(path).map_err(|e| format!("{path}: {e}"))?;
+    // SAFETY: valid open fd; offsets are plain integers.
+    let r = unsafe {
+        libc::fallocate(f.as_raw_fd(), libc::FALLOC_FL_PUNCH_HOLE | libc::FALLOC_FL_KEEP_SIZE, off as i64, len as i64)
+    };
+    if r != 0 {
+        return Err(format!("punch hole {path} @{off}+{len}: {}", std::io::Error::last_os_error()));
+    }
+    Ok(())
 }
 
 /// Insert SkipMachineOOBE/SkipUserOOBE into the <OOBE> block (if missing). None = no OOBE block.
@@ -760,9 +789,9 @@ if (($want -join ' ') -ne ($cur -join ' ')) {
 }"#;
 
 /// /broom-prep-win: embeds the guest user/password (config shared with Linux).
-pub fn prep_script(conn: &rusqlite::Connection) -> String {
-    let user = db::get_config(conn, "ltsp_user", "guest");
-    let pass = db::get_config(conn, "ltsp_password", "123456");
+pub fn prep_script(db: &dyn Db) -> String {
+    let user = db.get_config("ltsp_user", "guest");
+    let pass = db.get_config("ltsp_password", "123456");
     PREP_WIN
         .replace("__BROOM_DONE__", BROOM_DONE)
         .replace("__USER__", &xml(&user))
@@ -814,6 +843,32 @@ mod tests {
         assert_eq!(String::from_utf16(&u).unwrap(), want);
         let _ = std::fs::remove_file(base);
         let _ = std::fs::remove_file(child);
+    }
+
+    /// Stage vs server golden.sha256 before downloading (cut from STAGE_SCRIPT, wget mocked by a list of answers,
+    /// "" = no file): same hash → go on; missing → wait; other hash → reboot; missing for good → die.
+    #[test]
+    fn stage_waits_for_server_hash() {
+        let s = super::STAGE_SCRIPT;
+        let lp = &s[s.find("  srv_hash(){").unwrap()..s.find("  D=$B/dl-$HASH").unwrap()];
+        let run = |answers: &[&str]| {
+            let d = std::env::temp_dir().join(format!("broom_t_hash_{}", answers.len()));
+            std::fs::create_dir_all(&d).unwrap();
+            std::fs::write(d.join("seq"), answers.join("\n") + "\n").unwrap();
+            std::fs::write(d.join("cnt"), "0").unwrap();
+            let sh = format!(
+                "cd {}; HASH=aa; NAME=w; SRV=x\nlog(){{ :; }}; sleep(){{ :; }}; die(){{ echo DIE; exit; }}; restart(){{ echo RESTART; exit; }}\n\
+                 wget(){{ n=$(cat cnt); echo $((n+1)) > cnt; sed -n \"$((n+1))p\" seq; }}\n{lp}\necho \"GO $(cat cnt)\"",
+                d.display()
+            );
+            let o = std::process::Command::new("sh").args(["-c", &sh]).output().unwrap();
+            let _ = std::fs::remove_dir_all(&d);
+            String::from_utf8_lossy(&o.stdout).trim().to_string()
+        };
+        assert_eq!(run(&["aa"]), "GO 1");
+        assert_eq!(run(&["", "", "aa"]), "GO 3"); // publish running → waited twice
+        assert_eq!(run(&["", "bb"]), "RESTART"); // newer version published → reboot for the new boot script
+        assert_eq!(run(&[""; 50]), "DIE");
     }
 
     #[test]

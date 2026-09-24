@@ -1,14 +1,15 @@
 // machines.rs — M8 mgmt-config. Machine table (MAC/IP/hostname), image assignment,
-// default image + countdown timeout, DHCP mode selection → generate bindings.conf + reload dnsmasq.
+// default image + countdown timeout, DHCP mode/parameters → restart the built-in DHCP (dhcp.rs).
 use axum::{
     extract::State,
     http::StatusCode,
     routing::{get, post},
     Json, Router,
 };
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 
-use crate::{db, dnsmasq, SharedState};
+use crate::db::Machine;
+use crate::{dhcp, SharedState};
 
 pub fn routes() -> Router<SharedState> {
     Router::new()
@@ -24,11 +25,20 @@ pub fn routes() -> Router<SharedState> {
 /// Guest user (created in the Windows golden by broom-prep-win → autologon). The DB keys keep the old names
 /// `ltsp_user`/`ltsp_password` so running DBs need no migration.
 async fn get_cafe_user(State(st): State<SharedState>) -> Json<serde_json::Value> {
-    let conn = st.db.lock().unwrap();
     Json(serde_json::json!({
-        "user": db::get_config(&conn, "ltsp_user", "guest"),
-        "password": db::get_config(&conn, "ltsp_password", "123456"),
+        "user": st.db.get_config("ltsp_user", "guest"),
+        "password": st.db.get_config("ltsp_password", "123456"),
     }))
+}
+
+type ApiError = (StatusCode, String);
+
+fn ise(e: String) -> ApiError {
+    (StatusCode::INTERNAL_SERVER_ERROR, e)
+}
+
+fn ok() -> Json<serde_json::Value> {
+    Json(serde_json::json!({"ok": true}))
 }
 
 #[derive(Deserialize)]
@@ -44,38 +54,14 @@ async fn set_cafe_user(
     if b.user.trim().is_empty() {
         return Err((StatusCode::BAD_REQUEST, "user is empty".into()));
     }
-    let conn = st.db.lock().unwrap();
-    db::set_config(&conn, "ltsp_user", b.user.trim()).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    db::set_config(&conn, "ltsp_password", &b.password).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    Ok(Json(serde_json::json!({"ok": true})))
+    st.db.set_config("ltsp_user", b.user.trim()).map_err(ise)?;
+    st.db.set_config("ltsp_password", &b.password).map_err(ise)?;
+    tracing::info!("guest user set to {}", b.user.trim());
+    Ok(ok())
 }
 
-#[derive(Serialize)]
-struct Machine {
-    id: i64,
-    mac: String,
-    ip: Option<String>,
-    hostname: Option<String>,
-    image_id: Option<i64>,
-}
-
-async fn list(State(st): State<SharedState>) -> Json<Vec<Machine>> {
-    let conn = st.db.lock().unwrap();
-    let mut stmt = conn
-        .prepare("SELECT id,mac,ip,hostname,image_id FROM machines ORDER BY hostname")
-        .unwrap();
-    let rows = stmt
-        .query_map([], |r| {
-            Ok(Machine {
-                id: r.get(0)?,
-                mac: r.get(1)?,
-                ip: r.get(2)?,
-                hostname: r.get(3)?,
-                image_id: r.get(4)?,
-            })
-        })
-        .unwrap();
-    Json(rows.filter_map(|r| r.ok()).collect())
+async fn list(State(st): State<SharedState>) -> Result<Json<Vec<Machine>>, ApiError> {
+    Ok(Json(st.db.machines().map_err(ise)?))
 }
 
 const HOSTNAME_RULE: &str =
@@ -118,13 +104,9 @@ async fn add(
             return Err((StatusCode::BAD_REQUEST, HOSTNAME_RULE.into()));
         }
     }
-    let conn = st.db.lock().unwrap();
-    conn.execute(
-        "INSERT INTO machines(mac,ip,hostname) VALUES(?1,?2,?3)",
-        rusqlite::params![b.mac, b.ip, hostname],
-    )
-    .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
-    Ok(Json(serde_json::json!({"ok": true, "id": conn.last_insert_rowid()})))
+    let id = st.db.add_machine(&b.mac, b.ip.as_deref(), hostname).map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+    tracing::info!("machine registered - mac {} - ip {} - hostname {}", b.mac, b.ip.as_deref().unwrap_or("-"), hostname.unwrap_or("-"));
+    Ok(Json(serde_json::json!({"ok": true, "id": id})))
 }
 
 #[derive(Deserialize)]
@@ -137,13 +119,9 @@ async fn assign(
     State(st): State<SharedState>,
     Json(b): Json<Assign>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let conn = st.db.lock().unwrap();
-    conn.execute(
-        "UPDATE machines SET image_id=?1 WHERE id=?2",
-        [b.image_id, b.machine_id],
-    )
-    .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
-    Ok(Json(serde_json::json!({"ok": true})))
+    st.db.assign_image(b.machine_id, b.image_id).map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+    tracing::info!("machine {} assigned image {}", b.machine_id, b.image_id);
+    Ok(ok())
 }
 
 #[derive(Deserialize)]
@@ -155,10 +133,9 @@ async fn set_timeout(
     State(st): State<SharedState>,
     Json(b): Json<Timeout>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let conn = st.db.lock().unwrap();
-    db::set_config(&conn, "boot_timeout", &b.seconds.to_string())
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    Ok(Json(serde_json::json!({"ok": true})))
+    st.db.set_config("boot_timeout", &b.seconds.to_string()).map_err(ise)?;
+    tracing::info!("boot menu countdown set to {} s", b.seconds);
+    Ok(ok())
 }
 
 #[derive(Deserialize)]
@@ -171,16 +148,14 @@ async fn set_zram_reserve(
     State(st): State<SharedState>,
     Json(b): Json<ZramReserve>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let conn = st.db.lock().unwrap();
-    db::set_config(&conn, "zram_reserve_mb", &b.mb.to_string())
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    Ok(Json(serde_json::json!({"ok": true})))
+    st.db.set_config("zram_reserve_mb", &b.mb.to_string()).map_err(ise)?;
+    tracing::info!("zram RAM reserve set to {} MB", b.mb);
+    Ok(ok())
 }
 
 /// Current DHCP config (mode + parameters) for the web to display.
 async fn get_dhcp(State(st): State<SharedState>) -> Json<serde_json::Value> {
-    let conn = st.db.lock().unwrap();
-    let g = |k: &str, d: &str| db::get_config(&conn, k, d);
+    let g = |k: &str, d: &str| st.db.get_config(k, d);
     Json(serde_json::json!({
         "mode": g("dhcp_mode", "proxy"),
         "iface": g("dhcp_iface", ""),
@@ -209,39 +184,42 @@ struct DhcpBody {
     lease: Option<String>,
 }
 
-/// Set the DHCP config + regenerate pxe.conf + restart dnsmasq (dnsmasq.rs).
+/// Save the DHCP config + restart the built-in DHCP/TFTP listeners (dhcp.rs).
 async fn set_dhcp(
     State(st): State<SharedState>,
     Json(b): Json<DhcpBody>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let conn = st.db.lock().unwrap();
-    let put = |k: &str, v: &Option<String>| {
-        if let Some(val) = v {
-            db::set_config(&conn, k, val).ok();
-        }
-    };
-    put("dhcp_mode", &b.mode);
-    put("dhcp_iface", &b.iface);
-    put("dhcp_server_ip", &b.server_ip);
-    put("dhcp_subnet", &b.subnet);
-    put("dhcp_range_start", &b.range_start);
-    put("dhcp_range_end", &b.range_end);
-    put("dhcp_netmask", &b.netmask);
-    put("dhcp_gateway", &b.gateway);
-    put("dhcp_dns", &b.dns);
-    put("dhcp_lease", &b.lease);
-
-    let reloaded = dnsmasq::apply(&conn)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("ghi pxe.conf: {e}")))?;
-    Ok(Json(serde_json::json!({"ok": true, "reloaded": reloaded})))
+    {
+        let put = |k: &str, v: &Option<String>| {
+            if let Some(val) = v {
+                st.db.set_config(k, val).ok();
+            }
+        };
+        put("dhcp_mode", &b.mode);
+        put("dhcp_iface", &b.iface);
+        put("dhcp_server_ip", &b.server_ip);
+        put("dhcp_subnet", &b.subnet);
+        put("dhcp_range_start", &b.range_start);
+        put("dhcp_range_end", &b.range_end);
+        put("dhcp_netmask", &b.netmask);
+        put("dhcp_gateway", &b.gateway);
+        put("dhcp_dns", &b.dns);
+        put("dhcp_lease", &b.lease);
+    }
+    restart(&st).await
 }
 
-/// Only regenerate pxe.conf from the current config + bindings (e.g. after editing the machine table).
-async fn apply_dhcp(
-    State(st): State<SharedState>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let conn = st.db.lock().unwrap();
-    let reloaded = dnsmasq::apply(&conn)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("ghi pxe.conf: {e}")))?;
-    Ok(Json(serde_json::json!({"ok": true, "reloaded": reloaded})))
+/// Restart the DHCP/TFTP listeners with the current config. (Machine bindings need no restart:
+/// every DHCP request reads them from the DB.)
+async fn apply_dhcp(State(st): State<SharedState>) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    restart(&st).await
+}
+
+async fn restart(st: &SharedState) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let status = dhcp::start(st).await.map_err(|e| {
+        tracing::error!("network settings: {e}");
+        (StatusCode::INTERNAL_SERVER_ERROR, e)
+    })?;
+    tracing::info!("network settings applied: {status}");
+    Ok(Json(serde_json::json!({"ok": true, "reloaded": true, "status": status})))
 }

@@ -14,6 +14,8 @@ Update the matching section after each phase (code review + test steps + actual 
 | Tooling (2026-08-22) | done | | ltsp-script + zip bundle upload on the web + auto unzip/publish + **ltsp.conf generated inside the binary (guest user/password/home/SSD, base64 no-newline)** + guest-user API/web + delete + web polish |
 | Phase 5 — Operations & hardening | todo | | backup, SPOF, docs |
 | Phase W — Windows native VHDX boot (SSD) | **doing** | 2026-09-24 | Design B, Win Pro, golden = sysprepped VM + .vmdk upload, the server handles the rest. Client VM: stage → golden.vhdx → automatic specialize/OOBE → desktop ✅. Reset ✅ when PXE is first in BootOrder (disk first → stage skipped; the stage deletes `\EFI\Boot` + keeps "Broom Windows" after PXE). Open: 2 machines/models, games + anti-cheat. Details below. |
+| Phase T — Fewer external tools (libguestfs, ZFS gone) | **doing** | 2026-09-25 | T1 linuxfs.rs (ext4 + LVM linear) replaces libguestfs; T2 versions.rs (chunk + manifest snapshot/rollback + UI) replaces ZFS. Unit + live LVM + end-to-end publish/snapshot/rollback PASS in WSL; real hardware pending. T3 (Windows golden read-only) later. |
+| Phase S — Built-in DHCP/TFTP/iSCSI, db driver, latest toolchain | **doing** | 2026-09-24 | dnsmasq + targetcli replaced by code in the binary; SQL behind the `Db` trait; Rust stable + edition 2024 + latest crates. Unit + live + netns DHCP/TFTP tests PASS in WSL; real hardware pending. Details below. |
 | Phase 6 — Golden vmdk→raw + iSCSI + SSD overlay | **doing** | 2026-08-25 | Mechanism changed: LTSP RAM overlay dropped → golden raw (from vmdk) shared RO over iSCSI + overlayroot writeback on the **SSD** (reset every boot) + per-image zram cache. B1–B4 coded. B5: client boots Ubuntu over iSCSI OK. **B6 done (2026-09-24): LTSP removed** (ltsp.rs, upload-ltsp, ltsp-script, scripts/, docs/phase2-linux.md). Details below. |
 
 ---
@@ -152,7 +154,7 @@ POST /api/wake {mac}      → {"ok":true} (magic packet sent)
 - [ ] **On a real server:** preflight FAILS correctly when packages are missing (exit ≠ 0)
 - [ ] **Real server:** create a version → rollback (`zfs rollback`) to the right copy (needs ZFS)
 - [ ] **Real server:** apply_dhcp generates bindings.conf + reloads dnsmasq
-- [ ] **Real server:** /api/status ping reports on/off correctly
+- [ ] **Real server:** /api/status ping reports on/off correctly (ping is not logged)
 
 **Actual result:** local smoke PASS (2026-08-22). Real server: preflight PASS, web admin OK.
 
@@ -168,7 +170,7 @@ POST /api/wake {mac}      → {"ok":true} (magic packet sent)
 - **Own iPXE build**: upstream iPXE source vendored in `mgmt/ipxe/ipxe-src/`, edited in place — menu
   layout (title + hint + countdown, rules, `[1] NAME` list, footer `Host|IP|MAC`), one-line banner,
   no autoexec.ipxe lookup, no 2 s Ctrl-B wait. `snponly.efi` embedded in the binary.
-- dnsmasq boot URL carries `?mac=${net0/mac}` → the menu shows the machine name from the Machines table.
+- The DHCP boot URL carries `?mac=${net0/mac}` → the menu shows the machine name from the Machines table.
 - **Windows computer name from the server**: name → iPXE `broom-host` → stage `broom.host=` →
   `broom\host.txt` → broom-done `Rename-Computer` when base is created; renaming = base rebuilt once.
   Hostname validated on web + API (1–15 chars, letters/digits/'-', NetBIOS rules).
@@ -177,6 +179,68 @@ POST /api/wake {mac}      → {"ok":true} (magic packet sent)
   `iqn.2026-08.net.tiem:<name>` target is removed on the next publish.
 - [ ] Deploy + screenshot of the new menu and boot banner on a real client.
 - [ ] Windows: machine registered with a name → after one re-specialize, Windows shows that name.
+
+---
+
+## Phase T — Fewer external tools (selective)
+**Status:** doing — T1 + T2 built and tested in WSL (below); real client/server test pending. T3 later.
+Plan + reasoning: `plan.md` → "Phase T".
+
+### Test steps + actual results (WSL, 2026-09-25)
+- `./build.sh` → 36 unit tests PASS: `linuxfs` (LVM metadata parse + linear mapping; real ext4 in a GPT
+  partition made with `mkfs.ext4 -d` → newest kernel 6.8.0-45 chosen over 5.15.0-91, initrd, UUID),
+  `versions` (snapshot/dedup/zero chunks/rollback only rewrites differing chunks/holes kept/GC), DB `active_version`.
+- Live as root: `lvm_live` — Ubuntu Server layout (p1 `/boot` ext4, p2 PV → VG `brtest` → LV `root` ext4)
+  → kernel + initrd + root UUID read correctly. PASS.
+- End to end as root (`scratchpad/e2e_versions.sh`): fake Linux golden 200 MB → publish (linuxfs + initrd
+  hook + LIO target) ✓ → snapshot v1 (4 chunks) ✓ → 4 MB changed → snapshot v2 (+2 chunks) ✓ → rollback v1
+  (target removed, 2 chunks rewritten, publish again) ✓ → sha256 identical to the original ✓ → delete v2
+  (2 chunks freed) ✓; image stays sparse (3.1 MB used of 200 MB).
+- **Upload chunked (2026-09-25):** web picks the VM folder (no zip; only .vmx/.vmdk/.img/.raw sent), 8 MB
+  chunks × 4 parallel, retry 5× with backoff; `upload-start` / `upload-chunk` (written at offset) / `upload-done`
+  → convert straight from `images/<name>/upload/` (no unzip copy; a .zip still works). E2E as root
+  (`scratchpad/e2e_upload.sh`): split vmdk + .vmx, chunks shuffled + 1 sent twice → image.img sha256 = qemu-img
+  convert ✓, `../x` + past-end chunk → 400 ✓, upload folder removed ✓.
+- [ ] Real server: upload a real VM folder (Windows + Linux), compare time vs the old zip upload.
+- [ ] Real server: publish a real Ubuntu golden (LVM) → client boots over iSCSI.
+- [ ] Real server: snapshot / rollback from the web Versions panel; Windows image rollback → clients re-download.
+
+---
+
+## Phase S — Built-in services + storage driver + latest toolchain
+**Status:** doing — built, unit + live tests PASS in WSL (below); real client/server test pending.
+Plan: `plan.md` → "Phase S".
+
+### Done
+- `dhcp.rs` (full + proxy + PXE boot server 4011, leases in DB), `tftp.rs` (RRQ, blksize/tsize/timeout,
+  snponly.efi from the binary), `iscsi.rs` (LIO via configfs), `dnsmasq.rs` deleted.
+- `db/` driver: `Db` trait + `db/sqlite.rs`; no SQL outside it (`rusqlite` only used there).
+- sha2 / zip / zram sysfs / ICMP ping / punch-hole / set_modified / set_permissions / osrelease / geteuid
+  instead of sha256sum / unzip / zramctl+dd / ping / fallocate / touch / chmod / uname / id.
+- Preflight no longer needs dnsmasq, targetcli-fb, iputils-ping, unzip; takeover of old services at start.
+- Fixes found on the way: zram re-publish reset a device still held by the iSCSI backstore (target now
+  dropped first); an mgmt restart re-created live targets (now skipped if present) and leaked the zram copy.
+- Rust 1.98.1 stable (rustup) + edition 2024 + latest stable crates (axum 0.8.9, tokio 1.53.1,
+  tower-http 0.7.1, rusqlite 0.40.2, socket2 0.6.5, sha2 0.11.0, zip 8.6.0, …; matchit stays 0.8.4,
+  pinned by axum). `build.sh` sources `~/.cargo/env`.
+
+### Test steps + actual results (WSL Ubuntu 24.04, kernel 6.6 WSL2, 2026-09-24)
+- `./build.sh` → 33 unit tests PASS, 0 warnings (DHCP packet/allocation/proxy, TFTP over real sockets
+  incl. resend + `..` refusal, SQLite driver, LIO tree on a temp dir, sha256 vector, unzip, checksum).
+- Live, as root (`cargo test -- --ignored live`): LIO export → `tpgt_1/enable=1`, portal listening on
+  :3260, remove leaves nothing; zram hot_add/write/read/hot_remove; ICMP ping 127.0.0.1 true / 192.0.2.1 false. PASS.
+- DHCP/TFTP end to end (netns `bcli` + veth, python PXE client, `scratchpad/dhcp_e2e.sh`):
+  full → DISCOVER/OFFER .100, REQUEST/ACK lease 43200 s, TFTP snponly.efi 314368 bytes = embedded ✓;
+  proxy → OFFER without IP + opt 60/43, 4011 ACK, TFTP ✓. PASS.
+- Web on axum 0.8: `/`, `/machines`, `/images`, `/network`, `/system` 200, unknown 404, SSE ping ✓.
+- Logging (`tracing`, events not requests; on/off ping kept but silent): netns run (`scratchpad/log_demo.sh`) shows
+  `client PC01 (UEFI PXE) DHCP offer/got IP 10.99.0.50`, `client 10.99.0.50 loaded snponly.efi over TFTP`,
+  `client PC01 boot menu …`, `client PC01 started - mac … - ip … - hostname PC01 - image win11 (windows)` on
+  stdout; unpublished image choice → WARN on stderr. 32 unit tests PASS.
+- [ ] Real server: deploy → `ss -ulpn` shows bootrom-mgmt on :67/:69 (+:4011 proxy); dnsmasq/target disabled.
+- [ ] Real UEFI client (VMware VM, full DHCP): PXE → iPXE menu with machine name; Windows image boots + resets.
+- [ ] Linux image: client boots over iSCSI; reboot the server → target restored, client boots again.
+- [ ] proxyDHCP next to a real router DHCP.
 
 ---
 

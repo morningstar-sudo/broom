@@ -1,21 +1,13 @@
-// preflight.rs — check packages/services before serving.
-// Missing packages are grouped into one apt command; misc (files/services/permissions) reported separately.
-use std::path::Path;
+// preflight.rs — check the tools the binary still shells out to before serving (DHCP/TFTP are built in).
+// Missing packages are grouped into one apt command; misc (permissions) reported separately.
 use std::process::Command;
 
 /// (binary, apt package, purpose) — shared source for preflight + setup.
 pub const BINS: &[(&str, &str, &str)] = &[
-    ("dnsmasq", "dnsmasq", "DHCP proxy/full + TFTP + DNS/hostname"),
-    ("targetcli", "targetcli-fb", "iSCSI target (golden raw RO shared)"),
     ("qemu-img", "qemu-utils", "convert vmdk → raw img golden"),
-    ("virt-copy-out", "libguestfs-tools", "read the golden (kernel/initrd/UUID) safely, handles LVM"),
-    ("iscsistart", "open-iscsi", "iSCSI initiator binary (injected into the golden initrd)"),
-    ("zfs", "zfsutils-linux", "image store + snapshot/rollback (optional)"),
-    ("zpool", "zfsutils-linux", "ZFS pool (optional)"),
-    ("ping", "iputils-ping", "on/off monitoring (M7)"),
-    ("unzip", "unzip", "unpack golden bundles (.zip)"),
-    // Windows (winstage.rs): split golden partitions + tools embedded into the client stage initrd.
-    ("sfdisk", "fdisk", "partition the Windows golden + client SSD (stage)"),
+    // Golden partitions + tools embedded into the Windows client stage initrd.
+    ("sfdisk", "fdisk", "read golden partition tables (Linux + Windows) + partition the client SSD (stage)"),
+    ("cpio", "cpio", "append the broom hook to Linux golden initrds"),
     ("mkntfs", "ntfs-3g", "format the client SSD as NTFS (stage) + read the Windows golden"),
     ("mkfs.fat", "dosfstools", "format the client SSD ESP (stage)"),
     ("efibootmgr", "efibootmgr", "BootNext into Windows on the client SSD (stage)"),
@@ -33,20 +25,9 @@ fn has_bin(name: &str) -> bool {
         .unwrap_or(false)
 }
 
-fn svc_active(name: &str) -> bool {
-    Command::new("systemctl")
-        .args(["is-active", "--quiet", name])
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
-}
-
 pub fn is_root() -> bool {
-    Command::new("id")
-        .arg("-u")
-        .output()
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim() == "0")
-        .unwrap_or(false)
+    // SAFETY: geteuid has no preconditions and cannot fail.
+    unsafe { libc::geteuid() == 0 }
 }
 
 /// List of missing apt packages (deduplicated).
@@ -83,14 +64,8 @@ pub fn run() -> Result<(), Report> {
     let pkgs = missing_pkgs();
     let mut other: Vec<String> = Vec::new();
 
-    if !Path::new("/srv/tftp/snponly.efi").exists() {
-        other.push("/srv/tftp/snponly.efi → run `bootrom-mgmt setup`".into());
-    }
-    if !svc_active("dnsmasq") {
-        other.push("dnsmasq not running → `bootrom-mgmt setup` (or systemctl enable --now dnsmasq)".into());
-    }
     if !is_root() {
-        other.push("must run as root (targetcli/qemu-img/zram/reload dnsmasq/bind :80)".into());
+        other.push("must run as root (DHCP :67 / TFTP :69 / HTTP :80, iSCSI, zram, qemu-img)".into());
     }
 
     if pkgs.is_empty() && other.is_empty() {
