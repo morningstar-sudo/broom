@@ -32,6 +32,11 @@ One step: **double-click `build.cmd`** on Windows (runs in WSL `Ubuntu-24.04`; o
 or `./build.sh` on Linux/WSL. Builds iPXE only when `mgmt/ipxe/ipxe-src` changed (`--ipxe` forces it),
 then the mgmt release binary + unit tests (`--no-test` skips them; `--live` also runs the root-only
 LIO/zram/ping/LVM tests, asking for sudo) → `mgmt/dist/bootrom-mgmt`. Don't run it with sudo.
+
+CI: `.github/workflows/build.yml` runs the same `./build.sh --ipxe` (iPXE from source + binary + unit tests) on
+every push / pull request and keeps `bootrom-mgmt`, `snponly.efi` and `SHA256SUMS` as artifacts. Every push
+to `main` also tags the commit `v<version>-<short sha>` (version from `mgmt/Cargo.toml`, e.g. `v0.3.0-a1b2c3d`)
+and publishes a GitHub Release with those files.
 Needs Rust **stable via rustup** (`curl https://sh.rustup.rs -sSf | sh`) + `musl-tools` (the binary is
 built **static with musl** → runs on any x86_64 Linux, no glibc version issue; `mgmt/rust-toolchain.toml`
 pins the stable channel, edition 2024), gcc, make, perl, liblzma-dev.

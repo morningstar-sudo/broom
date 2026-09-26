@@ -63,10 +63,10 @@ log(){ echo "broom: $*"; echo "$*" >> /run/broom-stage.log; }
 # panic = shell (initramfs); fix by hand then `exit` → the script CONTINUES from the failed step (on-site debug).
 die(){ panic "broom stage ERROR: $*"; }
 restart(){ log "$*"; sleep 2; reboot -f 2>/dev/null || echo b > /proc/sysrq-trigger; sleep 30; }
-NAME=""; HASH=""; SRV=""; HOST=""
+NAME=""; HASH=""; SRV=""; HOST=""; LIC=""; MAC=""
 for a in $(cat /proc/cmdline); do
   case "$a" in broom.name=*) NAME=${a#*=};; broom.hash=*) HASH=${a#*=};; broom.srv=*) SRV=${a#*=};;
-    broom.host=*) HOST=${a#*=};; esac
+    broom.host=*) HOST=${a#*=};; broom.lic=*) LIC=${a#*=};; BOOTIF=01-*) MAC=$(echo "${a#BOOTIF=01-}" | tr - :);; esac
 done
 [ -n "$NAME" ] && [ -n "$HASH" ] && [ -n "$SRV" ] || die "missing broom.name/hash/srv on cmdline"
 for m in ntfs3 vfat nls_cp437 nls_iso8859_1 nls_utf8 efivarfs; do modprobe $m 2>/dev/null; done
@@ -106,8 +106,12 @@ mkdir -p $W $E
 # ntfsfix -d clears the dirty flag + resets the journal (only broom files live here, child resets every boot)
 # → Windows also skips autochk at boot. No ntfsfix → mount with force.
 ntfsfix -d "$(part $disk 2)" >/dev/null 2>&1
-mount -t ntfs3 "$(part $disk 2)" $W || mount -t ntfs3 -o force "$(part $disk 2)" $W \
-  || die "mount ntfs3 $(part $disk 2)"
+# discard: every cluster freed here (old child.vhdx on reset, old base/golden) is TRIMmed on the SSD at once →
+# the last session's data is not left readable on the disk. Device without TRIM → plain mount.
+mnt(){ mount -t ntfs3 -o "$1" "$(part $disk 2)" $W 2>/dev/null; }
+if mnt discard || mnt force,discard; then log "BROOMWIN: discard mount (freed space is TRIMmed)"
+elif mnt rw || mnt force; then log "BROOMWIN: plain mount (the disk takes no TRIM)"
+else die "mount ntfs3 $(part $disk 2)"; fi
 mkdir -p $B
 
 # 1. Golden hash mismatch → re-download (delete old base/child: they point to the old golden).
@@ -181,6 +185,8 @@ if [ -f first.pending ]; then
       patch16 child-local.vhdx "$g" "$(cat child-template.off)"
       # Name that broom-done set inside base = host.txt of the boot that created base.
       cp host.txt base.host 2>/dev/null
+      cp lic.txt base.lic 2>/dev/null
+      cp drv.txt base.drv 2>/dev/null
       rm -f first.pending base.ok
       log "base done (specialized once on this machine) -> reset mode"
     else
@@ -201,6 +207,63 @@ if [ -n "$HOST" ]; then
 else
   rm -f host.txt
 fi
+# License key (Machines page): LIC = generation from the server (a counter, never the key). Set / re-armed →
+# rebuild base so broom-done fetches the key (once) while base is built. srv.txt = where broom-done asks.
+echo "$SRV" > srv.txt
+if [ -n "$LIC" ]; then
+  echo "$LIC" > lic.txt
+  if [ -f base.vhdx ] && [ "$(cat base.lic 2>/dev/null)" != "$LIC" ]; then
+    log "license key set/re-armed: rebuilding base"
+    rm -f base.vhdx child-local.vhdx base.host base.lic
+  fi
+else
+  rm -f lic.txt
+fi
+# Drivers (Drivers page): send this machine's PCI/USB IDs, the server answers "name sha256" for its packages
+# (hardware match / group / all machines) → kept in broom\drivers\<name>\; broom-done pnputil-installs them
+# while base is built. The set present differs from base's → rebuild base. No answer → keep what is here.
+# printf, NOT echo: dash/ash echo mangles backslashes (PCI\VEN_...).
+hwids(){
+  for d in /sys/bus/pci/devices/*; do
+    [ -f $d/vendor ] && printf 'PCI\\VEN_%s&DEV_%s\n' "$(cut -c3- $d/vendor)" "$(cut -c3- $d/device)"
+  done
+  for d in /sys/bus/usb/devices/*; do
+    [ -f $d/idVendor ] && printf 'USB\\VID_%s&PID_%s\n' "$(cat $d/idVendor)" "$(cat $d/idProduct)"
+  done
+}
+configure_networking
+hwids | tr a-f A-F | sort -u > /run/broom-hw.txt
+if [ -n "$MAC" ] && wget -q -T 10 -O /run/broom-drv.txt --post-file=/run/broom-hw.txt "http://$SRV/api/drivers/for?mac=$MAC"; then
+  mkdir -p drivers; : > /run/broom-drv-have.txt
+  while read -r n h; do
+    [ -n "$n" ] || continue
+    if [ "$(cat drivers/$n.sha256 2>/dev/null)" != "$h" ]; then
+      log "driver $n: downloading"
+      rm -rf drivers/$n drivers/$n.sha256 drivers/$n.tmp; mkdir -p drivers/$n.tmp
+      if wget -q -O - "http://$SRV/tftp/broom-drivers/$n.tar.gz" | tar -xzf - -C drivers/$n.tmp; then
+        mv drivers/$n.tmp drivers/$n && echo "$h" > drivers/$n.sha256
+      else
+        rm -rf drivers/$n.tmp; log "driver $n: download failed (retried next boot)"
+      fi
+    fi
+    [ -f drivers/$n.sha256 ] && echo "$n $h" >> /run/broom-drv-have.txt
+  done < /run/broom-drv.txt
+  for f in drivers/*.sha256; do
+    [ -f "$f" ] || continue; n=${f##*/}; n=${n%.sha256}
+    grep -q "^$n " /run/broom-drv.txt || { rm -rf drivers/$n "$f"; log "driver $n: removed"; }
+  done
+  # Signature of the packages actually here; none → empty (a base built without drivers stays valid).
+  DRV=""; [ -s /run/broom-drv-have.txt ] && DRV=$(sha256sum /run/broom-drv-have.txt | cut -c1-16)
+  if [ -n "$DRV" ]; then echo "$DRV" > drv.txt; else rm -f drv.txt; fi
+  if [ -f base.vhdx ] && [ "$(cat base.drv 2>/dev/null)" != "$DRV" ]; then
+    log "drivers changed: rebuilding base"
+    rm -f base.vhdx child-local.vhdx base.host base.lic base.drv
+  fi
+else
+  log "drivers: server did not answer -> keeping the current ones"
+fi
+# Last session's writes: delete first → freed (and TRIMmed, discard mount) before the fresh child is written.
+rm -f child.vhdx
 if [ -f base.vhdx ] && [ -f child-local.vhdx ]; then
   cp child-local.vhdx child.vhdx; MODE=reset
 else
@@ -215,10 +278,7 @@ tar -xzf $B/efi.tar.gz -C $E || die "extract efi.tar.gz"
 # Drop the fallback loader \EFI\Boot\bootx64.efi (copied by bcdboot): with it the firmware boots the SSD directly
 # (default disk entry) → skips the stage → NO reset. The only way in is the stage's BootNext.
 rm -rf $E/EFI/Boot
-# Stage log on BROOMWIN (last 300 lines) — readable from Windows: mountvol + type broom\stage.log.
-{ echo "=== $(date '+%F %T') $MODE"; cat /run/broom-stage.log 2>/dev/null; } >> $B/stage.log
-tail -n 300 $B/stage.log > $B/stage.log.t && mv $B/stage.log.t $B/stage.log
-sync; umount $E; umount $W
+sync; umount $E
 
 # 4. "Broom Windows" entry (SSD) comes after PXE in BootOrder: PXE (first) always runs the stage to check for a new
 #    image + reset; the SSD is only for booting Windows — the stage enters it via BootNext, and if the server/PXE
@@ -234,27 +294,44 @@ if [ -z "$n" ]; then
   n=$(num)
 fi
 [ -n "$n" ] || die "Broom Windows entry not found"
-# FORCE the order: PXE/network → Broom Windows → Windows Boot Manager (+ other bootmgfw entries) → the rest.
+# FORCE the order: PXE → Broom Windows → Windows Boot Manager (+ other bootmgfw entries) → other network → rest.
 # Windows pulls "Windows Boot Manager" to the top on every boot → fixed here + by the BroomBootOrder task
-# inside Windows. Broom Windows always stays in the order (server down still boots, that session is not reset).
+# inside Windows, which restores broom\bootorder.txt by number. Broom Windows always stays in the order
+# (server down still boots, that session is not reset).
 all=$(efibootmgr -v)
 # printf, NOT echo: dash/ash echo interprets "\b" in "\Boot\bootmgfw.efi" → no match.
 nums(){ printf '%s\n' "$all" | grep -Ei "$1" | sed -n 's/^Boot\([0-9A-Fa-f]\{4\}\).*/\1/p' | tr '\n' ' '; }
-net=" $(nums 'MAC\(|IPv4\(|IPv6\(|PXE|Network') "
+line(){ printf '%s\n' "$all" | grep -i "^Boot$1"; }
 wins=" $(nums 'bootmgfw\.efi') "
+net=" $(nums 'MAC\(|IPv4\(|IPv6\(|PXE|Network') "
+# The PXE entry = BootCurrent: the firmware booted THIS session from it (PXE → iPXE → stage), whatever its name
+# ("IBA GE Slot 0100", "Realtek PXE B03", "UEFI: PXE IPv4 ..."). Unknown → every network entry goes first.
+pxe=$(efibootmgr | sed -n 's/^BootCurrent: //p')
+case "$wins $n " in *" $pxe "*) pxe="";; esac
+[ -n "$pxe" ] && [ -n "$(line $pxe)" ] || pxe=""
 order=$(efibootmgr | sed -n 's/^BootOrder: //p')
-a=""; c=""; d=""; old=$IFS; IFS=,
+b=""; c=""; d=""; e=""; old=$IFS; IFS=,
 for x in $order; do
-  [ "$x" = "$n" ] && continue
+  case ",$n,$pxe," in *",$x,"*) continue;; esac
   case "$wins" in *" $x "*) c="${c:+$c,}$x"; continue;; esac
-  case "$net" in *" $x "*) a="${a:+$a,}$x"; continue;; esac
-  d="${d:+$d,}$x"
+  # Other NICs / IPv6 PXE after Windows: server down → the firmware reaches Broom Windows without their timeouts.
+  case "$net" in *" $x "*) if [ -n "$pxe" ]; then d="${d:+$d,}$x"; else b="${b:+$b,}$x"; fi; continue;; esac
+  e="${e:+$e,}$x"
 done
 IFS=$old
-want=$(echo "$a,$n,$c,$d" | sed 's/,,*/,/g; s/^,//; s/,$//')
+want=$(echo "$pxe,$b,$n,$c,$d,$e" | sed 's/,,*/,/g; s/^,//; s/,$//')
 if [ "$want" != "$order" ]; then
-  efibootmgr -q -o "$want" && log "BootOrder forced: PXE -> Broom Windows -> Windows Boot Manager [$want]"
+  efibootmgr -q -o "$want" && log "BootOrder forced [$want]"
 fi
+if [ -n "$pxe" ]; then p="Boot$pxe ($(line $pxe | cut -f1 | sed 's/^Boot[0-9A-Fa-f]*\** *//'))"
+else p="unknown (no BootCurrent) -> every network entry first"; fi
+log "boot order: PXE $p -> Broom Windows Boot$n"
+# The order for the BroomBootOrder task in Windows (numbers, no name matching there).
+echo "$want" > $B/bootorder.txt
+# Stage log on BROOMWIN (last 300 lines) — readable from Windows: mountvol + type broom\stage.log.
+{ echo "=== $(date '+%F %T') $MODE"; cat /run/broom-stage.log 2>/dev/null; } >> $B/stage.log
+tail -n 300 $B/stage.log > $B/stage.log.t && mv $B/stage.log.t $B/stage.log
+sync; umount $W
 efibootmgr -q -n $n || die "efibootmgr BootNext"
 restart "-> Windows ($MODE)"
 "#;
@@ -424,7 +501,7 @@ pub fn publish(st: &SharedState, id: i64, name: &str, steps: &mut crate::publish
         return Err("dhcp_server_ip is empty — run `setup` first".into());
     }
     let bs = format!(
-        "kernel http://{ip}/tftp/broom-stage/vmlinuz initrd=stage.img ip=dhcp BOOTIF=01-${{mac:hexhyp}} broom.name={name} broom.hash={hash} broom.srv={ip} broom.host=${{broom-host}}\n\
+        "kernel http://{ip}/tftp/broom-stage/vmlinuz initrd=stage.img ip=dhcp BOOTIF=01-${{mac:hexhyp}} broom.name={name} broom.hash={hash} broom.srv={ip} broom.host=${{broom-host}} broom.lic=${{broom-lic}}\n\
          initrd http://{ip}/tftp/broom-stage/stage.img\n\
          boot"
     );
@@ -744,11 +821,41 @@ $t1 = New-ScheduledTaskTrigger -AtStartup
 $t2 = New-ScheduledTaskTrigger -Once -At (Get-Date) -RepetitionInterval (New-TimeSpan -Minutes 5) -RepetitionDuration (New-TimeSpan -Days 3650)
 Register-ScheduledTask -TaskName BroomBootOrder -Action $a -Trigger $t1,$t2 -User SYSTEM -RunLevel Highest -Force | Out-Null
 & powershell -NoProfile -ExecutionPolicy Bypass -File $s
+# Drivers (Drivers page): the stage put this machine's packages in broom\drivers -> install them into base.
+# Copied to a local folder first (pnputil wants a normal path); only drivers matching real devices get installed.
+$dd = $v.Path + 'broom\drivers'
+if ([IO.Directory]::Exists($dd)) {
+  $tmp = "$env:SystemRoot\Temp\broom-drivers"
+  Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue
+  foreach ($f in [IO.Directory]::GetFiles($dd, '*', [IO.SearchOption]::AllDirectories)) {
+    if ($f.EndsWith('.sha256')) { continue }
+    $t = $tmp + $f.Substring($dd.Length)
+    [IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($t)) | Out-Null
+    [IO.File]::Copy($f, $t, $true)
+  }
+  if (Test-Path $tmp) { & pnputil /add-driver "$tmp\*.inf" /subdirs /install | Out-Null }
+  Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue
+}
 # Machine name from the server (stage writes broom\host.txt): rename -> takes effect after the reboot below, stored in base.
 $h = $v.Path + 'broom\host.txt'
 if ([IO.File]::Exists($h)) {
   $n = [IO.File]::ReadAllText($h).Trim()
   if ($n -and ($n -ne $env:COMPUTERNAME)) { Rename-Computer -NewName $n -Force -ErrorAction SilentlyContinue }
+}
+# License key (Machines page): the server picks it by this machine's IP and hands it out once (403 = none).
+# slmgr /cpky afterwards: the key is not left readable in the registry. Never blocks building base.
+$sf = $v.Path + 'broom\srv.txt'
+if ([IO.File]::Exists($sf)) {
+  $srv = [IO.File]::ReadAllText($sf).Trim()
+  $k = ''
+  try { $k = (Invoke-WebRequest -UseBasicParsing -TimeoutSec 15 -Uri "http://$srv/api/license").Content.Trim() } catch { }
+  if ($k) {
+    $slmgr = "$env:SystemRoot\System32\slmgr.vbs"
+    $r = (& cscript //nologo $slmgr /ipk $k | Out-String) + (& cscript //nologo $slmgr /ato | Out-String)
+    & cscript //nologo $slmgr /cpky | Out-Null
+    $k = ''
+    try { Invoke-WebRequest -UseBasicParsing -TimeoutSec 15 -Method Post -Body $r -Uri "http://$srv/api/license/result" | Out-Null } catch { }
+  }
 }
 # Write base.ok DIRECTLY via the volume path (\\?\Volume{..}\broom\base.ok): no drive letter/mountvol needed
 # (the old version picked a letter via Test-Path -> clashed with an empty CD drive -> write failed -> OOBE loop every boot).
@@ -758,34 +865,66 @@ try { [IO.File]::WriteAllText($f, 'ok') } catch { }
 if ([IO.File]::Exists($f)) { shutdown /r /t 5 }"#;
 
 /// BroomBootOrder task (SYSTEM, at startup + every 5 minutes): Windows pulls "Windows Boot Manager"
-/// to the top of BootOrder every boot → the next power-on skips PXE (no reset). FORCE the same order as the stage:
-/// PXE/network → Broom Windows → Windows Boot Manager (+ other bootmgfw entries) → the rest.
-/// Writes NVRAM only when different. bcdedit field names (identifier/description/displayorder) are not localized.
-/// ASCII only.
-const BROOM_BOOTORDER: &str = r#"$txt = (bcdedit /enum firmware) -join "`n"
-$cur = @(); $net = @(); $broom = @(); $win = @(); $rest = @()
-foreach ($b in ($txt -split "`n\s*`n")) {
-  if ($b -notmatch 'identifier\s+(\{[^}]+\})') { continue }
-  $id = $matches[1]
-  if ($id -eq '{fwbootmgr}') {
-    $in = $false
-    foreach ($l in ($b -split "`n")) {
-      if ($l -match '^displayorder\s+(\{[^}]+\})') { $in = $true; $cur += $matches[1]; continue }
-      if ($in -and $l -match '^\s+(\{[^}]+\})') { $cur += $matches[1]; continue }
-      $in = $false
-    }
-    continue
+/// to the top of BootOrder every boot → the next power-on skips PXE (no reset). Restores the order the stage
+/// wrote to broom\bootorder.txt (Boot#### numbers, PXE = the entry that booted the stage) — by NUMBER, never by
+/// entry name (PXE entries are named anything: "IBA GE Slot 0100", "Realtek PXE B03"...). Reads/writes the UEFI
+/// BootOrder variable directly (kernel32; SYSTEM + SeSystemEnvironmentPrivilege). Entries not in the file (added
+/// later) are kept, after. Writes NVRAM only when different. ASCII only.
+const BROOM_BOOTORDER: &str = r#"$v = Get-Volume -FileSystemLabel BROOMWIN -ErrorAction SilentlyContinue
+if (-not $v) { exit }
+$of = $v.Path + 'broom\bootorder.txt'
+if (-not [IO.File]::Exists($of)) { exit }
+Add-Type -TypeDefinition @'
+using System; using System.Runtime.InteropServices;
+public static class BroomFw {
+  [DllImport("kernel32.dll", SetLastError=true, CharSet=CharSet.Unicode)]
+  static extern uint GetFirmwareEnvironmentVariableExW(string name, string guid, byte[] buf, uint size, IntPtr attr);
+  [DllImport("kernel32.dll", SetLastError=true, CharSet=CharSet.Unicode)]
+  static extern bool SetFirmwareEnvironmentVariableExW(string name, string guid, byte[] buf, uint size, uint attr);
+  [DllImport("advapi32.dll", SetLastError=true)]
+  static extern bool OpenProcessToken(IntPtr process, uint access, out IntPtr token);
+  [DllImport("advapi32.dll", SetLastError=true, CharSet=CharSet.Unicode)]
+  static extern bool LookupPrivilegeValueW(string system, string name, out long luid);
+  [DllImport("advapi32.dll", SetLastError=true)]
+  static extern bool AdjustTokenPrivileges(IntPtr token, bool disableAll, ref TokenPriv tp, uint len, IntPtr prev, IntPtr retLen);
+  [DllImport("kernel32.dll")]
+  static extern IntPtr GetCurrentProcess();
+  [StructLayout(LayoutKind.Sequential, Pack = 4)]
+  struct TokenPriv { public uint Count; public long Luid; public uint Attr; }
+  const string EfiGlobal = "{8BE4DF61-93CA-11D2-AA0D-00E098032B8C}";
+  public static void EnablePrivilege() {
+    IntPtr t; OpenProcessToken(GetCurrentProcess(), 0x28, out t); // TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY
+    TokenPriv tp = new TokenPriv(); tp.Count = 1; tp.Attr = 2;    // SE_PRIVILEGE_ENABLED
+    LookupPrivilegeValueW(null, "SeSystemEnvironmentPrivilege", out tp.Luid);
+    AdjustTokenPrivileges(t, false, ref tp, 0, IntPtr.Zero, IntPtr.Zero);
   }
-  $desc = ''
-  if ($b -match '(?m)^description\s+(.+)$') { $desc = $matches[1].Trim() }
-  if ($desc -eq 'Broom Windows') { $broom += $id }
-  elseif ($b -match 'bootmgfw\.efi') { $win += $id }
-  elseif ($desc -match 'Network|PXE|IPv4|IPv6') { $net += $id }
-  else { $rest += $id }
+  public static byte[] Get(string name) {
+    byte[] b = new byte[4096];
+    uint n = GetFirmwareEnvironmentVariableExW(name, EfiGlobal, b, (uint)b.Length, IntPtr.Zero);
+    if (n == 0) return null;
+    byte[] r = new byte[n]; Array.Copy(b, r, n); return r;
+  }
+  // 7 = NON_VOLATILE | BOOTSERVICE_ACCESS | RUNTIME_ACCESS (the attributes BootOrder has)
+  public static bool Set(string name, byte[] data) { return SetFirmwareEnvironmentVariableExW(name, EfiGlobal, data, (uint)data.Length, 7); }
 }
-$want = @($net) + @($broom) + @($win) + @($rest)
-if (($want -join ' ') -ne ($cur -join ' ')) {
-  bcdedit /set '{fwbootmgr}' displayorder @want | Out-Null
+'@
+[BroomFw]::EnablePrivilege()
+$cur = [BroomFw]::Get('BootOrder')
+if ($null -eq $cur) { exit }
+$now = @(); for ($i = 0; $i + 1 -lt $cur.Length; $i += 2) { $now += [BitConverter]::ToUInt16($cur, $i) }
+$want = @()
+foreach ($x in ([IO.File]::ReadAllText($of).Trim() -split ',')) {
+  if ($x -notmatch '^[0-9A-Fa-f]{4}$') { continue }
+  $n = [Convert]::ToUInt16($x, 16)
+  # Only entries that still exist (a Boot#### variable), each once.
+  if (($want -notcontains $n) -and ($null -ne [BroomFw]::Get(('Boot{0:X4}' -f $n)))) { $want += $n }
+}
+if ($want.Count -eq 0) { exit }
+foreach ($n in $now) { if ($want -notcontains $n) { $want += $n } }
+if (($want -join ',') -ne ($now -join ',')) {
+  $b = New-Object byte[] ($want.Count * 2)
+  for ($i = 0; $i -lt $want.Count; $i++) { [BitConverter]::GetBytes([uint16]$want[$i]).CopyTo($b, $i * 2) }
+  [BroomFw]::Set('BootOrder', $b) | Out-Null
 }"#;
 
 /// /broom-prep-win: embeds the guest user/password (config shared with Linux).
@@ -869,6 +1008,123 @@ mod tests {
         assert_eq!(run(&["", "", "aa"]), "GO 3"); // publish running → waited twice
         assert_eq!(run(&["", "bb"]), "RESTART"); // newer version published → reboot for the new boot script
         assert_eq!(run(&[""; 50]), "DIE");
+    }
+
+    /// Stage license part (cut from STAGE_SCRIPT): a new generation rebuilds base, the same one keeps it,
+    /// no key keeps base (activation stays) and drops lic.txt; srv.txt always written.
+    #[test]
+    fn stage_license_rebuilds_base() {
+        let s = super::STAGE_SCRIPT;
+        let part = &s[s.find("# License key (Machines page)").unwrap()..s.find("# Last session's writes").unwrap()];
+        let run = |lic: &str, base_lic: &str| {
+            let d = std::env::temp_dir().join(format!("broom_t_lic_{lic}_{base_lic}"));
+            std::fs::create_dir_all(&d).unwrap();
+            for f in ["base.vhdx", "child-local.vhdx", "lic.txt"] {
+                std::fs::write(d.join(f), "x").unwrap();
+            }
+            std::fs::write(d.join("base.lic"), format!("{base_lic}\n")).unwrap();
+            let sh = format!("cd {}; SRV=10.0.0.12; LIC={lic}\nlog(){{ :; }}\n{part}", d.display());
+            assert!(std::process::Command::new("sh").args(["-c", &sh]).status().unwrap().success());
+            let has = |f: &str| d.join(f).exists();
+            let out = (has("base.vhdx"), has("lic.txt"), std::fs::read_to_string(d.join("srv.txt")).unwrap());
+            let _ = std::fs::remove_dir_all(&d);
+            out
+        };
+        assert_eq!(run("2", "1"), (false, true, "10.0.0.12\n".into())); // set / re-armed → rebuild
+        assert_eq!(run("1", "1"), (true, true, "10.0.0.12\n".into()));
+        assert_eq!(run("", "1"), (true, false, "10.0.0.12\n".into()));
+    }
+
+    /// Stage drivers part (cut from STAGE_SCRIPT, wget mocked, real tar.gz): download + extract, base rebuilt only
+    /// when the set present changes, removal, no answer → keep, failed download → not counted (retried).
+    #[test]
+    fn stage_drivers_sync() {
+        let s = super::STAGE_SCRIPT;
+        let d = std::env::temp_dir().join("broom_t_drv");
+        let _ = std::fs::remove_dir_all(&d);
+        let (b, run) = (d.join("b"), d.join("run"));
+        for p in [&b, &run, &d.join("pkgs/src")] {
+            std::fs::create_dir_all(p).unwrap();
+        }
+        std::fs::write(d.join("pkgs/src/nv.inf"), "PCI\\VEN_10DE&DEV_2504").unwrap();
+        assert!(std::process::Command::new("tar").args(["-czf", "../nv.tar.gz", "-C", ".", "nv.inf"]).current_dir(d.join("pkgs/src")).status().unwrap().success());
+        let part = s[s.find("# Drivers (Drivers page)").unwrap()..s.find("# Last session's writes").unwrap()]
+            .replace("/run/", &format!("{}/", run.display()));
+        // wget mock: POST → answer.txt (missing = server down); GET → pkgs/<file> on stdout.
+        let mock = format!(
+            "cd {}; SRV=x; MAC=aa:bb:cc:dd:ee:01\nlog(){{ echo \"$*\" >> {}/log; }}; configure_networking(){{ :; }}\n\
+             wget(){{ o=\"\"; p=\"\"; u=\"\"; while [ $# -gt 0 ]; do case \"$1\" in -O) o=$2; shift;; -T) shift;; --post-file=*) p=1;; -q) ;; *) u=$1;; esac; shift; done\n\
+               if [ -n \"$p\" ]; then [ -f {d}/answer.txt ] && cp {d}/answer.txt \"$o\"; else cat {d}/pkgs/${{u##*/}}; fi; }}\n{part}",
+            b.display(),
+            d.display(),
+            d = d.display()
+        );
+        let step = |answer: Option<&str>| {
+            match answer {
+                Some(a) => std::fs::write(d.join("answer.txt"), a).unwrap(),
+                None => {
+                    let _ = std::fs::remove_file(d.join("answer.txt"));
+                }
+            }
+            std::fs::write(b.join("base.vhdx"), "x").unwrap_or(()); // a base exists before every boot
+            assert!(std::process::Command::new("sh").args(["-c", &mock]).status().unwrap().success());
+            let rebuilt = !b.join("base.vhdx").exists();
+            // Commit what a finished base build would record (stage: cp drv.txt base.drv).
+            match std::fs::read(b.join("drv.txt")) {
+                Ok(v) => std::fs::write(b.join("base.drv"), v).unwrap(),
+                Err(_) => {
+                    let _ = std::fs::remove_file(b.join("base.drv"));
+                }
+            }
+            (rebuilt, b.join("drivers/nv/nv.inf").exists())
+        };
+        assert_eq!(step(Some("")), (false, false), "no packages: an old base stays");
+        assert_eq!(step(Some("nv s1\n")), (true, true), "new package → downloaded + base rebuilt");
+        assert_eq!(step(Some("nv s1\n")), (false, true), "unchanged → nothing to do");
+        assert_eq!(step(None), (false, true), "server down → keep");
+        assert_eq!(step(Some("")), (true, false), "package gone → removed + rebuilt");
+        assert_eq!(step(Some("bad s2\n")), (false, false), "download fails → not counted, retried next boot");
+        let log = std::fs::read_to_string(d.join("log")).unwrap();
+        assert!(log.contains("driver bad: download failed"), "{log}");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// Stage boot order (cut from STAGE_SCRIPT, efibootmgr mocked with a real-board-like list): the PXE entry is
+    /// BootCurrent whatever its name; other network entries go after Windows; unknown BootCurrent → old matching.
+    #[test]
+    fn stage_boot_order_by_bootcurrent() {
+        let s = super::STAGE_SCRIPT;
+        let part = &s[s.find("all=$(efibootmgr -v)").unwrap()..s.find("# Stage log on BROOMWIN").unwrap()];
+        let v = "Boot0000* Windows Boot Manager\tHD(1,GPT,aaaa)/File(\\EFI\\Microsoft\\Boot\\bootmgfw.efi)\n\
+                 Boot0001* UEFI: SanDisk\tPciRoot(0x0)/Pci(0x14,0x0)/USB(1,0)\n\
+                 Boot0003* IBA GE Slot 0100 v1553\tPciRoot(0x0)/Pci(0x1f,0x6)/MAC(001122334455,0)\n\
+                 Boot0004* UEFI: PXE IPv6 Intel(R) I219-V\tPciRoot(0x0)/Pci(0x1f,0x6)/MAC(001122334455,0)/IPv6(0)\n\
+                 Boot0005* EFI Network 1\tVenHw(1234)\n\
+                 Boot0007* Broom Windows\tHD(1,GPT,bbbb)/File(\\EFI\\Microsoft\\Boot\\bootmgfw.efi)\n";
+        let run = |current: &str| {
+            let d = std::env::temp_dir().join(format!("broom_t_order_{}", if current.is_empty() { "none" } else { current }));
+            std::fs::create_dir_all(&d).unwrap();
+            std::fs::write(d.join("v.txt"), v).unwrap();
+            let plain: String = v.lines().map(|l| l.split('\t').next().unwrap().to_string() + "\n").collect();
+            let head = if current.is_empty() { String::new() } else { format!("BootCurrent: {current}\n") };
+            std::fs::write(d.join("plain.txt"), format!("{head}BootOrder: 0000,0004,0003,0007,0001,0005\n{plain}")).unwrap();
+            let sh = format!(
+                "cd {}; B=.; n=0007\nlog(){{ echo \"$*\" >> log; }}\n\
+                 efibootmgr(){{ case \"$1\" in -v) cat v.txt;; -q) echo \"$3\" > set.txt;; *) cat plain.txt;; esac; }}\n{part}",
+                d.display()
+            );
+            assert!(std::process::Command::new("sh").args(["-c", &sh]).status().unwrap().success());
+            let rd = |f: &str| std::fs::read_to_string(d.join(f)).unwrap_or_default().trim().to_string();
+            let out = (rd("set.txt"), rd("bootorder.txt"), rd("log"));
+            let _ = std::fs::remove_dir_all(&d);
+            out
+        };
+        let (set, file, log) = run("0003");
+        assert_eq!(set, "0003,0007,0000,0004,0005,0001", "PXE (named IBA GE…) first, other network after Windows");
+        assert_eq!(file, set, "the order Windows restores");
+        assert!(log.contains("PXE Boot0003 (IBA GE Slot 0100 v1553)"), "{log}");
+        assert_eq!(run("").0, "0004,0003,0005,0007,0000,0001", "no BootCurrent → every network entry first");
+        assert_eq!(run("0000").0, "0004,0003,0005,0007,0000,0001", "BootCurrent = Windows entry → ignored");
     }
 
     #[test]

@@ -35,6 +35,36 @@ pub struct Machine {
     pub ip: Option<String>,
     pub hostname: Option<String>,
     pub image_id: Option<i64>,
+    /// Windows retail product key. Never serialized (the web admin has no login) — see `license_tail`.
+    #[serde(skip)]
+    pub license_key: Option<String>,
+    /// Last 5 characters of the key, for the web.
+    pub license_tail: Option<String>,
+    /// "armed" = Windows may fetch it once | "sent" = fetched (re-arm to allow again) | None = no key.
+    pub license_state: Option<String>,
+    /// Bumped on set / re-arm → the stage rebuilds base so broom-done fetches the key.
+    pub license_gen: i64,
+    /// slmgr output the client reported after installing the key.
+    pub license_result: Option<String>,
+    /// Free-text group (e.g. "VIP") — driver packages can be assigned to a group.
+    pub grp: Option<String>,
+}
+
+/// Windows driver package (drivers.rs): an extracted driver folder, served as a .tar.gz to the stage.
+#[derive(Serialize, Clone, Debug)]
+pub struct Driver {
+    pub id: i64,
+    pub name: String,
+    pub sha256: String,
+    /// Bytes of the .tar.gz.
+    pub size: u64,
+    /// Hardware IDs read from the .inf files (`PCI\VEN_xxxx&DEV_yyyy`, `USB\VID_xxxx&PID_yyyy`).
+    pub hwids: Vec<String>,
+    pub all_machines: bool,
+    /// Machine groups it is assigned to.
+    pub groups: Vec<String>,
+    /// Unix seconds.
+    pub created: i64,
 }
 
 /// DHCP lease (dhcp.rs). source "full" = handed out by us; "proxy" = PXE client seen in proxy mode.
@@ -77,6 +107,24 @@ pub trait Db: Send + Sync {
     /// Returns the new id.
     fn add_machine(&self, mac: &str, ip: Option<&str>, hostname: Option<&str>) -> DbResult<i64>;
     fn assign_image(&self, machine_id: i64, image_id: i64) -> DbResult<()>;
+    /// Set a license key (→ armed, gen + 1) or remove it (None → no key, no state).
+    fn set_license(&self, machine_id: i64, key: Option<&str>) -> DbResult<()>;
+    /// Allow one more delivery of the stored key (→ armed, gen + 1).
+    fn rearm_license(&self, machine_id: i64) -> DbResult<()>;
+    /// armed → sent atomically; returns the key only if it WAS armed (two requests never both get it).
+    fn take_license(&self, machine_id: i64) -> DbResult<Option<String>>;
+    fn set_license_result(&self, machine_id: i64, result: &str) -> DbResult<()>;
+    fn set_machine_group(&self, machine_id: i64, grp: Option<&str>) -> DbResult<()>;
+    /// Hardware IDs a machine's stage reported (by MAC, registered or not) + when.
+    fn put_machine_hw(&self, mac: &str, hwids: &[String], seen: i64) -> DbResult<()>;
+    fn machine_hw(&self) -> DbResult<Vec<(String, Vec<String>)>>;
+
+    // --- driver packages ---
+    fn drivers(&self) -> DbResult<Vec<Driver>>;
+    /// Insert or replace the files of a package by name; a re-upload keeps its targets (all / groups).
+    fn put_driver(&self, name: &str, sha256: &str, size: u64, hwids: &[String], created: i64) -> DbResult<()>;
+    fn set_driver_targets(&self, id: i64, all_machines: bool, groups: &[String]) -> DbResult<()>;
+    fn delete_driver(&self, id: i64) -> DbResult<()>;
 
     // --- DHCP leases ---
     fn leases(&self) -> DbResult<Vec<Lease>>;

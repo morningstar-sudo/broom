@@ -1,6 +1,6 @@
 #!/bin/bash
 # Build iPXE (UEFI snponly.efi) from the source in this repo (ipxe-src/) → mgmt/ipxe/snponly.efi; this file is
-# EMBEDDED in the mgmt binary (boot.rs) and written to /srv/tftp at runtime.
+# EMBEDDED in the mgmt binary (boot.rs) and served from memory by the built-in TFTP server (tftp.rs).
 # ipxe-src = upstream iPXE at commit IPXE_COMMIT, edited in place (menu_ui.c layout, banner, no autoexec) +
 # config in src/config/local/. To change the UI: edit ipxe-src directly, then rerun this script.
 # Runs on the dev machine (WSL/Linux with gcc make perl liblzma-dev).

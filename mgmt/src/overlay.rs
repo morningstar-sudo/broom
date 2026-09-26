@@ -93,13 +93,15 @@ if command -v sfdisk >/dev/null && command -v losetup >/dev/null; then
     done
   fi
 fi
+# mkfs discards (TRIMs) the whole writeback first → the last session's files are not left readable in the
+# raw blocks. Near-instant on an SSD; a device without TRIM just skips it.
 if [ -n "$wb" ]; then
-  mkfs.ext4 -qF -L broomwb -O ^has_journal -E nodiscard "$wb" 2>/dev/null || { log "mkfs $wb failed"; wb=""; }
+  mkfs.ext4 -qF -L broomwb -O ^has_journal "$wb" 2>/dev/null || { log "mkfs $wb failed"; wb=""; }
 fi
 # Could not partition (old golden prep / small disk) → writeback on the WHOLE DISK as before, no cache.
 if [ -z "$wb" ] && [ -z "$cache" ]; then
   for n in $localdisks; do
-    mkfs.ext4 -qF -L broomwb -O ^has_journal -E nodiscard "/dev/$n" 2>/dev/null && { wb=/dev/$n; break; }
+    mkfs.ext4 -qF -L broomwb -O ^has_journal "/dev/$n" 2>/dev/null && { wb=/dev/$n; break; }
     log "mkfs /dev/$n failed (is mkfs.ext4 in the initramfs?)"
   done
 fi

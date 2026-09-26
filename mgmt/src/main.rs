@@ -3,6 +3,7 @@
 mod boot;
 mod db;
 mod dhcp;
+mod drivers;
 mod images;
 mod iscsi;
 mod linuxfs;
@@ -131,12 +132,14 @@ const PAGE_MACHINES: &str = include_str!("../static/page-machines.html");
 const PAGE_IMAGES: &str = include_str!("../static/page-images.html");
 const PAGE_NETWORK: &str = include_str!("../static/page-network.html");
 const PAGE_SYSTEM: &str = include_str!("../static/page-system.html");
+const PAGE_DRIVERS: &str = include_str!("../static/page-drivers.html");
 async fn ui_page(axum::extract::Path(p): axum::extract::Path<String>) -> Html<&'static str> {
     Html(match p.as_str() {
         "machines" => PAGE_MACHINES,
         "images" => PAGE_IMAGES,
         "network" => PAGE_NETWORK,
         "system" => PAGE_SYSTEM,
+        "drivers" => PAGE_DRIVERS,
         _ => "",
     })
 }
@@ -237,11 +240,13 @@ async fn main() {
         .route("/images", get(index))
         .route("/network", get(index))
         .route("/system", get(index))
+        .route("/drivers", get(index))
         .route("/ui/{page}", get(ui_page)) // fragment tab on-demand
         .route("/api/events", get(events)) // SSE: server liveness (sidebar dot) + image job status
         .route("/boot.ipxe", get(boot::render)) // M5
         .route("/boot/start", get(boot::start)) // menu choice → "client started" log + image boot script
         .merge(images::routes()) // M6
+        .merge(drivers::routes()) // Windows driver packages
         .merge(machines::routes()) // M8
         .merge(monitor::routes()) // M7
         // Serve boot assets over HTTP (kernel/initrd much faster than TFTP).
@@ -255,7 +260,8 @@ async fn main() {
         std::process::exit(1)
     });
     info!("bootrom-mgmt v{VERSION} serving on http://{addr}");
-    if let Err(e) = axum::serve(listener, app).await {
+    // ConnectInfo: /api/license picks a machine by the peer IP (machines.rs).
+    if let Err(e) = axum::serve(listener, app.into_make_service_with_connect_info::<std::net::SocketAddr>()).await {
         error!("http server stopped: {e}");
     }
 }

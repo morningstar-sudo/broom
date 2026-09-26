@@ -201,6 +201,36 @@ Plan + reasoning: `plan.md` → "Phase T".
   → convert straight from `images/<name>/upload/` (no unzip copy; a .zip still works). E2E as root
   (`scratchpad/e2e_upload.sh`): split vmdk + .vmx, chunks shuffled + 1 sent twice → image.img sha256 = qemu-img
   convert ✓, `../x` + past-end chunk → 400 ✓, upload folder removed ✓.
+- **TRIM on reset (2026-09-26):** loop device test (discards → holes in the backing file): writeback with
+  200 MB of old data → `mkfs -E nodiscard` (old) leaves 201 MB, `mkfs` default (new) 1 MB ✓. ntfs3 discard not
+  testable in WSL (kernel has no ntfs3) → real client: `broom\stage.log` says `BROOMWIN: discard mount`.
+- **Windows license per machine (2026-09-26):** 41 unit tests PASS (key format, IP → machine lookup incl.
+  expired lease / unregistered, DB armed→sent once→re-arm→remove, key absent from JSON, iPXE `set broom-lic`,
+  stage rebuilds base on a new generation). E2E (`scratchpad/e2e_license.sh`): bad key 400 ✓, key stored
+  upper-case ✓, never in /api/machines or /api/status ✓, 1st `GET /api/license` → key, 2nd → 403 ✓, result
+  stored ✓, re-arm → `broom-lic 2` + key once more ✓, removed → 403 ✓.
+- [ ] Real client: set a retail key → Publish (golden + stage rebuilt) → base rebuilt → `slmgr /dli` activated,
+  web shows `sent …XXXXX ✓`.
+- **Custom Windows drivers (2026-09-26):** 44 unit tests PASS (.inf IDs from UTF-8 / UTF-16 LE+BE, suffixes
+  dropped; pick by hardware / group (case-insensitive) / all; DB drivers + groups + machine_hw; stage driver sync
+  with mocked wget + real tar.gz: no packages keeps an old base, new package → downloaded + base rebuilt,
+  unchanged → nothing, server down → keep, removed → rebuilt, failed download → not counted + retried).
+  E2E (`scratchpad/e2e_drivers.sh`): 3 MB zip uploaded in shuffled chunks → 1 .inf (UTF-16) → 2 IDs ✓, zip with
+  only an .exe → rejected ✓, served tar.gz = stored sha256 ✓, PC01 with GPU 10DE:2504 → nvidia ✓, PC02 other
+  hardware → none, then group VIP → nvidia ✓, "machines" column [PC01, PC02] ✓, bad group → 400 ✓, delete
+  removes the tar.gz ✓, no leftovers in work/ ✓.
+- [ ] Real client: upload an extracted VGA driver → boot → stage.log `driver X: downloading` → base rebuilt →
+  Device Manager shows the vendor driver.
+- **Boot order independent of the PXE entry's name (2026-09-26):** the stage takes the PXE entry from
+  `BootCurrent` (the entry that booted it) and saves the order to `broom\bootorder.txt`; the Windows task
+  BroomBootOrder restores that list by number through the UEFI `BootOrder` variable (was: bcdedit descriptions
+  matched against Network/PXE — boards naming it "IBA GE Slot…"/"Realtek PXE…" lost PXE-first). Tests: stage
+  with a real-board-like entry list → `0003,0007,0000,0004,0005,0001` (PXE "IBA GE Slot 0100" first, IPv6/other
+  network after Windows) ✓, no/odd BootCurrent → old matching ✓; PowerShell parsed + C# compiled on Windows ✓;
+  ordering logic on a fake NVRAM: Windows-first fixed ✓, already right → no write ✓, missing entry dropped + new
+  entry kept ✓, garbage file → no write ✓.
+- [ ] Real board: power on → Windows → after 5 min `bcdedit /enum firmware` still lists the PXE entry first →
+  next power-on goes through PXE (stage.log reset).
 - [ ] Real server: upload a real VM folder (Windows + Linux), compare time vs the old zip upload.
 - [ ] Real server: publish a real Ubuntu golden (LVM) → client boots over iSCSI.
 - [ ] Real server: snapshot / rollback from the web Versions panel; Windows image rollback → clients re-download.

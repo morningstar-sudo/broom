@@ -33,7 +33,7 @@ pub fn routes() -> Router<SharedState> {
         .route("/api/images/version-delete", post(version_delete))
 }
 
-type ApiError = (StatusCode, String);
+pub(crate) type ApiError = (StatusCode, String);
 
 fn ise(e: String) -> ApiError {
     (StatusCode::INTERNAL_SERVER_ERROR, e)
@@ -65,7 +65,7 @@ struct NewImage {
     cache_mode: Option<String>,
 }
 
-fn valid_name(name: &str) -> bool {
+pub(crate) fn valid_name(name: &str) -> bool {
     !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
 }
 
@@ -238,7 +238,7 @@ async fn version_delete(State(st): State<SharedState>, Json(b): Json<VersionBody
 // Golden upload, chunked: the web sends every file (a VM folder, a .vmdk/.img, or a .zip) in 8 MB
 // chunks over several parallel requests → start, chunk × N, done. Files land in <image>/upload/, then
 // convert (→ raw image.img) + publish run as a job.
-const CHUNK_MAX: usize = 16 << 20;
+pub(crate) const CHUNK_MAX: usize = 16 << 20;
 
 fn upload_dir(name: &str) -> std::path::PathBuf {
     crate::images_dir().join(name).join("upload")
@@ -297,30 +297,38 @@ struct ChunkQuery {
 /// PUT /api/images/upload-chunk?name=&file=&offset=&total=  body = up to 16 MB of `file` at `offset`.
 /// Chunks may arrive in any order, in parallel, or twice (retry): each is written at its own offset.
 async fn upload_chunk(Query(q): Query<ChunkQuery>, body: Body) -> Result<Json<serde_json::Value>, ApiError> {
-    if !valid_name(&q.name) || !valid_file(&q.file) {
-        return Err((StatusCode::BAD_REQUEST, "bad image or file name".into()));
+    if !valid_name(&q.name) {
+        return Err((StatusCode::BAD_REQUEST, "bad image name".into()));
+    }
+    write_chunk(upload_dir(&q.name), &q.file, q.offset, q.total, body).await?;
+    Ok(Json(serde_json::json!({"ok": true})))
+}
+
+/// Write one upload chunk into `dir/file` at `offset` (the file is sparse-extended to `total`). Shared by the
+/// golden and driver-package uploads.
+pub(crate) async fn write_chunk(dir: std::path::PathBuf, file: &str, offset: u64, total: u64, body: Body) -> Result<(), ApiError> {
+    if !valid_file(file) {
+        return Err((StatusCode::BAD_REQUEST, "bad file name".into()));
     }
     let data = axum::body::to_bytes(body, CHUNK_MAX).await.map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
-    if q.offset.checked_add(data.len() as u64).is_none_or(|end| end > q.total) {
+    if offset.checked_add(data.len() as u64).is_none_or(|end| end > total) {
         return Err((StatusCode::BAD_REQUEST, "chunk goes past the end of the file".into()));
     }
-    let dir = upload_dir(&q.name);
     if !dir.is_dir() {
         return Err((StatusCode::BAD_REQUEST, "no upload in progress (upload-start first)".into()));
     }
-    let path = dir.join(&q.file);
+    let path = dir.join(file);
     tokio::task::spawn_blocking(move || -> std::io::Result<()> {
         use std::os::unix::fs::FileExt;
         let f = std::fs::OpenOptions::new().write(true).create(true).truncate(false).open(&path)?;
-        if f.metadata()?.len() < q.total {
-            f.set_len(q.total)?; // sparse; chunks fill it in any order
+        if f.metadata()?.len() < total {
+            f.set_len(total)?; // sparse; chunks fill it in any order
         }
-        f.write_all_at(&data, q.offset)
+        f.write_all_at(&data, offset)
     })
     .await
     .map_err(|e| ise(e.to_string()))?
-    .map_err(|e| ise(e.to_string()))?;
-    Ok(Json(serde_json::json!({"ok": true})))
+    .map_err(|e| ise(e.to_string()))
 }
 
 /// POST /api/images/upload-done {name} — convert (→ raw) + publish in the BACKGROUND; the web polls /api/images/job.
@@ -373,7 +381,7 @@ fn spawn_publish(st: &SharedState, name: String, upload: Option<std::path::PathB
 
 /// Background job on an image (publish / snapshot / rollback): one at a time per image (overlapping
 /// jobs share temp files + mount points → they break each other); status via /api/images/job.
-fn spawn_job<F>(st: &SharedState, name: String, what: &'static str, work: F) -> Result<(), ApiError>
+pub(crate) fn spawn_job<F>(st: &SharedState, name: String, what: &'static str, work: F) -> Result<(), ApiError>
 where
     F: FnOnce(&SharedState, &str, &mut crate::publish::Steps) -> Result<String, String> + Send + 'static,
 {

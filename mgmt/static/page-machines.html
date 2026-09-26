@@ -14,19 +14,22 @@
   <div class="card">
     <h2>Machine list</h2>
     <div class="row" style="margin-bottom:12px">
-      <input id="m_filter" placeholder="Filter hostname / IP / MAC" oninput="mPage=1;renderMachines()" style="min-width:220px">
-      <select id="m_status" onchange="mPage=1;renderMachines()">
-        <option value="">All states</option>
-        <option value="online">Online</option>
-        <option value="offline">Offline</option>
-        <option value="registered">Registered</option>
-        <option value="new">New (not registered)</option>
-      </select>
+      <button class="ghost" onclick="clearMFilters()">Clear filters</button>
       <span style="flex:1"></span>
       <span id="m_count" class="msg"></span>
     </div>
     <div class="scroll"><table id="machines">
-      <thead><tr><th>Hostname</th><th>IP</th><th>MAC</th><th>Status</th><th></th></tr></thead>
+      <thead><tr><th>Hostname</th><th title="free-text group — driver packages can target a group (Drivers page)">Group</th><th>IP</th><th>MAC</th><th>Status</th><th title="Windows license key: armed = handed out once at the next base build; sent = installed (hover: activation result)">License</th><th></th></tr>
+        <!-- One filter per column (filteredMachines in index.html). -->
+        <tr class="filters" oninput="mPage=1;renderMachines()">
+          <th><input id="mf_host" placeholder="hostname"></th>
+          <th><input id="mf_grp" placeholder="group"></th>
+          <th><input id="mf_ip" placeholder="IP"></th>
+          <th><input id="mf_mac" placeholder="MAC"></th>
+          <th><select id="mf_state"><option value="">all</option><option value="on">ON</option><option value="off">OFF</option></select></th>
+          <th><select id="mf_lic"><option value="">all</option><option value="none">no key</option><option value="armed">armed</option><option value="sent">sent</option><option value="error">error</option></select></th>
+          <th><select id="mf_reg"><option value="">all</option><option value="registered">registered</option><option value="new">new</option></select></th>
+        </tr></thead>
       <tbody></tbody></table></div>
     <div class="row" style="margin-top:12px;justify-content:flex-end;align-items:center">
       <button class="ghost" onclick="mPrev()">‹ Prev</button>
