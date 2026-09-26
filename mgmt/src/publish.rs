@@ -67,7 +67,7 @@ pub(crate) fn file_hash(path: &str) -> Option<String> {
 }
 
 /// Extract a .zip into `dir` (entries with unsafe paths are skipped).
-fn unzip(zip_path: &Path, dir: &Path) -> Result<(), String> {
+pub(crate) fn unzip(zip_path: &Path, dir: &Path) -> Result<(), String> {
     let f = std::fs::File::open(zip_path).map_err(|e| format!("{}: {e}", zip_path.display()))?;
     let mut z = zip::ZipArchive::new(f).map_err(|e| format!("zip: {e}"))?;
     for i in 0..z.len() {
@@ -216,7 +216,7 @@ fn mem_available_bytes() -> u64 {
 }
 
 /// Walk the files in dir (recursive). ponytail: enough for a golden zip with a few files.
-fn walk(dir: &Path) -> Vec<std::path::PathBuf> {
+pub(crate) fn walk(dir: &Path) -> Vec<std::path::PathBuf> {
     let mut out = Vec::new();
     if let Ok(rd) = std::fs::read_dir(dir) {
         for e in rd.flatten() {

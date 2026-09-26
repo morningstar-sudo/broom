@@ -9,6 +9,7 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+use crate::db::Machine;
 use crate::{wol, SharedState};
 
 pub fn routes() -> Router<SharedState> {
@@ -24,16 +25,24 @@ struct MachineStatus {
     hostname: Option<String>,
     online: bool,
     registered: bool,
+    /// Registered machines only: id + license (tail/state/result — never the key).
+    id: Option<i64>,
+    license_tail: Option<String>,
+    license_state: Option<String>,
+    license_result: Option<String>,
+    grp: Option<String>,
 }
 
 /// Machines = registered (machines table) + discovered via DHCP (leases table, dhcp.rs).
 async fn status(State(st): State<SharedState>) -> Json<Vec<MachineStatus>> {
     // (ip, hostname, registered) by mac.
     let mut map: HashMap<String, (Option<String>, Option<String>, bool)> = HashMap::new();
+    let mut rows: HashMap<String, Machine> = HashMap::new();
 
     // 1. Registered, from the DB.
     for m in st.db.machines().unwrap_or_default() {
-        map.insert(m.mac.to_lowercase(), (m.ip, m.hostname, true));
+        map.insert(m.mac.to_lowercase(), (m.ip.clone(), m.hostname.clone(), true));
+        rows.insert(m.mac.to_lowercase(), m);
     }
 
     // 2. Discovered via the built-in DHCP (full-mode leases + PXE clients seen in proxy mode).
@@ -66,7 +75,21 @@ async fn status(State(st): State<SharedState>) -> Json<Vec<MachineStatus>> {
     let mut out: Vec<MachineStatus> = entries
         .into_iter()
         .zip(online)
-        .map(|((mac, ip, hostname, registered), online)| MachineStatus { mac, ip, hostname, online, registered })
+        .map(|((mac, ip, hostname, registered), online)| {
+            let m = rows.remove(&mac);
+            MachineStatus {
+                id: m.as_ref().map(|m| m.id),
+                license_tail: m.as_ref().and_then(|m| m.license_tail.clone()),
+                license_state: m.as_ref().and_then(|m| m.license_state.clone()),
+                license_result: m.as_ref().and_then(|m| m.license_result.clone()),
+                grp: m.and_then(|m| m.grp),
+                mac,
+                ip,
+                hostname,
+                online,
+                registered,
+            }
+        })
         .collect();
     // Registered first, then by hostname/ip.
     out.sort_by(|a, b| {

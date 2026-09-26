@@ -60,6 +60,8 @@
   th,td{padding:9px 10px;text-align:left;border-bottom:1px solid var(--line);white-space:nowrap}
   th{font:700 .68rem/1 var(--mono);text-transform:uppercase;letter-spacing:.06em;color:var(--muted)}
   tbody tr:last-child td{border-bottom:0}
+  tr.filters th{padding-top:0;text-transform:none;letter-spacing:0}
+  tr.filters input,tr.filters select{width:100%;min-width:72px;padding:5px 7px;font:400 .8rem var(--mono)}
   .mono{font-family:var(--mono);font-size:.86em;color:var(--muted)}
   .scroll{overflow-x:auto}
 
@@ -108,6 +110,7 @@
     <nav>
       <a href="/machines" data-page="machines">Machines</a>
       <a href="/images" data-page="images">Images</a>
+      <a href="/drivers" data-page="drivers">Drivers</a>
       <a href="/network" data-page="network">Network</a>
       <a href="/system" data-page="system">Settings</a>
     </nav>
@@ -122,7 +125,7 @@ async function j(url,opt){const r=await fetch(url,opt);if(!r.ok)throw new Error(
 const esc=s=>(s==null?'':String(s)).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 
 // ---- tabs: load HTML fragments on demand (/ui/<page>) + only load data for the tab being viewed ----
-const loaders={machines:loadStatus,images:loadImages,network:loadDhcp,system:loadCafe};
+const loaders={machines:loadStatus,images:loadImages,drivers:loadDrivers,network:loadDhcp,system:loadCafe};
 const fragCache={};
 let curPage=null;
 async function showPage(p){
@@ -153,18 +156,19 @@ async function loadStatus(){
   document.getElementById('onlinecount').textContent=online+'/'+allMachines.length+' online';
   renderMachines();
 }
+// Per-column filters (the second header row of the machine table). Text = case-insensitive "contains".
+const MF=['mf_host','mf_grp','mf_ip','mf_mac','mf_state','mf_lic','mf_reg'];
+const mf=id=>((document.getElementById(id)||{}).value||'').trim().toLowerCase();
+const licErr=m=>!!m.license_result&&!/activated successfully/i.test(m.license_result);
 function filteredMachines(){
-  const q=(document.getElementById('m_filter').value||'').toLowerCase();
-  const st=document.getElementById('m_status').value;
-  return allMachines.filter(m=>{
-    if(q && !((m.hostname||'')+' '+(m.ip||'')+' '+(m.mac||'')).toLowerCase().includes(q))return false;
-    if(st==='online'&&!m.online)return false;
-    if(st==='offline'&&m.online)return false;
-    if(st==='registered'&&!m.registered)return false;
-    if(st==='new'&&m.registered)return false;
-    return true;
-  });
+  const has=(v,q)=>!q||(v||'').toLowerCase().includes(q);
+  const [host,grp,ip,mac,state,lic,reg]=MF.map(mf);
+  return allMachines.filter(m=>has(m.hostname,host)&&has(m.grp,grp)&&has(m.ip,ip)&&has(m.mac,mac)
+    &&(!state||(state==='on')===!!m.online)
+    &&(!lic||(lic==='none'?!m.license_tail:lic==='error'?licErr(m):m.license_state===lic))
+    &&(!reg||(reg==='registered')===!!m.registered));
 }
+function clearMFilters(){MF.forEach(id=>{const e=document.getElementById(id);if(e)e.value='';});mPage=1;renderMachines();}
 function renderMachines(){
   const rows=filteredMachines(), pages=Math.max(1,Math.ceil(rows.length/M_PAGE));
   if(mPage>pages)mPage=pages; if(mPage<1)mPage=1;
@@ -172,12 +176,17 @@ function renderMachines(){
   document.querySelector('#machines tbody').innerHTML=page.map(m=>
     `<tr>
        <td>${m.hostname?esc(m.hostname):'<span class="mono">—</span>'} ${m.registered?'':'<span class="pill new">new</span>'}</td>
+       <td class="mono">${m.grp?esc(m.grp):'—'}</td>
        <td class="mono">${esc(m.ip)}</td><td class="mono">${esc(m.mac)}</td>
        <td><span class="led ${m.online?'on':'off'}">${m.online?'ON':'OFF'}</span></td>
-       <td>${m.registered
-          ? `<button class="ghost" onclick="wake('${esc(m.mac)}')">Wake</button>`
+       <td class="mono" title="${esc(m.license_result||'')}">${licCell(m)}</td>
+       <td class="row">${m.registered
+          ? `<button class="ghost" onclick="wake('${esc(m.mac)}')">Wake</button>
+             <button class="ghost" onclick="setGroup(${m.id},'${esc(m.hostname||m.mac)}','${esc(m.grp||'')}')">Group</button>
+             <button class="ghost" onclick="setKey(${m.id},'${esc(m.hostname||m.mac)}')">Key</button>
+             ${m.license_state==='sent'?`<button class="ghost" onclick="rearmKey(${m.id},'${esc(m.hostname||m.mac)}')">Re-arm</button>`:''}`
           : `<button onclick="regMachine('${esc(m.mac)}','${esc(m.ip)}','${esc(m.hostname)}')">Register</button>`}</td>
-     </tr>`).join('') || '<tr><td colspan=5 class="mono">no matching machines</td></tr>';
+     </tr>`).join('') || '<tr><td colspan=7 class="mono">no matching machines</td></tr>';
   document.getElementById('m_count').textContent=rows.length+' machines';
   document.getElementById('m_page').textContent='Page '+mPage+'/'+pages;
 }
@@ -202,6 +211,28 @@ async function regMachine(mac,ip,host){
   alert('Registered. Reboot the machine to get its IP/name (full DHCP mode).');loadStatus();
 }
 async function wake(mac){await j('/api/wake',mk({mac}));alert('WOL sent to '+mac)}
+// Windows license key: handed out ONCE to the machine's IP when its base is rebuilt (next boot); the full key is
+// never shown again. Keep keyOk in sync with key_ok() in machines.rs.
+const KEY_RULE='License key: 25 letters/digits as XXXXX-XXXXX-XXXXX-XXXXX-XXXXX (empty = remove)';
+const keyOk=k=>/^[A-Z0-9]{5}(-[A-Z0-9]{5}){4}$/.test(k);
+function licCell(m){if(!m.license_tail)return '—';
+  const ok=/activated successfully/i.test(m.license_result||'');
+  return esc(m.license_state||'')+' …'+esc(m.license_tail)+(ok?' <span class="ok">✓</span>':licErr(m)?' <span class="pill new">error</span>':'');}
+async function setKey(id,who){
+  let k='';
+  do{k=prompt('Windows license key for '+who+(k===''||keyOk(k)?'':'\n'+KEY_RULE)+':',k);if(k===null)return;k=k.trim().toUpperCase();}
+  while(k&&!keyOk(k));
+  try{await j('/api/machines/license',mk({id,key:k}));
+    alert(k?'Key saved. It is installed when '+who+' boots next (its base is rebuilt once).':'Key removed.');loadStatus();}
+  catch(e){alert(e.message)}}
+// Group (free text, e.g. VIP): driver packages assigned to it go to its machines. Keep in sync with group_ok() in drivers.rs.
+async function setGroup(id,who,cur){
+  let g=cur;
+  do{g=prompt('Group for '+who+' (letters/digits/_/-, empty = none):',g);if(g===null)return;g=g.trim();}
+  while(g&&!/^[A-Za-z0-9_-]{1,32}$/.test(g));
+  try{await j('/api/machines/group',mk({id,grp:g}));loadStatus();}catch(e){alert(e.message)}}
+async function rearmKey(id,who){if(!confirm('Hand the key to '+who+' once more? Its base is rebuilt on the next boot.'))return;
+  try{await j('/api/machines/license/rearm',mk({id}));loadStatus();}catch(e){alert(e.message)}}
 
 // ---- images ----
 const gbs=b=>b>=1e9?(b/1e9).toFixed(1)+' GB':(b/1e6).toFixed(0)+' MB';
@@ -271,8 +302,8 @@ async function delImage(id,name){if(!confirm('Delete image "'+name+'"?'))return;
   await j('/api/images/delete',mk({id}));loadImages();}
 // Chunked upload: every file in 8 MB pieces, 4 in flight; a failed piece is retried (2,4,8,16,32 s).
 const CHUNK=8<<20,LANES=4;
-async function putChunk(name,f,off){
-  const url='/api/images/upload-chunk?name='+encodeURIComponent(name)+'&file='+encodeURIComponent(f.name)+'&offset='+off+'&total='+f.size;
+async function putChunk(api,name,f,off){
+  const url=api+'/upload-chunk?name='+encodeURIComponent(name)+'&file='+encodeURIComponent(f.name)+'&offset='+off+'&total='+f.size;
   for(let t=0;;t++){
     let r=null;try{r=await fetch(url,{method:'PUT',body:f.slice(off,off+CHUNK)});}catch(_){}   // null = network error
     if(r&&r.ok)return;
@@ -281,17 +312,19 @@ async function putChunk(name,f,off){
     await new Promise(ok=>setTimeout(ok,2000<<t));
   }
 }
-async function uploadFiles(name,files,prog,msg){
-  await j('/api/images/upload-start',mk({name}));
+// api = '/api/images' (golden) or '/api/drivers' (driver package): same start / chunk / done protocol.
+async function uploadFiles(api,name,files,prog,msg){
+  await j(api+'/upload-start',mk({name}));
   const q=[];for(const f of files)for(let o=0;o===0||o<f.size;o+=CHUNK)q.push([f,o]);
   const total=files.reduce((s,f)=>s+f.size,0)||1,t0=Date.now();let done=0;
   prog.style.display='';prog.value=0;
   const lane=async()=>{while(q.length){const [f,o]=q.shift();
-    try{await putChunk(name,f,o);}catch(e){q.length=0;throw e;}   // one piece failed for good → stop all lanes
+    try{await putChunk(api,name,f,o);}catch(e){q.length=0;throw e;}   // one piece failed for good → stop all lanes
     done+=Math.min(CHUNK,f.size-o);prog.value=done/total*100;
     msg.textContent=' upload '+Math.round(done/total*100)+'% · '+(done/1e6/Math.max(1,(Date.now()-t0)/1000)).toFixed(0)+' MB/s';}};
   await Promise.all(Array.from({length:LANES},lane));
-  await j('/api/images/upload-done',mk({name}));
+  msg.textContent=' upload 100% — finishing on the server…';   // driver packages: unzip + read .inf + pack
+  return j(api+'/upload-done',mk({name}));
 }
 async function addImage(){
   const dir=[...document.getElementById('up_dir').files].filter(f=>/\.(vmdk|vmx|img|raw)$/i.test(f.name));
@@ -300,10 +333,37 @@ async function addImage(){
   if(!files.length||!name){alert('Enter a name + choose a VM folder or a file');return;}
   const os=document.getElementById('up_os').value;
   try{await j('/api/images',mk({name,os,cache_mode:cache}));}catch(e){}
-  try{await uploadFiles(name,files,document.getElementById('up_prog'),msg);}
+  try{await uploadFiles('/api/images',name,files,document.getElementById('up_prog'),msg);}
   catch(e){msg.textContent=' ✗ '+e.message;return;}
   msg.textContent=' ✓ upload done';loadImages();watchJob(name,msg);   // convert + publish run in the background → SSE
 }
+
+// ---- driver packages (drivers.rs): .zip of an extracted driver folder → installed into base by broom-done ----
+async function loadDrivers(){
+  const rows=await j('/api/drivers');
+  document.querySelector('#drivers tbody').innerHTML=rows.map(d=>
+    `<tr><td>${esc(d.name)}</td><td class="mono">${gbs(d.size)}</td>
+       <td class="mono" title="${esc(d.hwids.slice(0,40).join('\n'))}${d.hwids.length>40?'\n…':''}">${d.hwids.length}</td>
+       <td class="mono" style="white-space:normal">${d.machines.length?esc(d.machines.join(', ')):'—'}</td>
+       <td><input type="checkbox" id="drv_all_${d.id}" ${d.all_machines?'checked':''}></td>
+       <td><input id="drv_grp_${d.id}" value="${esc(d.groups.join(', '))}" placeholder="VIP, Pro" size="12"></td>
+       <td class="row"><button class="ghost" onclick="saveDrvTargets(${d.id})">Save</button>
+         <button class="ghost danger" onclick="delDriver(${d.id},'${esc(d.name)}')">Delete</button></td></tr>`).join('')
+    || '<tr><td colspan=7 class="mono">no driver packages yet</td></tr>';
+}
+async function uploadDriver(){
+  const f=document.getElementById('drv_file').files[0],msg=document.getElementById('drv_msg');
+  const name=v('drv_name')||(f?f.name.replace(/\.zip$/i,'').replace(/[^A-Za-z0-9_-]/g,'-'):'');
+  if(!f){alert('Choose the .zip of an extracted driver folder');return;}
+  try{const r=await uploadFiles('/api/drivers',name,[f],document.getElementById('drv_prog'),msg);
+    msg.textContent=' ✓ '+name+': '+r.infs+' .inf, '+r.hwids+' hardware IDs';loadDrivers();}
+  catch(e){msg.textContent=' ✗ '+e.message;}
+}
+async function saveDrvTargets(id){
+  const all_machines=document.getElementById('drv_all_'+id).checked, groups=document.getElementById('drv_grp_'+id).value;
+  try{await j('/api/drivers/targets',mk({id,all_machines,groups}));loadDrivers();}catch(e){alert(e.message)}}
+async function delDriver(id,name){if(!confirm('Delete driver package "'+name+'"? Machines that had it rebuild their base on the next boot.'))return;
+  try{await j('/api/drivers/delete',mk({id}));loadDrivers();}catch(e){alert(e.message)}}
 
 // ---- network ----
 async function loadDhcp(){const c=await j('/api/dhcp');

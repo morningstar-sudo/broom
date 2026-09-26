@@ -233,6 +233,48 @@ is high risk on the boot path), ntfs-3g, sfdisk, tar, cpio, gzip, ip, modprobe, 
 - **T3 — later** (user decision): server stops writing into Windows goldens (edits move into prep; server
   reads NTFS read-only) → drops hivexregedit + the read-write mount.
 
+### Client privacy + Windows licensing (2026-09-26)
+- **TRIM on reset:** the last session's writes are TRIMmed when the next boot resets them — Windows stage mounts
+  BROOMWIN `ntfs3 -o discard` and deletes the old child.vhdx before writing the fresh one; the Linux hook's
+  `mkfs.ext4` discards the whole writeback partition (no more `-E nodiscard`). Covers: data readable after the
+  next boot. Does NOT cover: power off + pull the disk before the next boot (needs an ephemeral-key encrypted
+  write layer: Linux overlayroot `crypt` possible later; Windows Pro native VHD boot has no BitLocker → UWF
+  (Enterprise/Education) or a server-side write layer).
+- **Per-machine Windows license (retail key):** key per machine on the Machines page (never shown in full,
+  never in any API output). broom-done.ps1 (while base is built) asks `GET /api/license`; the server picks the
+  machine ONLY by the TCP peer IP (bound IP, else unexpired lease) and hands the key out ONCE (armed → sent;
+  the guest user is an Administrator and could ask any time). Then `slmgr /ipk` + `/ato` + `/cpky` (key not
+  left in the registry), output posted back to `/api/license/result`. Setting / re-arming a key bumps
+  `license_gen` → iPXE `broom-lic` → stage rebuilds base on the next boot. After one retail activation the
+  digital license re-activates later bases by itself.
+- **Known gap:** the web admin has no login — anyone on the LAN can open it. Admin auth is a separate task.
+
+### Boot order by number, not by name (2026-09-26)
+PXE must stay first or the next power-on skips the reset. Entry names vary per board ("IBA GE Slot 0100",
+"Realtek PXE B03", "UEFI: PXE IPv4 …"), so nothing matches names any more: the stage takes the PXE entry from
+`BootCurrent` (it booted the stage), orders PXE → Broom Windows → Windows Boot Manager → other network → rest
+(other NICs / IPv6 after Windows: server down → no extra PXE timeouts), and writes `broom\bootorder.txt`.
+The Windows task BroomBootOrder restores that exact list through the UEFI `BootOrder` variable
+(kernel32 firmware-variable API), keeping entries added later at the end.
+
+### Custom Windows drivers (2026-09-26)
+Goldens are built in a VM → real clients lack vendor drivers (VGA, LAN, audio…). Each machine has its own
+base (specialized once on its hardware) → drivers are installed into **base**, once, kept across resets.
+- **Package** = .zip of an extracted driver folder (at least one .inf; vendor .exe installers not supported).
+  Web "Drivers" page, chunked upload → server unzips to `<home>/drivers/<name>/`, re-packs
+  `<home>/tftp/broom-drivers/<name>.tar.gz` (the stage has tar/gzip, no unzip) + sha256, and reads the
+  hardware IDs from every .inf (UTF-8/UTF-16): `PCI\VEN_xxxx&DEV_yyyy`, `USB\VID_xxxx&PID_yyyy`.
+- **Who gets it** — a machine gets a package when ANY of: its hardware matches an ID (stage reports its
+  PCI/USB IDs), the package is assigned to the machine's group (free-text group on the Machines page), or the
+  package is ticked "all machines".
+- **Stage, every boot:** network up → `POST /api/drivers/for?mac=` with its IDs → list `name sha256` →
+  new/changed packages downloaded + extracted into `BROOMWIN\broom\drivers\<name>\`, unlisted ones removed.
+  The set actually present differs from the one base was built with → rebuild base. Server unreachable →
+  keep what is there.
+- **broom-done.ps1** (base build): copy broom\drivers to `C:\Windows\Temp`, `pnputil /add-driver *.inf
+  /subdirs /install` (Windows installs only what matches the real devices), delete the copy.
+- Windows only (Linux drivers come with the kernel/golden).
+
 ### Phase 5 — Operations & hardening
 - Golden update procedure: snapshot before changing → change it in a "maintenance boot" (RW) →
   test → publish the new version → roll back if broken.

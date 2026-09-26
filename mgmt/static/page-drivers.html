@@ -1,0 +1,26 @@
+<section class="page active" id="page-drivers">
+  <div class="head"><h1>Drivers</h1><p>custom Windows drivers installed into each machine's base</p>
+    <span class="sp"></span><button onclick="loadDrivers()">↻</button></div>
+  <div class="card">
+    <h2>Upload a driver package (.zip)</h2>
+    <div class="row">
+      <div class="field"><label>Name</label><input id="drv_name" size="14" placeholder="nvidia-572"></div>
+      <div class="field"><label>.zip of the extracted driver folder</label><input type="file" id="drv_file" accept=".zip"></div>
+      <button class="primary" style="align-self:flex-end" onclick="uploadDriver()">Upload</button>
+      <progress id="drv_prog" value="0" max="100" style="display:none"></progress>
+      <span id="drv_msg" class="msg"></span>
+    </div>
+    <p class="hint">The zip must contain the <b>extracted</b> driver (<code>.inf</code> + <code>.sys</code> + <code>.cat</code>…), not the vendor's <code>.exe</code> installer
+      (extract it first, e.g. open the NVIDIA/AMD installer with 7-Zip). Same name again = replace the package.</p>
+  </div>
+  <div class="card">
+    <h2>Packages</h2>
+    <div class="scroll"><table id="drivers">
+      <thead><tr><th>Name</th><th>Size</th><th title="hardware IDs read from the .inf files — a machine with one of them gets the package">Hardware IDs</th>
+        <th title="machines that get it now (hardware reported by their stage, group, or all)">Machines</th><th>All machines</th><th>Groups</th><th></th></tr></thead>
+      <tbody></tbody></table></div>
+    <p class="hint">A machine gets a package when <b>one of its devices matches</b> a hardware ID, the package is assigned to <b>its group</b> (Machines page),
+      or <b>All machines</b> is ticked. Changes apply on each machine's next boot: the stage downloads the packages and rebuilds its base once
+      (Windows installs the drivers that match its devices). Windows images only.</p>
+  </div>
+</section>

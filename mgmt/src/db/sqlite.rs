@@ -4,7 +4,12 @@
 use rusqlite::{params, Connection, OptionalExtension, Row};
 use std::sync::{Mutex, MutexGuard};
 
-use super::{Db, DbResult, Image, Lease, Machine, NewImage};
+use super::{Db, DbResult, Driver, Image, Lease, Machine, NewImage};
+
+/// Newline-separated list column → items (empty lines dropped).
+fn lines(s: &str) -> Vec<String> {
+    s.lines().map(str::trim).filter(|l| !l.is_empty()).map(String::from).collect()
+}
 
 pub struct Sqlite {
     c: Mutex<Connection>,
@@ -29,7 +34,31 @@ const SCHEMA: &str = r#"
         mac      TEXT UNIQUE NOT NULL,
         ip       TEXT,
         hostname TEXT,
-        image_id INTEGER REFERENCES images(id)
+        image_id INTEGER REFERENCES images(id),
+        license_key    TEXT,                 -- Windows retail key, handed out once (machines.rs)
+        license_state  TEXT,                 -- 'armed' | 'sent' | NULL
+        license_gen    INTEGER NOT NULL DEFAULT 0,
+        license_result TEXT,                 -- slmgr output reported by the client
+        grp            TEXT                  -- free-text group, driver packages can target it
+    );
+
+    -- Windows driver packages (drivers.rs). hwids / groups: newline-separated lists.
+    CREATE TABLE IF NOT EXISTS drivers(
+        id           INTEGER PRIMARY KEY,
+        name         TEXT UNIQUE NOT NULL,
+        sha256       TEXT NOT NULL,
+        size         INTEGER NOT NULL,
+        hwids        TEXT NOT NULL DEFAULT '',
+        all_machines INTEGER NOT NULL DEFAULT 0,
+        groups       TEXT NOT NULL DEFAULT '',
+        created      INTEGER NOT NULL
+    );
+
+    -- Hardware IDs each machine's stage reported (drivers.rs), by MAC.
+    CREATE TABLE IF NOT EXISTS machine_hw(
+        mac   TEXT PRIMARY KEY,
+        hwids TEXT NOT NULL,
+        seen  INTEGER NOT NULL
     );
 
     -- DHCP leases (dhcp.rs). source 'full' = our lease; 'proxy' = PXE client seen in proxy mode.
@@ -105,6 +134,11 @@ impl Sqlite {
         let _ = c.execute("ALTER TABLE images ADD COLUMN cache_mode TEXT NOT NULL DEFAULT 'disk'", []);
         let _ = c.execute("ALTER TABLE images ADD COLUMN active_version TEXT", []);
         let _ = c.execute("ALTER TABLE images DROP COLUMN dataset", []); // ZFS versioning removed
+        let _ = c.execute("ALTER TABLE machines ADD COLUMN license_key TEXT", []);
+        let _ = c.execute("ALTER TABLE machines ADD COLUMN license_state TEXT", []);
+        let _ = c.execute("ALTER TABLE machines ADD COLUMN license_gen INTEGER NOT NULL DEFAULT 0", []);
+        let _ = c.execute("ALTER TABLE machines ADD COLUMN license_result TEXT", []);
+        let _ = c.execute("ALTER TABLE machines ADD COLUMN grp TEXT", []);
         // iSCSI IQN base, random per server, generated once (first open without it) and kept.
         c.execute("INSERT OR IGNORE INTO config(key,value) VALUES('iqn_base',?1)", [random_iqn_base()]).map_err(e)?;
         Ok(Sqlite { c: Mutex::new(c) })
@@ -206,13 +240,139 @@ impl Db for Sqlite {
 
     fn machines(&self) -> DbResult<Vec<Machine>> {
         let c = self.c();
-        let mut s = c.prepare("SELECT id,mac,ip,hostname,image_id FROM machines ORDER BY hostname").map_err(e)?;
+        let mut s = c
+            .prepare(
+                "SELECT id,mac,ip,hostname,image_id,license_key,license_state,license_gen,license_result,grp
+                 FROM machines ORDER BY hostname",
+            )
+            .map_err(e)?;
         let rows = s
             .query_map([], |r| {
-                Ok(Machine { id: r.get(0)?, mac: r.get(1)?, ip: r.get(2)?, hostname: r.get(3)?, image_id: r.get(4)? })
+                let key: Option<String> = r.get(5)?;
+                Ok(Machine {
+                    id: r.get(0)?,
+                    mac: r.get(1)?,
+                    ip: r.get(2)?,
+                    hostname: r.get(3)?,
+                    image_id: r.get(4)?,
+                    license_tail: key.as_ref().map(|k| k[k.len().saturating_sub(5)..].to_string()),
+                    license_key: key,
+                    license_state: r.get(6)?,
+                    license_gen: r.get(7)?,
+                    license_result: r.get(8)?,
+                    grp: r.get(9)?,
+                })
             })
             .map_err(e)?;
         rows.collect::<Result<_, _>>().map_err(e)
+    }
+
+    fn set_license(&self, machine_id: i64, key: Option<&str>) -> DbResult<()> {
+        let sql = if key.is_some() {
+            "UPDATE machines SET license_key=?1, license_state='armed', license_gen=license_gen+1, license_result=NULL WHERE id=?2"
+        } else {
+            "UPDATE machines SET license_key=?1, license_state=NULL, license_result=NULL WHERE id=?2"
+        };
+        self.c().execute(sql, params![key, machine_id]).map(|_| ()).map_err(e)
+    }
+
+    fn rearm_license(&self, machine_id: i64) -> DbResult<()> {
+        self.c()
+            .execute(
+                "UPDATE machines SET license_state='armed', license_gen=license_gen+1, license_result=NULL
+                 WHERE id=?1 AND license_key IS NOT NULL",
+                [machine_id],
+            )
+            .map(|_| ())
+            .map_err(e)
+    }
+
+    fn take_license(&self, machine_id: i64) -> DbResult<Option<String>> {
+        let c = self.c(); // one connection lock → check + flip are atomic
+        let n = c
+            .execute("UPDATE machines SET license_state='sent' WHERE id=?1 AND license_state='armed'", [machine_id])
+            .map_err(e)?;
+        if n == 0 {
+            return Ok(None);
+        }
+        c.query_row("SELECT license_key FROM machines WHERE id=?1", [machine_id], |r| r.get(0)).map_err(e)
+    }
+
+    fn set_license_result(&self, machine_id: i64, result: &str) -> DbResult<()> {
+        self.c()
+            .execute("UPDATE machines SET license_result=?1 WHERE id=?2", params![result, machine_id])
+            .map(|_| ())
+            .map_err(e)
+    }
+
+    fn set_machine_group(&self, machine_id: i64, grp: Option<&str>) -> DbResult<()> {
+        self.c().execute("UPDATE machines SET grp=?1 WHERE id=?2", params![grp, machine_id]).map(|_| ()).map_err(e)
+    }
+
+    fn put_machine_hw(&self, mac: &str, hwids: &[String], seen: i64) -> DbResult<()> {
+        self.c()
+            .execute(
+                "INSERT INTO machine_hw(mac,hwids,seen) VALUES(?1,?2,?3)
+                 ON CONFLICT(mac) DO UPDATE SET hwids=excluded.hwids, seen=excluded.seen",
+                params![mac, hwids.join("\n"), seen],
+            )
+            .map(|_| ())
+            .map_err(e)
+    }
+
+    fn machine_hw(&self) -> DbResult<Vec<(String, Vec<String>)>> {
+        let c = self.c();
+        let mut s = c.prepare("SELECT mac,hwids FROM machine_hw").map_err(e)?;
+        let rows = s.query_map([], |r| Ok((r.get::<_, String>(0)?, lines(&r.get::<_, String>(1)?)))).map_err(e)?;
+        rows.collect::<Result<_, _>>().map_err(e)
+    }
+
+    fn drivers(&self) -> DbResult<Vec<Driver>> {
+        let c = self.c();
+        let mut s = c
+            .prepare("SELECT id,name,sha256,size,hwids,all_machines,groups,created FROM drivers ORDER BY name")
+            .map_err(e)?;
+        let rows = s
+            .query_map([], |r| {
+                Ok(Driver {
+                    id: r.get(0)?,
+                    name: r.get(1)?,
+                    sha256: r.get(2)?,
+                    size: r.get::<_, i64>(3)? as u64,
+                    hwids: lines(&r.get::<_, String>(4)?),
+                    all_machines: r.get::<_, i64>(5)? == 1,
+                    groups: lines(&r.get::<_, String>(6)?),
+                    created: r.get(7)?,
+                })
+            })
+            .map_err(e)?;
+        rows.collect::<Result<_, _>>().map_err(e)
+    }
+
+    fn put_driver(&self, name: &str, sha256: &str, size: u64, hwids: &[String], created: i64) -> DbResult<()> {
+        self.c()
+            .execute(
+                "INSERT INTO drivers(name,sha256,size,hwids,created) VALUES(?1,?2,?3,?4,?5)
+                 ON CONFLICT(name) DO UPDATE SET sha256=excluded.sha256, size=excluded.size,
+                   hwids=excluded.hwids, created=excluded.created",
+                params![name, sha256, size as i64, hwids.join("\n"), created],
+            )
+            .map(|_| ())
+            .map_err(e)
+    }
+
+    fn set_driver_targets(&self, id: i64, all_machines: bool, groups: &[String]) -> DbResult<()> {
+        self.c()
+            .execute(
+                "UPDATE drivers SET all_machines=?1, groups=?2 WHERE id=?3",
+                params![all_machines as i64, groups.join("\n"), id],
+            )
+            .map(|_| ())
+            .map_err(e)
+    }
+
+    fn delete_driver(&self, id: i64) -> DbResult<()> {
+        self.c().execute("DELETE FROM drivers WHERE id=?1", [id]).map(|_| ()).map_err(e)
     }
 
     fn add_machine(&self, mac: &str, ip: Option<&str>, hostname: Option<&str>) -> DbResult<i64> {
@@ -302,6 +462,43 @@ mod tests {
         let m = db.add_machine("aa:bb:cc:dd:ee:01", Some("10.0.0.50"), Some("PC01")).unwrap();
         db.assign_image(m, b).unwrap();
         assert_eq!(db.machines().unwrap()[0].image_id, Some(b));
+
+        // License: armed → taken once → re-armed → taken again; the key never reaches JSON.
+        let key = "ABCDE-FGHIJ-KLMNO-PQRST-VWXYZ";
+        db.set_license(m, Some(key)).unwrap();
+        let mc = &db.machines().unwrap()[0];
+        assert_eq!((mc.license_state.as_deref(), mc.license_gen, mc.license_tail.as_deref()), (Some("armed"), 1, Some("VWXYZ")));
+        let json = serde_json::to_string(mc).unwrap();
+        assert!(!json.contains("ABCDE") && !json.contains("license_key"), "{json}");
+        assert_eq!(db.take_license(m).unwrap().as_deref(), Some(key));
+        assert_eq!(db.take_license(m).unwrap(), None, "only once");
+        db.set_license_result(m, "activated").unwrap();
+        db.rearm_license(m).unwrap();
+        let mc = &db.machines().unwrap()[0];
+        assert_eq!((mc.license_state.as_deref(), mc.license_gen, mc.license_result.as_deref()), (Some("armed"), 2, None));
+        assert_eq!(db.take_license(m).unwrap().as_deref(), Some(key));
+        db.set_license(m, None).unwrap();
+        let mc = &db.machines().unwrap()[0];
+        assert_eq!((mc.license_state.as_deref(), mc.license_tail.as_deref()), (None, None));
+        db.rearm_license(m).unwrap(); // no key → stays without state
+        assert_eq!(db.machines().unwrap()[0].license_state, None);
+
+        // Groups + reported hardware + driver packages (a re-upload keeps the targets).
+        db.set_machine_group(m, Some("VIP")).unwrap();
+        assert_eq!(db.machines().unwrap()[0].grp.as_deref(), Some("VIP"));
+        let ids = vec!["PCI\\VEN_10DE&DEV_2504".to_string()];
+        db.put_machine_hw("aa:bb:cc:dd:ee:01", &ids, 1).unwrap();
+        db.put_machine_hw("aa:bb:cc:dd:ee:01", &ids, 2).unwrap();
+        assert_eq!(db.machine_hw().unwrap(), vec![("aa:bb:cc:dd:ee:01".to_string(), ids.clone())]);
+        db.put_driver("nvidia", "s1", 10, &ids, 1).unwrap();
+        let d = db.drivers().unwrap()[0].clone();
+        db.set_driver_targets(d.id, true, &["VIP".into(), "Pro".into()]).unwrap();
+        db.put_driver("nvidia", "s2", 20, &[], 2).unwrap();
+        let d = db.drivers().unwrap()[0].clone();
+        assert_eq!((d.sha256.as_str(), d.size, d.hwids.len(), d.all_machines), ("s2", 20, 0, true));
+        assert_eq!(d.groups, vec!["VIP", "Pro"]);
+        db.delete_driver(d.id).unwrap();
+        assert!(db.drivers().unwrap().is_empty());
 
         let l = Lease { mac: "m1".into(), ip: Some("10.0.0.100".into()), hostname: Some("x".into()), expires: 5, source: "full".into() };
         db.put_lease(&l).unwrap();

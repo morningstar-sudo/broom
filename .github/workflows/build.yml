@@ -1,0 +1,83 @@
+# Build iPXE (snponly.efi, from mgmt/ipxe/ipxe-src) + the mgmt binary (static musl, iPXE + web UI embedded),
+# run the unit tests, keep both as artifacts. Every push to main also tags the commit
+# v<Cargo.toml version>-<short sha> (e.g. v0.3.0-a1b2c3d) and publishes a release with the files.
+name: build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write # tag + release on pushes to main
+    env:
+      # build.sh defaults to ~/broom-target; keep it inside the workspace so rust-cache can restore it.
+      CARGO_TARGET_DIR: ${{ github.workspace }}/mgmt/target
+      CARGO_TERM_COLOR: always
+    steps:
+      - uses: actions/checkout@v4
+
+      # iPXE: gcc/make/perl + liblzma (util/zbin). mgmt: musl-gcc for the bundled SQLite C code.
+      # Unit tests use mkfs.ext4 / sfdisk / tar (already on the runner).
+      - name: Build dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq build-essential perl liblzma-dev musl-tools
+
+      # rustup reads mgmt/rust-toolchain.toml → latest stable + the musl target.
+      - name: Rust toolchain
+        working-directory: mgmt
+        run: rustup show active-toolchain || rustup toolchain install
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: mgmt -> target
+
+      # Release tag for this commit: v<Cargo.toml version>-<short sha>.
+      - name: Release tag
+        id: tag
+        run: |
+          v=$(sed -n 's/^version = "\(.*\)"/\1/p' mgmt/Cargo.toml | head -1)
+          echo "name=v$v-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+
+      # --ipxe: always rebuild snponly.efi from source (checkout timestamps can't tell what changed).
+      - name: Build iPXE + bootrom-mgmt + unit tests
+        run: ./build.sh --ipxe
+
+      - name: Checksums
+        run: |
+          cd mgmt
+          sha256sum dist/bootrom-mgmt ipxe/snponly.efi | tee SHA256SUMS
+          file dist/bootrom-mgmt
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bootrom-mgmt-${{ github.sha }}
+          path: |
+            mgmt/dist/bootrom-mgmt
+            mgmt/ipxe/snponly.efi
+            mgmt/SHA256SUMS
+          if-no-files-found: error
+
+      # Pushes to main only (not pull requests). The action creates the tag on this commit; a tag made with
+      # GITHUB_TOKEN does not start another workflow run.
+      - name: Release
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.tag.outputs.name }}
+          target_commitish: ${{ github.sha }}
+          name: ${{ steps.tag.outputs.name }}
+          files: |
+            mgmt/dist/bootrom-mgmt
+            mgmt/ipxe/snponly.efi
+            mgmt/SHA256SUMS
+          generate_release_notes: true
