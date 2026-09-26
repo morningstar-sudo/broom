@@ -49,8 +49,9 @@ jobs:
           echo "name=v$v-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
 
       # --ipxe: always rebuild snponly.efi from source (checkout timestamps can't tell what changed).
+      # `bash`, not ./build.sh: committed from Windows the script has no exec bit (mode 100644).
       - name: Build iPXE + bootrom-mgmt + unit tests
-        run: ./build.sh --ipxe
+        run: bash build.sh --ipxe
 
       - name: Checksums
         run: |
