@@ -27,6 +27,7 @@ pub fn routes() -> Router<SharedState> {
         .route("/api/images/upload-start", post(upload_start))
         .route("/api/images/upload-chunk", put(upload_chunk).layer(DefaultBodyLimit::max(CHUNK_MAX)))
         .route("/api/images/upload-done", post(upload_done))
+        .route("/api/golden-chunk", get(golden_chunk))
         .route("/api/images/snapshot", post(snapshot))
         .route("/api/images/snapshots", get(snapshots))
         .route("/api/images/rollback", post(rollback))
@@ -36,7 +37,8 @@ pub fn routes() -> Router<SharedState> {
 pub(crate) type ApiError = (StatusCode, String);
 
 fn ise(e: String) -> ApiError {
-    (StatusCode::INTERNAL_SERVER_ERROR, e)
+    tracing::error!("internal error: {e}"); // keep OS paths/errors in the server log, not the response (L7)
+    (StatusCode::INTERNAL_SERVER_ERROR, "internal error".into())
 }
 
 /// Image name by id, 404 if missing.
@@ -114,6 +116,7 @@ async fn delete(
         let freed = tokio::task::spawn_blocking(move || {
             crate::publish::unpublish(&st2, &n); // target, zram, tftp/ boot files (golden.vhdx)
             let _ = std::fs::remove_dir_all(crate::images_dir().join(&n));
+            let _g = st2.versions_lock.lock().unwrap_or_else(|p| p.into_inner());
             crate::versions::delete_all(&n)
         })
         .await
@@ -163,6 +166,29 @@ async fn set_default(
 }
 
 #[derive(Deserialize)]
+struct ChunkReq {
+    name: String,
+    i: u64,
+    h: String,
+}
+
+/// GET /api/golden-chunk?name=&i=&h= — chunk i (4 MB) of a Windows golden.vhdx, zstd-compressed, for the stage's
+/// delta update (Windows data ≈ 55 % → less to send). h = its sha256 from golden.chunks: checked before serving
+/// (409 when the golden was republished meanwhile) and the cache key (compressed once for the whole room).
+async fn golden_chunk(State(st): State<SharedState>, Query(q): Query<ChunkReq>) -> Result<impl IntoResponse, ApiError> {
+    if !valid_name(&q.name) || q.h.len() != 64 || !q.h.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err((StatusCode::BAD_REQUEST, "bad name or hash".into()));
+    }
+    // Cap concurrent 4 MB read+hash jobs (M4): a flood of chunk requests can't saturate the blocking pool / disk.
+    let _permit = st.chunk_sem.acquire().await.map_err(|e| ise(e.to_string()))?;
+    let z = tokio::task::spawn_blocking(move || crate::publish::golden_chunk_zst(&q.name, q.i, &q.h))
+        .await
+        .map_err(|e| ise(e.to_string()))?
+        .map_err(|(changed, e)| (if changed { StatusCode::CONFLICT } else { StatusCode::INTERNAL_SERVER_ERROR }, e))?;
+    Ok(([(header::CONTENT_TYPE, "application/zstd")], z))
+}
+
+#[derive(Deserialize)]
 struct SnapBody {
     id: i64,
     #[serde(default)]
@@ -175,6 +201,7 @@ async fn snapshot(State(st): State<SharedState>, Json(b): Json<SnapBody>) -> Res
     let label: String = b.label.chars().filter(|c| !c.is_control()).take(80).collect();
     spawn_job(&st, name, "snapshot", move |st, name, steps| {
         steps.go("snapshot (hashing image.img)");
+        let _g = st.versions_lock.lock().unwrap_or_else(|p| p.into_inner());
         let (m, new) = crate::versions::snapshot(name, label.trim())?;
         st.db.set_active_version(name_id(st, name)?, Some(&m.version))?;
         Ok(format!("version {} saved ({new} new chunks)", m.version))
@@ -193,15 +220,19 @@ async fn rollback(State(st): State<SharedState>, Json(b): Json<VersionBody>) -> 
     let img = st.db.image(b.id).map_err(ise)?.ok_or((StatusCode::NOT_FOUND, format!("image {} not found", b.id)))?;
     let version = b.version;
     spawn_job(&st, img.name.clone(), "rollback", move |st, name, steps| {
-        // Never rewrite a file the iSCSI target is serving: running clients would read half old, half new.
-        if img.os == "linux" {
-            steps.go("stop iSCSI target");
-            if let Ok(lio) = crate::iscsi::Lio::system() {
-                lio.remove(name, &crate::publish::iqn_of(st, name));
-            }
+        // Rollback rewrites the shared golden (image.img). For a disk-cache image that file backs the live target,
+        // so a connected client would read half old / half new → refuse while any client is attached. zram is safe:
+        // the running client keeps its own RAM copy, and the republish below makes a fresh device (M9).
+        if img.os == "linux" && img.cache_mode != "zram" && crate::iscsi::any_session() {
+            return Err("clients are connected; rolling back rewrites the shared disk golden they are reading. \
+                        Reboot/close the clients (do it off-hours), or set this image to zram cache."
+                .into());
         }
         steps.go(&format!("restore {version}"));
-        let n = crate::versions::rehydrate(name, &version)?;
+        let n = {
+            let _g = st.versions_lock.lock().unwrap_or_else(|p| p.into_inner());
+            crate::versions::rehydrate(name, &version)?
+        };
         st.db.set_active_version(img.id, Some(&version))?;
         let msg = crate::publish::run_publish(st, name, steps)?;
         Ok(format!("rolled back to {version} ({n} chunks rewritten) — {msg}"))
@@ -223,11 +254,17 @@ async fn snapshots(State(st): State<SharedState>, Query(q): Query<HashMap<String
 /// Delete a version + free chunks nothing references anymore.
 async fn version_delete(State(st): State<SharedState>, Json(b): Json<VersionBody>) -> Result<Json<serde_json::Value>, ApiError> {
     let img = st.db.image(b.id).map_err(ise)?.ok_or((StatusCode::NOT_FOUND, format!("image {} not found", b.id)))?;
-    let (name, version) = (img.name.clone(), b.version.clone());
-    let freed = tokio::task::spawn_blocking(move || crate::versions::delete(&name, &version))
-        .await
-        .map_err(|e| ise(e.to_string()))?
-        .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+    if st.jobs.lock().unwrap().get(&img.name).is_some_and(|s| s.starts_with('⏳')) {
+        return Err((StatusCode::CONFLICT, format!("image '{}' has a running job — wait for it to finish", img.name)));
+    }
+    let (name, version, st2) = (img.name.clone(), b.version.clone(), st.clone());
+    let freed = tokio::task::spawn_blocking(move || {
+        let _g = st2.versions_lock.lock().unwrap_or_else(|p| p.into_inner());
+        crate::versions::delete(&name, &version)
+    })
+    .await
+    .map_err(|e| ise(e.to_string()))?
+    .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
     if img.active_version.as_deref() == Some(b.version.as_str()) {
         let _ = st.db.set_active_version(img.id, None);
     }
@@ -296,19 +333,30 @@ struct ChunkQuery {
 
 /// PUT /api/images/upload-chunk?name=&file=&offset=&total=  body = up to 16 MB of `file` at `offset`.
 /// Chunks may arrive in any order, in parallel, or twice (retry): each is written at its own offset.
-async fn upload_chunk(Query(q): Query<ChunkQuery>, body: Body) -> Result<Json<serde_json::Value>, ApiError> {
+async fn upload_chunk(State(st): State<SharedState>, Query(q): Query<ChunkQuery>, body: Body) -> Result<Json<serde_json::Value>, ApiError> {
+    // Don't accept new chunks for an image whose publish/rollback job is running (L3): the staging upload it feeds
+    // would be consumed by the wrong job. Cheap in-memory check (no DB hit per chunk).
+    if st.jobs.lock().unwrap().get(&q.name).is_some_and(|s| s.starts_with('⏳')) {
+        return Err((StatusCode::CONFLICT, "image has a running job — wait for it to finish".into()));
+    }
     if !valid_name(&q.name) {
         return Err((StatusCode::BAD_REQUEST, "bad image name".into()));
     }
-    write_chunk(upload_dir(&q.name), &q.file, q.offset, q.total, body).await?;
+    write_chunk(upload_dir(&q.name), &q.file, q.offset, q.total, MAX_UPLOAD, body).await?;
     Ok(Json(serde_json::json!({"ok": true})))
 }
 
-/// Write one upload chunk into `dir/file` at `offset` (the file is sparse-extended to `total`). Shared by the
-/// golden and driver-package uploads.
-pub(crate) async fn write_chunk(dir: std::path::PathBuf, file: &str, offset: u64, total: u64, body: Body) -> Result<(), ApiError> {
+/// A single uploaded file (vmdk/img/zip) can't exceed this — matches the golden size cap.
+pub(crate) const MAX_UPLOAD: u64 = 4 << 40; // 4 TiB
+
+/// Write one upload chunk into `dir/file` at `offset` (the file is sparse-extended to `total`, capped at `max`).
+/// Shared by the golden and driver-package uploads.
+pub(crate) async fn write_chunk(dir: std::path::PathBuf, file: &str, offset: u64, total: u64, max: u64, body: Body) -> Result<(), ApiError> {
     if !valid_file(file) {
         return Err((StatusCode::BAD_REQUEST, "bad file name".into()));
+    }
+    if total > max {
+        return Err((StatusCode::BAD_REQUEST, format!("file too large ({total} > {max} bytes)")));
     }
     let data = axum::body::to_bytes(body, CHUNK_MAX).await.map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
     if offset.checked_add(data.len() as u64).is_none_or(|end| end > total) {
@@ -366,7 +414,11 @@ fn spawn_publish(st: &SharedState, name: String, upload: Option<std::path::PathB
         // First golden of this image → keep it as v1: there is always a version to roll back to.
         // Clients can boot already; a failed snapshot only gets a warning.
         steps.go("snapshot v1");
-        match crate::versions::snapshot(name, "first upload") {
+        let first_snap = {
+            let _g = st.versions_lock.lock().unwrap_or_else(|p| p.into_inner());
+            crate::versions::snapshot(name, "first upload")
+        };
+        match first_snap {
             Ok((m, _)) => {
                 st.db.set_active_version(name_id(st, name)?, Some(&m.version))?;
                 Ok(format!("{msg}; saved as {}", m.version))

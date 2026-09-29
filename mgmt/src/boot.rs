@@ -42,15 +42,19 @@ pub async fn render(State(st): State<SharedState>, Query(q): Q) -> impl IntoResp
     let h = host.as_deref().unwrap_or("-");
     info!("client {} boot menu - mac {mac} - ip {ip} - hostname {h}", host.as_deref().unwrap_or(&mac));
 
-    let timeout_s: u64 = st.db.get_config("boot_timeout", "10").parse().unwrap_or(10);
-    let images: Vec<MenuImage> = st
-        .db
-        .images()
-        .unwrap_or_default()
-        .into_iter()
-        .map(|i| MenuImage { name: i.name, is_default: i.is_default })
-        .collect();
+    // Clamp: menu_script does timeout_s * 1000 (would overflow / panic on a huge stored value).
+    let timeout_s: u64 = st.db.get_config("boot_timeout", "10").parse().unwrap_or(10).min(3600);
+    let images = menu_images(st.db.images().unwrap_or_default(), m.as_ref().and_then(|m| m.image_id));
     script(menu_script(&images, timeout_s, host.as_deref(), lic))
+}
+
+/// Menu entries; the machine's own image (Devices page) is its default when it still exists, else the global one.
+fn menu_images(images: Vec<crate::db::Image>, own: Option<i64>) -> Vec<MenuImage> {
+    let own = own.filter(|id| images.iter().any(|i| i.id == *id));
+    images
+        .into_iter()
+        .map(|i| MenuImage { is_default: own.map_or(i.is_default, |id| i.id == id), name: i.name })
+        .collect()
 }
 
 /// A menu choice: log the boot + hand over the image's boot script.
@@ -179,6 +183,30 @@ mod tests {
         // menu_ui.c draws the countdown in the last 32 columns of the hint row (from col 46 on 80x25).
         let hint = s.lines().find_map(|l| l.strip_prefix("set menu-hint ")).unwrap();
         assert!(2 + hint.len() <= 80 - 2 - 32, "menu-hint would be overwritten by the countdown");
+    }
+
+    #[test]
+    fn machine_image_is_its_default() {
+        let img = |id, name: &str, def| crate::db::Image {
+            id,
+            name: name.into(),
+            os: "windows".into(),
+            active_version: None,
+            is_default: def,
+            boot_script: None,
+            hash: None,
+            cache_mode: "disk".into(),
+        };
+        let defaults = |own| {
+            super::menu_images(vec![img(1, "win11", true), img(2, "ubuntu", false)], own)
+                .into_iter()
+                .filter(|m| m.is_default)
+                .map(|m| m.name)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(defaults(None), ["win11"]);
+        assert_eq!(defaults(Some(2)), ["ubuntu"]);
+        assert_eq!(defaults(Some(9)), ["win11"], "deleted image → global default");
     }
 
     #[test]

@@ -128,6 +128,26 @@ impl Lio {
             }
         }
     }
+
+    /// IQNs of every configured iSCSI target (configfs dir names under iscsi/).
+    pub fn list_iqns(&self) -> Vec<String> {
+        subdirs(&self.root.join("iscsi"))
+            .into_iter()
+            .filter_map(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
+            .collect()
+    }
+}
+
+/// Any iSCSI initiator currently connected to the portal (all targets share :3260, so this is portal-wide, not
+/// per-target). Used to decide when it is safe to tear down a superseded target or republish a disk image (M9).
+pub fn any_session() -> bool {
+    match std::process::Command::new("ss")
+        .args(["-H", "-tn", "state", "established", "( sport = :3260 )"])
+        .output()
+    {
+        Ok(o) => o.stdout.iter().filter(|&&b| b == b'\n').count() > 0,
+        Err(_) => true, // can't tell (no ss) → assume connected, never tear down blindly
+    }
 }
 
 #[cfg(test)]

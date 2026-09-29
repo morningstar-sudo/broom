@@ -1,0 +1,70 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Broom Console — Sign in</title>
+<style>
+  :root{--bg:#0b0f17;--panel:#121a26;--line:#1f2b3a;--ink:#e6edf6;--muted:#7c8ba3;
+    --accent:#35c1f0;--accent-ink:#04121b;--off:#ff6b6b;
+    --mono:ui-monospace,"JetBrains Mono","SF Mono",Menlo,Consolas,monospace;}
+  @media (prefers-color-scheme:light){:root{--bg:#eef1f5;--panel:#fff;--line:#dde3ec;
+    --ink:#16202e;--muted:#64748b;--accent:#0ea5e9;--accent-ink:#fff;--off:#dc2626;}}
+  *{box-sizing:border-box}
+  body{margin:0;min-height:100vh;background:var(--bg);color:var(--ink);display:flex;
+    align-items:center;justify-content:center;
+    font:14px/1.55 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+  form{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:28px 30px;
+    display:flex;flex-direction:column;gap:12px;width:min(360px,92vw)}
+  .brand{display:flex;align-items:center;gap:8px;font-size:1.15rem;letter-spacing:.06em;font-weight:700}
+  .brand::before{content:"";width:11px;height:11px;border-radius:3px;background:var(--accent);
+    box-shadow:0 0 12px var(--accent)}
+  h2{margin:.2rem 0 0;font-size:1.1rem}
+  .hint{color:var(--muted);font-size:.82rem;margin:0}
+  input{padding:9px 11px;background:var(--bg);border:1px solid var(--line);border-radius:8px;
+    color:var(--ink);font:inherit}
+  input:focus{outline:none;border-color:var(--accent)}
+  button{padding:10px 12px;background:var(--accent);color:var(--accent-ink);border:0;border-radius:8px;
+    font:600 .92rem inherit;cursor:pointer}
+  button:disabled{opacity:.6;cursor:default}
+  .msg{font:600 .82rem/1.4 var(--mono);color:var(--off);min-height:1.1rem;overflow-wrap:anywhere}
+</style>
+<form id="f" autocomplete="on">
+  <div class="brand">Broom Console</div>
+  <h2 id="title">Sign in</h2>
+  <p class="hint" id="hint">Enter the admin password.</p>
+  <input id="pw" type="password" placeholder="Admin password" autocomplete="current-password" required>
+  <input id="pw2" type="password" placeholder="Confirm password" autocomplete="new-password" hidden>
+  <button id="go" type="submit">Continue</button>
+  <span class="msg" id="msg"></span>
+</form>
+<script>
+let setup=false;
+const $=id=>document.getElementById(id);
+// First run (no admin password yet) → switch to "set a password" mode. Also skip the page if already signed in.
+(async()=>{
+  try{
+    const s=await(await fetch('/api/auth/status')).json();
+    if(s.authed){location.replace('/');return;}
+    if(!s.configured){
+      setup=true;
+      $('title').textContent='Set the admin password';
+      $('hint').textContent='First run — choose a password for the web admin (min 8 characters). Anyone on the LAN can reach this page, so set it now.';
+      $('pw').autocomplete='new-password';$('pw2').hidden=false;
+    }
+  }catch(e){/* offline — let the submit surface the error */}
+})();
+$('f').onsubmit=async e=>{
+  e.preventDefault();
+  const pw=$('pw').value, msg=$('msg');
+  if(setup){
+    if(pw.length<8){msg.textContent='at least 8 characters';return;}
+    if(pw!==$('pw2').value){msg.textContent='passwords do not match';return;}
+  }
+  $('go').disabled=true;msg.textContent='';
+  let r;
+  try{r=await fetch(setup?'/api/auth/setup':'/api/auth/login',
+    {method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({password:pw})});}
+  catch(err){msg.textContent='✗ '+err.message;$('go').disabled=false;return;}
+  if(!r.ok){msg.textContent='✗ '+((await r.text())||('HTTP '+r.status));$('go').disabled=false;return;}
+  location.replace('/');   // session cookie set → the app is now reachable
+};
+</script>

@@ -25,12 +25,16 @@ struct MachineStatus {
     hostname: Option<String>,
     online: bool,
     registered: bool,
-    /// Registered machines only: id + license (tail/state/result — never the key).
+    /// Registered machines only: id + license. The web admin is behind a login (auth.rs), so the full key is shown
+    /// to the operator here; it is still never handed to a client (only broom-done fetches it, once, over the LAN).
     id: Option<i64>,
+    license_key: Option<String>,
     license_tail: Option<String>,
     license_state: Option<String>,
     license_result: Option<String>,
     grp: Option<String>,
+    image_id: Option<i64>,
+    notes: Option<String>,
 }
 
 /// Machines = registered (machines table) + discovered via DHCP (leases table, dhcp.rs).
@@ -45,7 +49,7 @@ async fn status(State(st): State<SharedState>) -> Json<Vec<MachineStatus>> {
         rows.insert(m.mac.to_lowercase(), m);
     }
 
-    // 2. Discovered via the built-in DHCP (full-mode leases + PXE clients seen in proxy mode).
+    // 2. Discovered via the built-in DHCP server (active leases).
     for l in st.db.leases().unwrap_or_default().into_iter().filter(|l| !l.mac.starts_with("declined-")) {
         let (mac, ip, host) = (l.mac, l.ip, l.hostname);
         map.entry(mac.to_lowercase())
@@ -79,10 +83,13 @@ async fn status(State(st): State<SharedState>) -> Json<Vec<MachineStatus>> {
             let m = rows.remove(&mac);
             MachineStatus {
                 id: m.as_ref().map(|m| m.id),
+                license_key: m.as_ref().and_then(|m| m.license_key.clone()),
                 license_tail: m.as_ref().and_then(|m| m.license_tail.clone()),
                 license_state: m.as_ref().and_then(|m| m.license_state.clone()),
                 license_result: m.as_ref().and_then(|m| m.license_result.clone()),
-                grp: m.and_then(|m| m.grp),
+                grp: m.as_ref().and_then(|m| m.grp.clone()),
+                image_id: m.as_ref().and_then(|m| m.image_id),
+                notes: m.and_then(|m| m.notes),
                 mac,
                 ip,
                 hostname,

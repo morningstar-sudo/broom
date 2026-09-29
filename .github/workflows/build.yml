@@ -26,11 +26,12 @@ jobs:
       - uses: actions/checkout@v4
 
       # iPXE: gcc/make/perl + liblzma (util/zbin). mgmt: musl-gcc for the bundled SQLite C code.
-      # Unit tests use mkfs.ext4 / sfdisk / tar (already on the runner).
+      # Unit tests use mkfs.ext4 / sfdisk / tar (already on the runner); busybox-initramfs = the shell the Windows
+      # stage really runs in (its applets win over PATH) → the stage tests run in it.
       - name: Build dependencies
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq build-essential perl liblzma-dev musl-tools
+          sudo apt-get install -y -qq build-essential perl liblzma-dev musl-tools busybox-initramfs
 
       # rustup reads mgmt/rust-toolchain.toml → latest stable + the musl target.
       - name: Rust toolchain

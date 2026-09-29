@@ -49,10 +49,10 @@ log(){ echo "broom: $*"; echo "$*" >> /run/broom-wb.log; }
 WB_GB=30   # writeback size of p1; the rest = cache + /games. Change = wipefs the disk to repartition.
 modprobe iscsi_tcp 2>/dev/null
 modprobe iscsi_ibft 2>/dev/null
-NAME=""; HASH=""; SIZE=""; NOCACHE=""
+NAME=""; HASH=""; SIZE=""; NOCACHE=""; SRV=""
 for a in $(cat /proc/cmdline); do
   case "$a" in
-    broom.name=*) NAME=${a#*=};; broom.hash=*) HASH=${a#*=};; broom.size=*) SIZE=${a#*=};;
+    broom.name=*) NAME=${a#*=};; broom.hash=*) HASH=${a#*=};; broom.size=*) SIZE=${a#*=};; broom.srv=*) SRV=${a#*=};;
     broom.nocache) NOCACHE=1;;
   esac
 done
@@ -141,9 +141,22 @@ if [ "$MODE" != hit ]; then
   log "iscsi attach -> ${GOLDEN:-NO iSCSI disk found}"
 fi
 udevadm settle 2>/dev/null
+# The golden may use LVM. Its device is read-only (iSCSI RO, or losetup -r on a cache HIT), so the stock lvm2 hook's
+# writable vgchange fails on it (device-mapper -EROFS). Activate any volume groups read-only ourselves — dm then
+# opens the PV read-only. No-op when the golden is a plain partition (no VGs found); overlayroot still puts the
+# writeback on the SSD, so a read-only root LV is fine.
+if command -v lvm >/dev/null 2>&1; then
+  lvm pvscan --cache >/dev/null 2>&1 || true
+  for vg in $(lvm vgs --noheadings -o vg_name 2>/dev/null); do
+    [ -n "$vg" ] || continue
+    lvm vgchange -ay --config "global{metadata_read_only=1} activation{read_only_volume_list=[\"$vg\"]}" "$vg" >/dev/null 2>&1 \
+      && log "lvm: $vg activated read-only"
+  done
+  udevadm settle 2>/dev/null
+fi
 # Parameters for broom-cache.service (golden) after boot: mount /games + background copy on MISS.
 if [ "$MODE" != none ]; then
-  printf 'MODE=%s\nNAME=%s\nHASH=%s\nSIZE=%s\nGOLDEN=%s\n' "$MODE" "$NAME" "$HASH" "$SIZE" "$GOLDEN" > /run/broom-cache.env
+  printf 'MODE=%s\nNAME=%s\nHASH=%s\nSIZE=%s\nGOLDEN=%s\nSRV=%s\n' "$MODE" "$NAME" "$HASH" "$SIZE" "$GOLDEN" "$SRV" > /run/broom-cache.env
   cp /scripts/broom-cache.sh /run/broom-cache.sh
 fi
 
@@ -170,13 +183,56 @@ const CACHE_SCRIPT: &str = r#"#!/bin/sh
 . /run/broom-cache.env
 C=/run/broomcache
 log(){ echo "$*" >> /run/broom-wb.log; }
+# Hide broom's own SSD partitions (writeback + golden cache) from the desktop file manager — internal, and a guest
+# browsing/mounting the cache could expose or corrupt the shared golden. Done here (server-injected) so it applies on
+# a republish without re-prepping the golden. The overlay root is reset every boot, so re-create it each time.
+if [ ! -f /etc/udev/rules.d/99-broom-hide.rules ] 2>/dev/null; then
+  cat >/etc/udev/rules.d/99-broom-hide.rules 2>/dev/null <<'UDEV' && {
+ENV{ID_FS_LABEL}=="broomwb", ENV{UDISKS_IGNORE}="1"
+ENV{ID_FS_LABEL}=="broomcache", ENV{UDISKS_IGNORE}="1"
+UDEV
+    udevadm control --reload 2>/dev/null || true
+    udevadm trigger --subsystem-match=block 2>/dev/null || true
+  }
+fi
 mkdir -p /games && mount --bind $C/games /games && chmod 1777 $C/games
 [ "$MODE" = miss ] && [ -b "$GOLDEN" ] && [ -n "$HASH" ] && [ -n "$SIZE" ] || exit 0
 # ponytail: spread over 0–5 minutes so all clients don't pull the golden at once after Publish; still congested →
 # limit bandwidth on the server side.
 sleep $(( $(od -An -N2 -tu2 /dev/urandom) % 300 ))
-# Only keep the cache of the running image (remove old images + partial files).
-rm -f $C/*.img $C/*.sha256 $C/*.tmp
+# Only keep the cache of the running image (other images + partial files go).
+for f in $C/*.img; do [ "$f" = "$C/$NAME.img" ] || rm -f "$f" "${f%.img}.sha256" "${f%.img}.chunks"; done
+rm -f $C/*.tmp
+# Delta: an older copy of THIS image + its manifest → patch it in place (raw = fixed positions): only chunks whose
+# sha256 changed (server's golden.chunks) are read from the attached iSCSI golden, checked, written. Cache invalid
+# while patching (re-running is idempotent). Any problem → the full copy below.
+M=/run/broom-golden.chunks; T=/run/broom-chunk
+if [ -f "$C/$NAME.img" ] && [ -f "$C/$NAME.chunks" ] && [ -n "$SRV" ] \
+   && wget -q -O $M "http://$SRV/tftp/broom/$NAME/golden.chunks" && [ "$(sed -n '1s/^size //p' $M)" = "$SIZE" ]; then
+  rm -f "$C/$NAME.sha256"
+  awk 'NR==FNR { if (FNR>1) o[FNR-2]=$1; next } FNR>1 && o[FNR-2]!=$1 { print FNR-2, $1 }' "$C/$NAME.chunks" $M > /run/broom-diff
+  truncate -s "$SIZE" "$C/$NAME.img"
+  n=0; bad=""
+  while read i h; do
+    off=$((i * 4194304)); len=$((SIZE - off)); [ $len -gt 4194304 ] && len=4194304
+    if [ "$h" = zero ]; then
+      dd if=/dev/zero of="$C/$NAME.img" bs=4M iflag=count_bytes oflag=seek_bytes seek=$off count=$len conv=notrunc status=none
+    else
+      dd if="$GOLDEN" of=$T bs=4M iflag=skip_bytes,count_bytes skip=$off count=$len status=none
+      [ "$(sha256sum $T | cut -c1-64)" = "$h" ] || { bad=$i; break; }
+      dd if=$T of="$C/$NAME.img" bs=4M oflag=seek_bytes seek=$off conv=notrunc status=none
+    fi
+    n=$((n + 1))
+  done < /run/broom-diff
+  rm -f $T
+  if [ -z "$bad" ]; then
+    cp $M "$C/$NAME.chunks" && sync && echo "$HASH" > "$C/$NAME.sha256" && sync
+    log "cache: delta OK — $n chunks ($((n * 4)) MB) patched, next boot runs from the SSD"
+    exit 0
+  fi
+  log "cache: delta chunk $bad does not match the manifest → full copy"
+fi
+rm -f $C/*.img $C/*.sha256 $C/*.chunks
 avail=$(df -B1 --output=avail $C | tail -1)
 [ "$avail" -gt "$SIZE" ] || { log "cache: not enough SSD space ($avail < $SIZE)"; exit 0; }
 log "cache: copying $GOLDEN -> $C/$NAME.img ..."
@@ -186,6 +242,8 @@ ionice -c3 nice -n19 dd if="$GOLDEN" of="$C/$NAME.tmp" bs=4M iflag=count_bytes c
 h=$(ionice -c3 nice -n19 sha256sum "$C/$NAME.tmp" | cut -d' ' -f1)
 if [ "$h" = "$HASH" ]; then
   mv "$C/$NAME.tmp" "$C/$NAME.img" && sync && echo "$HASH" > "$C/$NAME.sha256" && sync
+  # Manifest of this copy → the next golden update is a delta. No manifest (old server) → next one is full again.
+  [ -n "$SRV" ] && wget -q -O "$C/$NAME.chunks" "http://$SRV/tftp/broom/$NAME/golden.chunks" || rm -f "$C/$NAME.chunks"
   log "cache: OK — next boot runs from the SSD"
 else
   rm -f "$C/$NAME.tmp"; log "cache: hash mismatch ($h) — discarded"
@@ -278,6 +336,14 @@ if [ -f /etc/iscsi/iscsid.conf ]; then
   sed -i 's/^node.session.timeo.replacement_timeout.*/node.session.timeo.replacement_timeout = 120/' /etc/iscsi/iscsid.conf
 fi
 
+# Hide broom's own SSD partitions (writeback + golden cache) from the desktop file manager — they are internal,
+# and letting a guest browse or mount the cache could expose or corrupt the shared golden.
+mkdir -p /etc/udev/rules.d
+cat >/etc/udev/rules.d/99-broom-hide.rules <<'UDEV'
+ENV{ID_FS_LABEL}=="broomwb", ENV{UDISKS_IGNORE}="1"
+ENV{ID_FS_LABEL}=="broomcache", ENV{UDISKS_IGNORE}="1"
+UDEV
+
 # Remove artifacts of the old prep (hook/overlayroot.conf are now injected into the initrd by the SERVER).
 rm -f /etc/initramfs-tools/scripts/init-top/broom-wb /etc/overlayroot.conf
 
@@ -334,5 +400,48 @@ mod tests {
             let ok = std::process::Command::new("sh").args(["-n", "-c", s]).status().unwrap();
             assert!(ok.success());
         }
+    }
+
+    /// Cache delta (cut from CACHE_SCRIPT): the old SSD copy is patched in place from the "iSCSI" golden — only the
+    /// chunks whose hash changed; the result equals the new golden. Golden not matching the manifest → no .sha256.
+    #[test]
+    fn cache_delta_patch() {
+        const C: usize = crate::publish::MANIFEST_CHUNK;
+        let s = super::CACHE_SCRIPT;
+        let part = &s[s.find("M=/run/broom-golden.chunks").unwrap()..s.find("rm -f $C/*.img $C/*.sha256 $C/*.chunks").unwrap()];
+        let d = std::env::temp_dir().join("broom_t_cache_delta");
+        let old = [vec![1u8; C], vec![2u8; C], vec![3u8; C], vec![4u8; 500]].concat();
+        let run = |new: &[u8], iscsi: &[u8]| {
+            let _ = std::fs::remove_dir_all(&d);
+            for p in ["c", "run", "srv"] {
+                std::fs::create_dir_all(d.join(p)).unwrap();
+            }
+            std::fs::write(d.join("c/ubuntu.img"), &old).unwrap();
+            crate::publish::write_manifest(&d.join("c/ubuntu.img"), &d.join("c")).unwrap();
+            std::fs::rename(d.join("c/golden.chunks"), d.join("c/ubuntu.chunks")).unwrap();
+            std::fs::write(d.join("srv/golden.img"), new).unwrap();
+            crate::publish::write_manifest(&d.join("srv/golden.img"), &d.join("srv")).unwrap();
+            std::fs::write(d.join("iscsi.dev"), iscsi).unwrap();
+            let body = part.replace("/run/", &format!("{}/run/", d.display()));
+            let sh = format!(
+                "C={d}/c; NAME=ubuntu; HASH=h1; SIZE={size}; GOLDEN={d}/iscsi.dev; SRV=x\n\
+                 log(){{ echo \"$*\" >> {d}/log; }}\n\
+                 wget(){{ cp {d}/srv/golden.chunks \"$3\"; }}\n{body}",
+                d = d.display(),
+                size = new.len()
+            );
+            std::process::Command::new("sh").args(["-c", &sh]).status().unwrap();
+            let img_ok = std::fs::read(d.join("c/ubuntu.img")).unwrap() == new;
+            let valid = std::fs::read_to_string(d.join("c/ubuntu.sha256")).unwrap_or_default().trim() == "h1";
+            (img_ok, valid, std::fs::read_to_string(d.join("log")).unwrap_or_default())
+        };
+        // Chunk 1 changed, chunk 2 now zero, the tail grew: 3 chunks patched, the rest untouched.
+        let new = [vec![1u8; C], vec![9u8; C], vec![0u8; C], vec![4u8; 3000]].concat();
+        let (img_ok, valid, log) = run(&new, &new);
+        assert!(img_ok && valid && log.contains("3 chunks"), "{log}");
+        // The attached golden is not the manifest's → the cache stays invalid (the script then does a full copy).
+        let (_, valid, log) = run(&new, &old);
+        assert!(!valid && log.contains("does not match"), "{log}");
+        let _ = std::fs::remove_dir_all(&d);
     }
 }

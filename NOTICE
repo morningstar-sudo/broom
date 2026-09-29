@@ -1,0 +1,9 @@
+Broom — Diskless Boot System
+Copyright 2026 morningstar-sudo
+
+This product is licensed under the Apache License, Version 2.0 (see LICENSE).
+
+It bundles iPXE (https://ipxe.org/), in mgmt/ipxe/ipxe-src/, which is licensed under
+the GNU General Public License, version 2 (with the iPXE UBDL exception). iPXE's source
+and license are kept in that directory; the compiled snponly.efi embedded in the binary
+is built from it. iPXE is not covered by the Apache License above.

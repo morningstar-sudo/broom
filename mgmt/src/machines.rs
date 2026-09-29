@@ -9,7 +9,7 @@ use axum::{
 use serde::Deserialize;
 use std::net::SocketAddr;
 
-use crate::db::{Lease, Machine};
+use crate::db::Machine;
 use crate::{dhcp, SharedState};
 
 pub fn routes() -> Router<SharedState> {
@@ -24,7 +24,7 @@ pub fn routes() -> Router<SharedState> {
         .route("/api/machines/group", post(set_group))
         .route("/api/machines/license", post(set_license))
         .route("/api/machines/license/rearm", post(rearm_license))
-        .route("/api/license", get(license))
+        .route("/api/license", post(license))
         .route("/api/license/result", post(license_result))
 }
 
@@ -33,28 +33,47 @@ pub fn routes() -> Router<SharedState> {
 // peer IP → registered machine; nothing in the request is trusted. Handed out once (armed → sent): the guest
 // user is an Administrator and could otherwise fetch it any time. Re-arm on the web to allow one more.
 
-const KEY_RULE: &str = "License key: 25 letters/digits as XXXXX-XXXXX-XXXXX-XXXXX-XXXXX";
+pub(crate) const KEY_RULE: &str = "License key: 25 letters/digits as XXXXX-XXXXX-XXXXX-XXXXX-XXXXX";
 
 /// Windows product key format. Keep in sync with keyOk() in index.html.
-fn key_ok(k: &str) -> bool {
+pub(crate) fn key_ok(k: &str) -> bool {
     k.len() == 29
         && k.split('-').count() == 5
         && k.split('-').all(|g| g.len() == 5 && g.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit()))
 }
 
-/// The registered machine behind a client IP: bound IP first, else its unexpired lease.
-fn machine_by_ip<'a>(ip: &str, machines: &'a [Machine], leases: &[Lease], now: i64) -> Option<&'a Machine> {
-    machines.iter().find(|m| m.ip.as_deref() == Some(ip)).or_else(|| {
-        let l = leases.iter().find(|l| l.ip.as_deref() == Some(ip) && l.expires > now)?;
-        machines.iter().find(|m| m.mac.eq_ignore_ascii_case(&l.mac))
-    })
+/// The registered machine behind a client IP, for the license endpoints. Only a machine's OWN bound IP counts —
+/// NOT a DHCP lease (an OFFER hold is trivially spoofed). So a machine that should receive a key must have a fixed
+/// IP set (Devices page). `arp` = the peer's
+/// MAC as the kernel sees it; when known it must match the machine's MAC (raises the bar; ARP can still be faked).
+fn machine_by_ip<'a>(ip: &str, machines: &'a [Machine], arp: Option<&str>) -> Option<&'a Machine> {
+    let m = machines.iter().find(|m| m.ip.as_deref() == Some(ip))?;
+    match arp {
+        Some(mac) if !m.mac.eq_ignore_ascii_case(mac) => None, // IP right, MAC wrong → spoofed
+        _ => Some(m),
+    }
 }
 
-fn now() -> i64 {
+/// The MAC the kernel has for `ip` in the ARP cache (/proc/net/arp), lower-case `aa:bb:…`. None = no entry
+/// (the machine may just not have talked to the server yet — the caller treats that as "can't verify", not "deny").
+fn arp_mac(ip: &str) -> Option<String> {
+    let arp = std::fs::read_to_string("/proc/net/arp").ok()?;
+    for line in arp.lines().skip(1) {
+        let f: Vec<&str> = line.split_whitespace().collect();
+        // IP address, HW type, Flags, HW address, Mask, Device
+        if f.first() == Some(&ip) && f.get(2) != Some(&"0x0") {
+            let mac = f.get(3)?.to_lowercase();
+            return (mac.len() == 17 && mac != "00:00:00:00:00:00").then_some(mac);
+        }
+    }
+    None
+}
+
+pub(crate) fn now() -> i64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64)
 }
 
-fn who(m: &Machine) -> String {
+pub(crate) fn who(m: &Machine) -> String {
     m.hostname.clone().unwrap_or_else(|| m.mac.clone())
 }
 
@@ -77,16 +96,15 @@ fn license_key_and_lookup() {
         license_gen: 0,
         license_result: None,
         grp: None,
+        notes: None,
     };
     let ms = [m(1, "aa:00:00:00:00:01", Some("10.0.0.51")), m(2, "AA:00:00:00:00:02", None)];
-    let lease = |mac: &str, ip: &str, expires| Lease { mac: mac.into(), ip: Some(ip.into()), hostname: None, expires, source: "full".into() };
-    let ls = [lease("aa:00:00:00:00:02", "10.0.0.102", 100), lease("aa:00:00:00:00:09", "10.0.0.109", 100)];
-    let id = |ip| machine_by_ip(ip, &ms, &ls, 50).map(|m| m.id);
-    assert_eq!(id("10.0.0.51"), Some(1)); // bound IP
-    assert_eq!(id("10.0.0.102"), Some(2)); // lease → mac (case-insensitive)
-    assert_eq!(id("10.0.0.109"), None); // lease of an unregistered machine
-    assert_eq!(id("10.0.0.200"), None);
-    assert_eq!(machine_by_ip("10.0.0.102", &ms, &ls, 200).map(|m| m.id), None); // expired lease
+    // Only a machine's OWN bound IP counts, never a lease.
+    assert_eq!(machine_by_ip("10.0.0.51", &ms, None).map(|m| m.id), Some(1)); // bound IP, ARP unknown → allowed
+    assert_eq!(machine_by_ip("10.0.0.51", &ms, Some("aa:00:00:00:00:01")).map(|m| m.id), Some(1)); // ARP matches
+    assert_eq!(machine_by_ip("10.0.0.51", &ms, Some("bb:bb:bb:bb:bb:bb")).map(|m| m.id), None); // ARP MAC mismatch → spoofed
+    assert_eq!(machine_by_ip("10.0.0.102", &ms, None).map(|m| m.id), None); // a lease IP is not accepted
+    assert_eq!(machine_by_ip("10.0.0.200", &ms, None).map(|m| m.id), None);
 }
 
 #[derive(Deserialize)]
@@ -153,13 +171,13 @@ async fn rearm_license(State(st): State<SharedState>, Json(b): Json<IdBody>) -> 
 /// GET /api/license (Windows, broom-done.ps1) → the key of the machine at the peer IP, once. 403 otherwise.
 async fn license(State(st): State<SharedState>, ConnectInfo(peer): ConnectInfo<SocketAddr>) -> Result<String, ApiError> {
     let ip = peer.ip().to_string();
-    let (machines, leases) = (st.db.machines().map_err(ise)?, st.db.leases().map_err(ise)?);
+    let machines = st.db.machines().map_err(ise)?;
     let refuse = |why: String| {
         tracing::warn!("license request from {ip} refused ({why})");
         Err((StatusCode::FORBIDDEN, "no license for this machine".to_string()))
     };
-    let Some(m) = machine_by_ip(&ip, &machines, &leases, now()) else {
-        return refuse("not a registered machine".into());
+    let Some(m) = machine_by_ip(&ip, &machines, arp_mac(&ip).as_deref()) else {
+        return refuse("not a registered machine at this IP/MAC".into());
     };
     if m.license_key.is_none() {
         return refuse(format!("{}: no key set", who(m)));
@@ -180,8 +198,8 @@ async fn license_result(
     body: String,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let ip = peer.ip().to_string();
-    let (machines, leases) = (st.db.machines().map_err(ise)?, st.db.leases().map_err(ise)?);
-    let Some(m) = machine_by_ip(&ip, &machines, &leases, now()).filter(|m| m.license_state.as_deref() == Some("sent")) else {
+    let machines = st.db.machines().map_err(ise)?;
+    let Some(m) = machine_by_ip(&ip, &machines, arp_mac(&ip).as_deref()).filter(|m| m.license_state.as_deref() == Some("sent")) else {
         tracing::warn!("license result from {ip} ignored (no key was sent to it)");
         return Err((StatusCode::FORBIDDEN, "no license was sent to this machine".into()));
     };
@@ -194,16 +212,29 @@ async fn license_result(
 /// Guest user (created in the Windows golden by broom-prep-win → autologon). The DB keys keep the old names
 /// `ltsp_user`/`ltsp_password` so running DBs need no migration.
 async fn get_cafe_user(State(st): State<SharedState>) -> Json<serde_json::Value> {
+    // Never return the password (it is the shared local Administrator password baked into the golden — write-only,
+    // like license keys). Only say whether one is set.
     Json(serde_json::json!({
         "user": st.db.get_config("ltsp_user", "guest"),
-        "password": st.db.get_config("ltsp_password", "123456"),
+        "password_set": !st.db.get_config("ltsp_password", "").is_empty(),
     }))
+}
+
+/// Guest user/password go into the Windows unattend.xml (inside a PowerShell here-string). Only safe printable
+/// characters — this both keeps the XML/PowerShell valid and blocks injection. Keep in sync with the web page.
+pub(crate) fn cafe_user_ok(u: &str) -> bool {
+    (1..=20).contains(&u.chars().count()) && u.chars().all(|c| c.is_ascii_alphanumeric() || "-_.".contains(c))
+}
+
+pub(crate) fn cafe_pass_ok(p: &str) -> bool {
+    (1..=64).contains(&p.chars().count()) && p.chars().all(|c| c.is_ascii_graphic() && !"\"'`$<>&\\".contains(c))
 }
 
 type ApiError = (StatusCode, String);
 
 fn ise(e: String) -> ApiError {
-    (StatusCode::INTERNAL_SERVER_ERROR, e)
+    tracing::error!("internal error: {e}"); // keep OS paths/errors in the server log, not the response (L7)
+    (StatusCode::INTERNAL_SERVER_ERROR, "internal error".into())
 }
 
 fn ok() -> Json<serde_json::Value> {
@@ -213,6 +244,7 @@ fn ok() -> Json<serde_json::Value> {
 #[derive(Deserialize)]
 struct CafeUser {
     user: String,
+    #[serde(default)]
     password: String,
 }
 
@@ -220,12 +252,19 @@ async fn set_cafe_user(
     State(st): State<SharedState>,
     Json(b): Json<CafeUser>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    if b.user.trim().is_empty() {
-        return Err((StatusCode::BAD_REQUEST, "user is empty".into()));
+    let user = b.user.trim();
+    if !cafe_user_ok(user) {
+        return Err((StatusCode::BAD_REQUEST, "user: 1-20 letters/digits/-_. only".into()));
     }
-    st.db.set_config("ltsp_user", b.user.trim()).map_err(ise)?;
-    st.db.set_config("ltsp_password", &b.password).map_err(ise)?;
-    tracing::info!("guest user set to {}", b.user.trim());
+    st.db.set_config("ltsp_user", user).map_err(ise)?;
+    // Password write-only: an empty value keeps the stored one (the web never sends it back).
+    if !b.password.is_empty() {
+        if !cafe_pass_ok(&b.password) {
+            return Err((StatusCode::BAD_REQUEST, "password: 1-64 printable characters, no \" ' ` $ < > & \\".into()));
+        }
+        st.db.set_config("ltsp_password", &b.password).map_err(ise)?;
+    }
+    tracing::info!("guest user set to {user}");
     Ok(ok())
 }
 
@@ -233,11 +272,11 @@ async fn list(State(st): State<SharedState>) -> Result<Json<Vec<Machine>>, ApiEr
     Ok(Json(st.db.machines().map_err(ise)?))
 }
 
-const HOSTNAME_RULE: &str =
+pub(crate) const HOSTNAME_RULE: &str =
     "Hostname: 1-15 characters, only letters/digits/'-', must not start or end with '-', not all digits (Windows computer name)";
 
 /// Windows computer name (NetBIOS) — becomes the Windows name via stage/broom-done. Keep in sync with hostOk() in index.html.
-fn hostname_ok(h: &str) -> bool {
+pub(crate) fn hostname_ok(h: &str) -> bool {
     (1..=15).contains(&h.len())
         && h.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
         && !h.starts_with('-')
@@ -256,6 +295,20 @@ fn hostname_rule() {
     }
 }
 
+#[cfg(test)]
+#[test]
+fn dhcp_field_validation() {
+    assert!(dhcp_field_ok("dhcp_server_ip", "10.0.0.12").is_ok());
+    assert!(dhcp_field_ok("dhcp_server_ip", "10.0.0.999").is_err());
+    assert!(dhcp_field_ok("dhcp_server_ip", "10.0.0.12\nfoo").is_err()); // newline injection into scripts
+    assert!(dhcp_field_ok("dhcp_mode", "full").is_ok() && dhcp_field_ok("dhcp_mode", "off").is_ok());
+    assert!(dhcp_field_ok("dhcp_mode", "proxy").is_err() && dhcp_field_ok("dhcp_mode", "rogue").is_err());
+    assert!(dhcp_field_ok("dhcp_dns", "8.8.8.8, 1.1.1.1").is_ok() && dhcp_field_ok("dhcp_dns", "").is_ok());
+    assert!(dhcp_field_ok("dhcp_dns", "8.8.8.8,notip").is_err());
+    assert!(dhcp_field_ok("dhcp_iface", "eth0").is_ok() && dhcp_field_ok("dhcp_iface", "eth 0;rm").is_err());
+    assert!(dhcp_field_ok("dhcp_lease", "12h").is_ok() && dhcp_field_ok("dhcp_lease", "3600").is_ok());
+}
+
 #[derive(Deserialize)]
 struct NewMachine {
     mac: String,
@@ -267,14 +320,25 @@ async fn add(
     State(st): State<SharedState>,
     Json(b): Json<NewMachine>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let hostname = b.hostname.as_deref().map(str::trim).filter(|h| !h.is_empty());
-    if let Some(h) = hostname {
-        if !hostname_ok(h) {
-            return Err((StatusCode::BAD_REQUEST, HOSTNAME_RULE.into()));
-        }
-    }
-    let id = st.db.add_machine(&b.mac, b.ip.as_deref(), hostname).map_err(|e| (StatusCode::BAD_REQUEST, e))?;
-    tracing::info!("machine registered - mac {} - ip {} - hostname {}", b.mac, b.ip.as_deref().unwrap_or("-"), hostname.unwrap_or("-"));
+    // Same checks as the Devices page: MAC normalized, hostname rule, MAC / hostname / IP unique.
+    let mut m = Machine {
+        id: 0,
+        mac: b.mac,
+        ip: b.ip,
+        hostname: b.hostname,
+        image_id: None,
+        license_key: None,
+        license_tail: None,
+        license_state: None,
+        license_gen: 0,
+        license_result: None,
+        grp: None,
+        notes: None,
+    };
+    let all = st.db.machines().map_err(ise)?;
+    crate::devices::validate(&mut m, &all).map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+    let id = st.db.add_machine(&m.mac, m.ip.as_deref(), m.hostname.as_deref()).map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+    tracing::info!("machine registered - mac {} - ip {} - hostname {}", m.mac, m.ip.as_deref().unwrap_or("-"), m.hostname.as_deref().unwrap_or("-"));
     Ok(Json(serde_json::json!({"ok": true, "id": id})))
 }
 
@@ -302,8 +366,9 @@ async fn set_timeout(
     State(st): State<SharedState>,
     Json(b): Json<Timeout>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    st.db.set_config("boot_timeout", &b.seconds.to_string()).map_err(ise)?;
-    tracing::info!("boot menu countdown set to {} s", b.seconds);
+    let secs = b.seconds.min(3600); // used as timeout_s * 1000 in the iPXE menu
+    st.db.set_config("boot_timeout", &secs.to_string()).map_err(ise)?;
+    tracing::info!("boot menu countdown set to {secs} s");
     Ok(ok())
 }
 
@@ -317,8 +382,9 @@ async fn set_zram_reserve(
     State(st): State<SharedState>,
     Json(b): Json<ZramReserve>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    st.db.set_config("zram_reserve_mb", &b.mb.to_string()).map_err(ise)?;
-    tracing::info!("zram RAM reserve set to {} MB", b.mb);
+    let mb = b.mb.min(1 << 30); // reserve * 1024 * 1024 later; cap well below u64 overflow
+    st.db.set_config("zram_reserve_mb", &mb.to_string()).map_err(ise)?;
+    tracing::info!("zram RAM reserve set to {mb} MB");
     Ok(ok())
 }
 
@@ -326,7 +392,7 @@ async fn set_zram_reserve(
 async fn get_dhcp(State(st): State<SharedState>) -> Json<serde_json::Value> {
     let g = |k: &str, d: &str| st.db.get_config(k, d);
     Json(serde_json::json!({
-        "mode": g("dhcp_mode", "proxy"),
+        "mode": g("dhcp_mode", "full"),
         "iface": g("dhcp_iface", ""),
         "server_ip": g("dhcp_server_ip", ""),
         "subnet": g("dhcp_subnet", ""),
@@ -353,27 +419,56 @@ struct DhcpBody {
     lease: Option<String>,
 }
 
-/// Save the DHCP config + restart the built-in DHCP/TFTP listeners (dhcp.rs).
+/// Validate one DHCP field. IPv4 fields must parse; a stored server IP / gateway / DNS flows into scripts + boot
+/// options later, so a bad value (newline, non-IP) is refused HERE, before it is saved.
+fn dhcp_field_ok(key: &str, v: &str) -> Result<(), String> {
+    use std::net::Ipv4Addr;
+    let ipv4 = |s: &str| s.parse::<Ipv4Addr>().is_ok();
+    let ok = match key {
+        "dhcp_mode" => v == "full" || v == "off",
+        "dhcp_iface" => v.is_empty() || (v.len() <= 15 && v.chars().all(|c| c.is_ascii_alphanumeric() || ".-_@".contains(c))),
+        "dhcp_server_ip" | "dhcp_subnet" | "dhcp_netmask" | "dhcp_range_start" | "dhcp_range_end" => ipv4(v),
+        "dhcp_gateway" | "dhcp_dns" => v.is_empty() || v.split(',').all(|p| ipv4(p.trim())),
+        "dhcp_lease" => v.parse::<u32>().is_ok() || matches!(v.chars().last(), Some('h' | 'm' | 's')),
+        _ => true,
+    };
+    if ok { Ok(()) } else { Err(format!("{}: invalid value {v:?}", key.trim_start_matches("dhcp_"))) }
+}
+
+/// Save the DHCP config + restart the built-in DHCP/TFTP listeners (dhcp.rs). Every field is validated FIRST; if any
+/// is bad, nothing is saved (a half-saved bad config would keep DHCP/TFTP down after the next restart).
 async fn set_dhcp(
     State(st): State<SharedState>,
     Json(b): Json<DhcpBody>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    {
-        let put = |k: &str, v: &Option<String>| {
-            if let Some(val) = v {
-                st.db.set_config(k, val).ok();
-            }
-        };
-        put("dhcp_mode", &b.mode);
-        put("dhcp_iface", &b.iface);
-        put("dhcp_server_ip", &b.server_ip);
-        put("dhcp_subnet", &b.subnet);
-        put("dhcp_range_start", &b.range_start);
-        put("dhcp_range_end", &b.range_end);
-        put("dhcp_netmask", &b.netmask);
-        put("dhcp_gateway", &b.gateway);
-        put("dhcp_dns", &b.dns);
-        put("dhcp_lease", &b.lease);
+    let fields = [
+        ("dhcp_mode", &b.mode),
+        ("dhcp_iface", &b.iface),
+        ("dhcp_server_ip", &b.server_ip),
+        ("dhcp_subnet", &b.subnet),
+        ("dhcp_range_start", &b.range_start),
+        ("dhcp_range_end", &b.range_end),
+        ("dhcp_netmask", &b.netmask),
+        ("dhcp_gateway", &b.gateway),
+        ("dhcp_dns", &b.dns),
+        ("dhcp_lease", &b.lease),
+    ];
+    for (k, v) in &fields {
+        if let Some(val) = v {
+            dhcp_field_ok(k, val.trim()).map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+        }
+    }
+    // When the DHCP server is on, it needs a bound interface (empty = all interfaces → a rogue DHCP server on a
+    // WAN/VPN link). "off" needs nothing.
+    let mode = b.mode.as_deref().unwrap_or(&st.db.get_config("dhcp_mode", "full")).to_string();
+    let iface = b.iface.clone().unwrap_or_else(|| st.db.get_config("dhcp_iface", ""));
+    if mode == "full" && iface.trim().is_empty() {
+        return Err((StatusCode::BAD_REQUEST, "the DHCP server needs a specific interface (leaving it blank binds every interface)".into()));
+    }
+    for (k, v) in &fields {
+        if let Some(val) = v {
+            st.db.set_config(k, val.trim()).map_err(ise)?;
+        }
     }
     restart(&st).await
 }

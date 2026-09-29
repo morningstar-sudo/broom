@@ -48,6 +48,8 @@ pub struct Machine {
     pub license_result: Option<String>,
     /// Free-text group (e.g. "VIP") — driver packages can be assigned to a group.
     pub grp: Option<String>,
+    /// Free text for the admin (seat, hardware notes…).
+    pub notes: Option<String>,
 }
 
 /// Windows driver package (drivers.rs): an extracted driver folder, served as a .tar.gz to the stage.
@@ -107,6 +109,11 @@ pub trait Db: Send + Sync {
     /// Returns the new id.
     fn add_machine(&self, mac: &str, ip: Option<&str>, hostname: Option<&str>) -> DbResult<i64>;
     fn assign_image(&self, machine_id: i64, image_id: i64) -> DbResult<()>;
+    /// Replace the editable fields of a machine (mac must stay unique).
+    fn update_machine(&self, m: &Machine) -> DbResult<()>;
+    fn delete_machine(&self, machine_id: i64) -> DbResult<()>;
+    /// The machine's own default image in the boot menu (None = the global default).
+    fn set_machine_image(&self, machine_id: i64, image_id: Option<i64>) -> DbResult<()>;
     /// Set a license key (→ armed, gen + 1) or remove it (None → no key, no state).
     fn set_license(&self, machine_id: i64, key: Option<&str>) -> DbResult<()>;
     /// Allow one more delivery of the stored key (→ armed, gen + 1).
@@ -131,6 +138,9 @@ pub trait Db: Send + Sync {
     /// Insert or update by mac; a None ip/hostname keeps the stored value.
     fn put_lease(&self, lease: &Lease) -> DbResult<()>;
     fn delete_lease(&self, mac: &str) -> DbResult<()>;
+    /// Delete leases whose expiry is before `cutoff` (unix s). Returns how many were removed. Keeps the table from
+    /// growing without bound when many MACs are seen (a DHCP flood).
+    fn prune_leases(&self, cutoff: i64) -> DbResult<usize>;
 }
 
 /// Open the database named by `url`: a plain path or `sqlite://path` → SQLite.

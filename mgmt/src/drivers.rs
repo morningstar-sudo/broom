@@ -31,15 +31,18 @@ pub fn routes() -> Router<SharedState> {
 }
 
 fn ise(e: impl ToString) -> ApiError {
-    (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
+    tracing::error!("internal error: {}", e.to_string()); // keep OS paths/errors in the server log, not the response (L7)
+    (StatusCode::INTERNAL_SERVER_ERROR, "internal error".to_string())
 }
 
 fn bad(e: impl ToString) -> ApiError {
     (StatusCode::BAD_REQUEST, e.to_string())
 }
 
+// Distinct prefixes so a package named e.g. "up-foo" can't collide with the upload/extract dir of "foo"
+// (both names are valid_name, so a shared prefix would overlap).
 fn upload_dir(name: &str) -> PathBuf {
-    crate::work_dir().join(format!("driver-upload-{name}"))
+    crate::work_dir().join(format!("drvup.{name}"))
 }
 
 /// What the stage downloads: /tftp/broom-drivers/<name>.tar.gz.
@@ -86,7 +89,7 @@ fn inf_hwids(text: &str) -> BTreeSet<String> {
 }
 
 /// Packages one machine gets: a hardware ID matches, the package targets its group, or "all machines".
-fn pick<'a>(drivers: &'a [Driver], hw: &BTreeSet<String>, grp: Option<&str>) -> Vec<&'a Driver> {
+pub(crate) fn pick<'a>(drivers: &'a [Driver], hw: &BTreeSet<String>, grp: Option<&str>) -> Vec<&'a Driver> {
     drivers
         .iter()
         .filter(|d| {
@@ -109,7 +112,7 @@ fn process(name: &str) -> Result<(String, u64, Vec<String>, usize), String> {
         .into_iter()
         .find(|p| p.extension().is_some_and(|e| e.eq_ignore_ascii_case("zip")))
         .ok_or("upload a .zip of the extracted driver folder")?;
-    let ex = crate::work_dir().join(format!("driver-{name}"));
+    let ex = crate::work_dir().join(format!("drvex.{name}"));
     let _ = std::fs::remove_dir_all(&ex);
     let r = (|| {
         crate::publish::unzip(&zip, &ex)?;
@@ -203,7 +206,8 @@ async fn upload_chunk(Query(q): Query<ChunkQuery>, body: Body) -> Result<Json<se
     if !valid_name(&q.name) {
         return Err(bad("bad package name"));
     }
-    write_chunk(upload_dir(&q.name), &q.file, q.offset, q.total, body).await?;
+    // A driver package (extracted .inf folder, zipped) is small — 2 GB is generous.
+    write_chunk(upload_dir(&q.name), &q.file, q.offset, q.total, 2 << 30, body).await?;
     Ok(Json(serde_json::json!({"ok": true})))
 }
 
@@ -273,8 +277,13 @@ async fn for_machine(State(st): State<SharedState>, Query(q): Query<ForQuery>, b
         return Err(bad("bad mac"));
     }
     let hw: BTreeSet<String> = body.lines().map(|l| l.trim().to_ascii_uppercase()).filter(|l| !l.is_empty()).take(4096).collect();
-    st.db.put_machine_hw(&mac, &hw.iter().cloned().collect::<Vec<_>>(), now()).map_err(ise)?;
     let m = st.db.machines().map_err(ise)?.into_iter().find(|m| m.mac.eq_ignore_ascii_case(&mac));
+    // Only remember hardware for a MAC we already know (registered, or currently holding a lease). An unknown MAC
+    // still gets its driver list, but can't pollute machine_hw with junk (L5).
+    let known = m.is_some() || st.db.leases().map_err(ise)?.iter().any(|l| l.mac.eq_ignore_ascii_case(&mac));
+    if known {
+        st.db.put_machine_hw(&mac, &hw.iter().cloned().collect::<Vec<_>>(), now()).map_err(ise)?;
+    }
     let drivers = st.db.drivers().map_err(ise)?;
     let got = pick(&drivers, &hw, m.as_ref().and_then(|m| m.grp.as_deref()));
     let who = m.and_then(|m| m.hostname).unwrap_or_else(|| mac.clone());

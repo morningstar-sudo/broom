@@ -1,9 +1,8 @@
-// dhcp.rs — built-in DHCP server (replaces dnsmasq): full DHCP or proxyDHCP, for UEFI PXE + iPXE.
-// Full: hands out IPs (Machines-table binding > previous lease > first free in range) + boot file.
-// Proxy: another router hands out IPs; we only answer PXE/iPXE clients with boot info (port 67 offer
-// + PXE boot server on 4011), like dnsmasq pxe-service / pixiecore. No DNS (dnsmasq ran with port=0).
+// dhcp.rs — built-in DHCP server (replaces dnsmasq) for UEFI PXE + iPXE. It is the LAN's DHCP server: hands out IPs
+// (Machines-table binding > previous lease > first free in range) + the boot file. Turn it off (`dhcp_mode` = "off")
+// when another DHCP server owns the LAN — then broom serves no DHCP/TFTP (no proxyDHCP mode anymore). No DNS.
 // Every packet reads config/bindings/leases from the DB → Machines/DHCP edits apply immediately;
-// start() rebinds sockets only for interface/mode changes. Leases live in the `leases` table.
+// start() rebinds sockets only for interface changes. Leases live in the `leases` table.
 use std::collections::HashMap;
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 
@@ -120,7 +119,6 @@ fn mac_str(chaddr: &[u8; 16]) -> String {
 }
 
 pub struct Cfg {
-    pub full: bool,
     pub iface: String,
     pub server: Ipv4Addr,
     pub start: Ipv4Addr,
@@ -153,7 +151,6 @@ impl Cfg {
         let start = ip("dhcp_range_start").unwrap_or(Ipv4Addr::new(base[0], base[1], base[2], 100));
         let end = ip("dhcp_range_end").unwrap_or(Ipv4Addr::new(base[0], base[1], base[2], 200));
         Ok(Cfg {
-            full: g("dhcp_mode", "proxy") == "full",
             iface: g("dhcp_iface", ""),
             server,
             start,
@@ -287,19 +284,6 @@ fn reply(req: &Packet, mt: u8, cfg: &Cfg) -> Packet {
     p
 }
 
-/// Proxy offer/ack: no IP, PXEClient + PXE discovery control 8 (download the boot file named here
-/// directly, no boot-server discovery) + client GUID echoed.
-fn proxy_reply(req: &Packet, mt: u8, file: String, cfg: &Cfg) -> Packet {
-    let mut p = reply(req, mt, cfg);
-    p.file = file;
-    p.push(60, *b"PXEClient");
-    p.push(43, [6, 1, 8, 255]);
-    if let Some(guid) = req.opt(97) {
-        p.push(97, guid.to_vec());
-    }
-    p
-}
-
 fn in_range(ip: Ipv4Addr, cfg: &Cfg) -> bool {
     (u32::from(cfg.start)..=u32::from(cfg.end)).contains(&u32::from(ip))
 }
@@ -357,8 +341,10 @@ fn full_reply(req: &Packet, mt: u8, ip: Ipv4Addr, mac: &str, k: Kind, cfg: &Cfg,
 }
 
 /// Decide the answer to one request. Pure: no I/O, so the whole protocol logic is unit-tested.
-/// `port` = local port it arrived on (67, or 4011 = PXE boot server in proxy mode).
+/// Handle one DHCP packet (the server is always a full DHCP server now: it hands out IPs + boot info).
+/// `from`/`port` are unused (kept for the packet-router signature).
 pub fn handle(req: &Packet, from: SocketAddrV4, port: u16, cfg: &Cfg, st: &Store) -> Outcome {
+    let _ = (from, port);
     let mut out = Outcome { reply: None, lease: LeaseOp::None, log: String::new(), warn: false };
     let Some(mt) = req.opt(53).and_then(|v| v.first().copied()) else {
         return out;
@@ -369,35 +355,12 @@ pub fn handle(req: &Packet, from: SocketAddrV4, port: u16, cfg: &Cfg, st: &Store
     let mac = mac_str(&req.chaddr);
     let k = kind(req);
     let want = req.opt_ip(50).or((!req.ciaddr.is_unspecified()).then_some(req.ciaddr));
-    let host = req.opt(12).map(|h| String::from_utf8_lossy(h).into_owned());
-
-    // PXE boot server (proxy mode): firmware/iPXE unicast a REQUEST here after the proxy offer.
-    if port == 4011 {
-        if let (REQUEST | INFORM, Some(f)) = (mt, boot_file(k, cfg)) {
-            out.log = format!("client {mac} ({}) PXE boot server -> {f}", k.label());
-            out.reply = Some((proxy_reply(req, ACK, f, cfg), Dest::Unicast(from)));
-        }
-        return out;
-    }
-
-    if !cfg.full {
-        if k == Kind::Plain {
-            return out; // not a PXE client: the router's business
-        }
-        // Remember PXE clients seen on the LAN (Machines page), with the IP they ask the router for.
-        out.lease = LeaseOp::Set {
-            mac: mac.clone(),
-            ip: want,
-            hostname: host,
-            expires: st.now + cfg.lease_s as u64,
-            source: "proxy",
-        };
-        if let (DISCOVER, Some(f)) = (mt, boot_file(k, cfg)) {
-            out.log = format!("client {mac} ({}) proxyDHCP offer -> {f}", k.label());
-            out.reply = Some((proxy_reply(req, OFFER, f, cfg), Dest::Broadcast));
-        }
-        return out;
-    }
+    // Option 12 is attacker-controlled (any laptop on the LAN). Keep only NetBIOS-safe characters (letters, digits,
+    // '-', max 15) so a hostname can never carry markup/quotes into the admin UI, iPXE scripts or logs (H6).
+    let host = req.opt(12).and_then(|h| {
+        let s: String = String::from_utf8_lossy(h).chars().filter(|c| c.is_ascii_alphanumeric() || *c == '-').take(15).collect();
+        (!s.is_empty()).then_some(s)
+    });
 
     let set = |ip: Ipv4Addr, secs: u64| LeaseOp::Set {
         mac: mac.clone(),
@@ -411,7 +374,11 @@ pub fn handle(req: &Packet, from: SocketAddrV4, port: u16, cfg: &Cfg, st: &Store
             Some(ip) => {
                 out.log = format!("client {} ({}) DHCP offer {ip} - mac {mac}", who(&mac, st), k.label());
                 out.reply = Some((full_reply(req, OFFER, ip, &mac, k, cfg, st), Dest::Broadcast));
-                out.lease = set(ip, OFFER_HOLD_S);
+                // An OFFER hold must NOT shorten a longer lease this MAC already has (else a spoofed DISCOVER frees
+                // the victim's IP in 60 s → IP conflict). Keep the later expiry.
+                let hold = st.now + OFFER_HOLD_S;
+                let keep = st.leases.get(&mac).filter(|(l, _)| *l == ip).map(|(_, e)| *e).unwrap_or(0);
+                out.lease = set(ip, hold.max(keep) - st.now);
             }
             None => {
                 out.log = format!("client {mac}: no free IP in {}-{}", cfg.start, cfg.end);
@@ -442,21 +409,31 @@ pub fn handle(req: &Packet, from: SocketAddrV4, port: u16, cfg: &Cfg, st: &Store
             }
         }
         DECLINE => {
-            if let Some(ip) = req.opt_ip(50) {
-                out.log = format!("client {mac} declined {ip} (address in use on the LAN): held for one lease");
-                out.warn = true;
-                out.lease = LeaseOp::Set {
-                    mac: format!("declined-{ip}"),
-                    ip: Some(ip),
-                    hostname: None,
-                    expires: st.now + cfg.lease_s as u64,
-                    source: "full",
-                };
+            // Only honour a DECLINE for OUR server, for an in-range IP this MAC actually holds. Otherwise anyone
+            // could park `declined-<ip>` rows over the whole pool. (opt 54 must be us or absent.)
+            let ours = req.opt_ip(54).is_none_or(|s| s == cfg.server);
+            match req.opt_ip(50) {
+                Some(ip) if ours && in_range(ip, cfg) && st.leases.get(&mac).map(|(l, _)| *l) == Some(ip) => {
+                    out.log = format!("client {mac} declined {ip} (address in use on the LAN): held for one lease");
+                    out.warn = true;
+                    out.lease = LeaseOp::Set {
+                        mac: format!("declined-{ip}"),
+                        ip: Some(ip),
+                        hostname: None,
+                        expires: st.now + cfg.lease_s as u64,
+                        source: "full",
+                    };
+                }
+                _ => {}
             }
         }
         RELEASE => {
-            out.log = format!("client {} released its IP - mac {mac}", who(&mac, st));
-            out.lease = LeaseOp::Remove(mac.clone());
+            // Only the holder of the IP (ciaddr == its lease) may release it — a spoofed RELEASE mustn't free
+            // someone else's lease.
+            if st.leases.get(&mac).map(|(l, _)| *l) == Some(req.ciaddr) && !req.ciaddr.is_unspecified() {
+                out.log = format!("client {} released its IP - mac {mac}", who(&mac, st));
+                out.lease = LeaseOp::Remove(mac.clone());
+            }
         }
         INFORM if !req.ciaddr.is_unspecified() => {
             let mut p = full_reply(req, ACK, Ipv4Addr::UNSPECIFIED, &mac, k, cfg, st);
@@ -496,6 +473,9 @@ pub(crate) fn udp(addr: SocketAddrV4, iface: &str, broadcast: bool) -> std::io::
     if broadcast {
         s.set_broadcast(true)?;
     }
+    // REUSEPORT: on an Apply the new listener can bind :67/:69 while the old one still runs, so a bad config
+    // fails the bind WITHOUT first killing the working listeners (start() stops the old ones only after this).
+    s.set_reuse_port(true)?;
     if !iface.is_empty() {
         s.bind_device(Some(iface.as_bytes()))?;
     }
@@ -539,13 +519,19 @@ async fn serve(sock: tokio::net::UdpSocket, port: u16, st: SharedState) {
     }
 }
 
-/// (Re)start the network boot services: DHCP :67 (+ :4011 in proxy mode) and TFTP :69.
-/// Stops the previous listeners first (config change from the web). Returns a status line.
+/// (Re)start the network boot services: the built-in DHCP server (:67) + TFTP (:69), or nothing when the DHCP
+/// server is turned off (`dhcp_mode` = "off"). Stops the previous listeners first (config change from the web).
 pub async fn start(st: &SharedState) -> Result<String, String> {
-    let old: Vec<_> = std::mem::take(&mut *st.net.lock().unwrap());
-    for h in old {
-        h.abort();
-        let _ = h.await;
+    let stop_old = |st: &SharedState| {
+        let old: Vec<_> = std::mem::take(&mut *st.net.lock().unwrap());
+        old
+    };
+    if st.db.get_config("dhcp_mode", "full") != "full" {
+        for h in stop_old(st) {
+            h.abort();
+            let _ = h.await;
+        }
+        return Ok("DHCP server off (dhcp_mode=off) — no DHCP/TFTP listeners".into());
     }
     let cfg = Cfg::load(&*st.db)?;
     let bind = |port: u16, bcast: bool| {
@@ -554,21 +540,23 @@ pub async fn start(st: &SharedState) -> Result<String, String> {
             format!("bind udp :{port} on '{}': {e}{hint}", cfg.iface)
         })
     };
-    // Bind everything first: a failure must not leave half the listeners running.
+    // Bind the NEW listeners first (SO_REUSEPORT lets them share the ports with the old ones). Only once all binds
+    // succeed do we stop the old listeners — a rejected config never leaves the café with no DHCP/TFTP.
     let dhcp = bind(67, true)?;
-    let boot_server = if cfg.full { None } else { Some(bind(4011, true)?) };
     let tftp = bind(69, false)?;
-    let mut handles = vec![
+    for h in stop_old(st) {
+        h.abort();
+        let _ = h.await;
+    }
+    let handles = vec![
         tokio::spawn(serve(dhcp, 67, st.clone())),
         tokio::spawn(crate::tftp::serve(tftp, cfg.server, cfg.iface.clone())),
     ];
-    if let Some(s) = boot_server {
-        handles.push(tokio::spawn(serve(s, 4011, st.clone())));
-    }
     st.net.lock().unwrap().extend(handles);
     Ok(format!(
-        "DHCP {} on {} (server {}), TFTP :69",
-        if cfg.full { format!("full {}-{}", cfg.start, cfg.end) } else { "proxy".into() },
+        "DHCP {}-{} on {} (server {}), TFTP :69",
+        cfg.start,
+        cfg.end,
         if cfg.iface.is_empty() { "all interfaces" } else { &cfg.iface },
         cfg.server
     ))
@@ -580,9 +568,8 @@ mod tests {
 
     const MAC: [u8; 6] = [0x34, 0x5a, 0x60, 0x7b, 0x2b, 0x1d];
 
-    fn cfg(full: bool) -> Cfg {
+    fn cfg() -> Cfg {
         Cfg {
-            full,
             iface: String::new(),
             server: Ipv4Addr::new(10, 0, 0, 12),
             start: Ipv4Addr::new(10, 0, 0, 100),
@@ -641,7 +628,7 @@ mod tests {
 
     #[test]
     fn full_offer_first_free_ip_and_pxe_bootfile() {
-        let out = handle(&req(DISCOVER, &[]), FROM, 67, &cfg(true), &store());
+        let out = handle(&req(DISCOVER, &[]), FROM, 67, &cfg(), &store());
         let (p, dest) = out.reply.unwrap();
         assert_eq!(dest, Dest::Broadcast);
         assert_eq!(p.opt(53), Some(&[OFFER][..]));
@@ -654,11 +641,11 @@ mod tests {
 
     #[test]
     fn ipxe_gets_menu_url() {
-        let out = handle(&req(DISCOVER, &[(175, &[1])]), FROM, 67, &cfg(true), &store());
+        let out = handle(&req(DISCOVER, &[(175, &[1])]), FROM, 67, &cfg(), &store());
         let p = out.reply.unwrap().0;
         assert_eq!(p.file, "http://10.0.0.12/boot.ipxe?mac=${net0/mac}&ip=${net0/ip}");
         assert_eq!(p.opt(175), Some(&[0xb0, 1, 1][..])); // no-pxedhcp: don't wait for ProxyDHCP
-        let plain = handle(&req(DISCOVER, &[]), FROM, 67, &cfg(true), &store()).reply.unwrap().0;
+        let plain = handle(&req(DISCOVER, &[]), FROM, 67, &cfg(), &store()).reply.unwrap().0;
         assert_eq!(plain.opt(175), None);
     }
 
@@ -666,7 +653,7 @@ mod tests {
     fn binding_wins_and_sends_hostname() {
         let mut st = store();
         st.bindings.insert(MACS.into(), (Ipv4Addr::new(10, 0, 0, 50), Some("PC01".into())));
-        let (p, _) = handle(&req(DISCOVER, &[]), FROM, 67, &cfg(true), &st).reply.unwrap();
+        let (p, _) = handle(&req(DISCOVER, &[]), FROM, 67, &cfg(), &st).reply.unwrap();
         assert_eq!(p.yiaddr, Ipv4Addr::new(10, 0, 0, 50));
         assert_eq!(p.opt(12), Some(&b"PC01"[..]));
     }
@@ -676,51 +663,58 @@ mod tests {
         let mut st = store();
         st.leases.insert("aa:aa:aa:aa:aa:aa".into(), (Ipv4Addr::new(10, 0, 0, 100), 2000)); // active
         st.bindings.insert("bb:bb:bb:bb:bb:bb".into(), (Ipv4Addr::new(10, 0, 0, 101), None));
-        let (p, _) = handle(&req(DISCOVER, &[]), FROM, 67, &cfg(true), &st).reply.unwrap();
+        let (p, _) = handle(&req(DISCOVER, &[]), FROM, 67, &cfg(), &st).reply.unwrap();
         assert_eq!(p.yiaddr, Ipv4Addr::new(10, 0, 0, 102));
         // Expired lease of another machine → its IP is free again.
         st.leases.insert("aa:aa:aa:aa:aa:aa".into(), (Ipv4Addr::new(10, 0, 0, 100), 500));
-        let (p, _) = handle(&req(DISCOVER, &[]), FROM, 67, &cfg(true), &st).reply.unwrap();
+        let (p, _) = handle(&req(DISCOVER, &[]), FROM, 67, &cfg(), &st).reply.unwrap();
         assert_eq!(p.yiaddr, Ipv4Addr::new(10, 0, 0, 100));
         // Pool full → no offer.
         let mut st = store();
         for (i, m) in ["a", "b", "c"].iter().enumerate() {
             st.leases.insert(m.to_string(), (Ipv4Addr::new(10, 0, 0, 100 + i as u8), 2000));
         }
-        assert!(handle(&req(DISCOVER, &[]), FROM, 67, &cfg(true), &st).reply.is_none());
+        assert!(handle(&req(DISCOVER, &[]), FROM, 67, &cfg(), &st).reply.is_none());
+    }
+
+    #[test]
+    fn decline_release_discover_validated() {
+        let ip = Ipv4Addr::new(10, 0, 0, 101); // in the 100..=102 pool
+        let held = || {
+            let mut st = store();
+            st.leases.insert(MACS.into(), (ip, 5000));
+            st
+        };
+        // DECLINE only when this MAC holds the in-range IP (and opt 54 is us or absent).
+        assert!(matches!(handle(&req(DECLINE, &[(50, &ip.octets())]), FROM, 67, &cfg(), &store()).lease, LeaseOp::None));
+        assert!(matches!(handle(&req(DECLINE, &[(50, &ip.octets())]), FROM, 67, &cfg(), &held()).lease, LeaseOp::Set { .. }));
+        let outrange = Ipv4Addr::new(192, 168, 1, 1);
+        let mut st = store();
+        st.leases.insert(MACS.into(), (outrange, 5000));
+        assert!(matches!(handle(&req(DECLINE, &[(50, &outrange.octets())]), FROM, 67, &cfg(), &st).lease, LeaseOp::None));
+        // RELEASE only when ciaddr == the held IP.
+        let mut r = req(RELEASE, &[]);
+        r.ciaddr = ip;
+        assert!(matches!(handle(&r, FROM, 67, &cfg(), &held()).lease, LeaseOp::Remove(_)));
+        let mut r2 = req(RELEASE, &[]);
+        r2.ciaddr = Ipv4Addr::new(10, 0, 0, 200);
+        assert!(matches!(handle(&r2, FROM, 67, &cfg(), &held()).lease, LeaseOp::None));
+        // DISCOVER must not shorten a longer lease this MAC already has.
+        let mut st = store();
+        st.leases.insert(MACS.into(), (ip, 9000));
+        assert!(matches!(handle(&req(DISCOVER, &[]), FROM, 67, &cfg(), &st).lease, LeaseOp::Set { expires: 9000, .. }));
     }
 
     #[test]
     fn request_ack_nak_and_other_server() {
-        let ok = handle(&req(REQUEST, &[(50, &[10, 0, 0, 101])]), FROM, 67, &cfg(true), &store());
+        let ok = handle(&req(REQUEST, &[(50, &[10, 0, 0, 101])]), FROM, 67, &cfg(), &store());
         let (p, _) = ok.reply.unwrap();
         assert_eq!((p.opt(53), p.yiaddr), (Some(&[ACK][..]), Ipv4Addr::new(10, 0, 0, 101)));
         assert!(matches!(ok.lease, LeaseOp::Set { expires: 4600, .. }));
-        let bad = handle(&req(REQUEST, &[(50, &[192, 168, 1, 5])]), FROM, 67, &cfg(true), &store());
+        let bad = handle(&req(REQUEST, &[(50, &[192, 168, 1, 5])]), FROM, 67, &cfg(), &store());
         assert_eq!(bad.reply.unwrap().0.opt(53), Some(&[NAK][..]));
-        let other = handle(&req(REQUEST, &[(50, &[10, 0, 0, 101]), (54, &[10, 0, 0, 9])]), FROM, 67, &cfg(true), &store());
+        let other = handle(&req(REQUEST, &[(50, &[10, 0, 0, 101]), (54, &[10, 0, 0, 9])]), FROM, 67, &cfg(), &store());
         assert!(other.reply.is_none());
-    }
-
-    #[test]
-    fn proxy_offer_and_boot_server() {
-        let out = handle(&req(DISCOVER, &[]), FROM, 67, &cfg(false), &store());
-        let (p, dest) = out.reply.unwrap();
-        assert_eq!((dest, p.yiaddr), (Dest::Broadcast, Ipv4Addr::UNSPECIFIED));
-        assert_eq!(p.opt(60), Some(&b"PXEClient"[..]));
-        assert_eq!(p.opt(43), Some(&[6, 1, 8, 255][..]));
-        assert_eq!(p.opt(97), Some(&[0; 17][..]));
-        assert_eq!(p.file, "snponly.efi");
-        assert!(matches!(out.lease, LeaseOp::Set { source: "proxy", .. }));
-        // Non-PXE clients are left to the real DHCP server.
-        let mut plain = req(DISCOVER, &[]);
-        plain.opts.retain(|(c, _)| *c == 53);
-        assert!(handle(&plain, FROM, 67, &cfg(false), &store()).reply.is_none());
-        // Boot server on 4011: ACK unicast back to the sender.
-        let from = SocketAddrV4::new(Ipv4Addr::new(10, 0, 0, 77), 68);
-        let (p, dest) = handle(&req(REQUEST, &[(175, &[1])]), from, 4011, &cfg(false), &store()).reply.unwrap();
-        assert_eq!((dest, p.opt(53)), (Dest::Unicast(from), Some(&[ACK][..])));
-        assert_eq!(p.file, "http://10.0.0.12/boot.ipxe?mac=${net0/mac}&ip=${net0/ip}");
     }
 
     #[test]
