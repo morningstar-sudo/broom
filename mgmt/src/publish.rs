@@ -66,10 +66,129 @@ pub(crate) fn file_hash(path: &str) -> Option<String> {
     Some(h.finalize().iter().map(|b| format!("{b:02x}")).collect())
 }
 
-/// Extract a .zip into `dir` (entries with unsafe paths are skipped).
+/// Chunk size of the golden manifests (golden.chunks) — clients fetch only the chunks they lack.
+pub(crate) const MANIFEST_CHUNK: usize = 4 << 20;
+
+/// sha256 of a file + the sha256 of each 4 MB chunk ("zero" = all zero), in ONE read pass. None on error.
+fn file_hash_chunks(path: &Path) -> Option<(String, Vec<String>)> {
+    use sha2::{Digest, Sha256};
+    use std::io::Read;
+    let hex = |d: &[u8]| d.iter().map(|b| format!("{b:02x}")).collect::<String>();
+    let mut f = std::fs::File::open(path).ok()?;
+    let (mut whole, mut chunks) = (Sha256::new(), Vec::new());
+    let mut buf = vec![0u8; MANIFEST_CHUNK];
+    loop {
+        let mut n = 0; // fill a whole chunk (read may return less)
+        while n < buf.len() {
+            match f.read(&mut buf[n..]).ok()? {
+                0 => break,
+                k => n += k,
+            }
+        }
+        if n == 0 {
+            break;
+        }
+        let c = &buf[..n];
+        whole.update(c);
+        chunks.push(if c.iter().all(|&b| b == 0) { "zero".to_string() } else { hex(&Sha256::digest(c)) });
+        if n < buf.len() {
+            break;
+        }
+    }
+    Some((hex(&whole.finalize()), chunks))
+}
+
+/// Write `<dir>/golden.chunks` for the served golden `file`: first line `size <bytes>`, then one line per 4 MB
+/// chunk (sha256 or `zero`). Clients diff it against the manifest of the copy they have → delta update.
+/// Returns the whole-file sha256 (the golden hash).
+pub(crate) fn write_manifest(file: &Path, dir: &Path) -> Result<String, String> {
+    let (hash, chunks) = file_hash_chunks(file).ok_or_else(|| format!("sha256 of {} failed", file.display()))?;
+    let size = std::fs::metadata(file).map_err(|e| e.to_string())?.len();
+    let tmp = dir.join("golden.chunks.tmp");
+    std::fs::write(&tmp, format!("size {size}\n{}\n", chunks.join("\n"))).map_err(|e| e.to_string())?;
+    std::fs::rename(&tmp, dir.join("golden.chunks")).map_err(|e| e.to_string())?;
+    Ok(hash)
+}
+
+/// Cache of zstd-compressed golden chunks, by content hash: a room of clients asks for the same changed chunks →
+/// each is compressed once. Emptied when a Windows golden is rebuilt (content-addressed, only space is at stake).
+pub(crate) fn chunk_cache_dir() -> std::path::PathBuf {
+    crate::work_dir().join("zchunks")
+}
+
+/// Chunk `i` (4 MB) of the Windows golden.vhdx of image `name`, zstd-compressed, checked against `sha` (its line in
+/// golden.chunks). Err(true) = the golden no longer has that content (republished meanwhile); Err(false) = I/O.
+pub(crate) fn golden_chunk_zst(name: &str, i: u64, sha: &str) -> Result<Vec<u8>, (bool, String)> {
+    let golden = crate::tftp_dir().join("broom-win").join(name).join("golden.vhdx");
+    chunk_zst(&golden, &chunk_cache_dir(), i, sha)
+}
+
+fn chunk_zst(golden: &Path, cache: &Path, i: u64, sha: &str) -> Result<Vec<u8>, (bool, String)> {
+    use sha2::{Digest, Sha256};
+    use std::os::unix::fs::FileExt;
+    let cached = cache.join(format!("{sha}.zst"));
+    if let Ok(z) = std::fs::read(&cached) {
+        return Ok(z);
+    }
+    let f = std::fs::File::open(golden).map_err(|e| {
+        tracing::error!("open golden {}: {e}", golden.display()); // L7: keep the path in the log, not the response
+        (false, "golden not available".to_string())
+    })?;
+    let off = i.checked_mul(MANIFEST_CHUNK as u64).ok_or((true, "chunk index out of range".to_string()))?;
+    // Reject an out-of-range chunk from the file length (cheap) before reading + hashing 4 MB (M4).
+    if off >= f.metadata().map_err(|e| (false, e.to_string()))?.len() {
+        return Err((true, "chunk index out of range".to_string()));
+    }
+    let mut buf = vec![0u8; MANIFEST_CHUNK];
+    let mut n = 0;
+    while n < buf.len() {
+        match f.read_at(&mut buf[n..], off + n as u64).map_err(|e| (false, e.to_string()))? {
+            0 => break,
+            k => n += k,
+        }
+    }
+    buf.truncate(n);
+    let got: String = Sha256::digest(&buf).iter().map(|b| format!("{b:02x}")).collect();
+    if n == 0 || got != sha {
+        return Err((true, format!("chunk {i} not available (golden republished?)")));
+    }
+    // Level 3: ~55 % of Windows data, fast enough to keep a 10 Gbps link busy with a few cores.
+    let z = zstd::bulk::compress(&buf, 3).map_err(|e| (false, e.to_string()))?;
+    let _ = std::fs::create_dir_all(cache);
+    let tmp = cached.with_extension(format!("tmp{}", std::process::id() ^ i as u32));
+    if std::fs::write(&tmp, &z).is_ok() {
+        let _ = std::fs::rename(&tmp, &cached);
+    }
+    Ok(z)
+}
+
+/// Free bytes on the filesystem holding `path` (libc statvfs). 0 on error (callers treat 0 as "unknown → allow").
+pub(crate) fn free_bytes(path: &Path) -> u64 {
+    use std::os::unix::ffi::OsStrExt;
+    let Ok(c) = std::ffi::CString::new(path.as_os_str().as_bytes()) else { return 0 };
+    // SAFETY: c is a valid NUL-terminated path; s is written by statvfs before use.
+    let mut s: libc::statvfs = unsafe { std::mem::zeroed() };
+    if unsafe { libc::statvfs(c.as_ptr(), &mut s) } != 0 {
+        return 0;
+    }
+    (s.f_bavail as u64).saturating_mul(s.f_frsize as u64)
+}
+
+/// A golden can't be larger than this (raw/virtual). Guards against a VMDK declaring a petabyte virtual size, which
+/// would make hashing/manifesting allocate one String per 4 MB → out of memory.
+const MAX_GOLDEN: u64 = 4 << 40; // 4 TiB
+
+/// Extract a .zip into `dir`. Refuses zip-bombs: total uncompressed bytes must fit in `MAX_GOLDEN` and the free space
+/// (minus a margin), and at most 200k entries. Entries with unsafe paths are skipped.
 pub(crate) fn unzip(zip_path: &Path, dir: &Path) -> Result<(), String> {
     let f = std::fs::File::open(zip_path).map_err(|e| format!("{}: {e}", zip_path.display()))?;
     let mut z = zip::ZipArchive::new(f).map_err(|e| format!("zip: {e}"))?;
+    if z.len() > 200_000 {
+        return Err(format!("zip has {} entries (max 200000)", z.len()));
+    }
+    let free = free_bytes(dir);
+    let budget = if free == 0 { MAX_GOLDEN } else { MAX_GOLDEN.min(free.saturating_sub(1 << 30)) };
+    let mut written = 0u64;
     for i in 0..z.len() {
         let mut entry = z.by_index(i).map_err(|e| format!("zip entry {i}: {e}"))?;
         let Some(rel) = entry.enclosed_name() else { continue };
@@ -82,7 +201,57 @@ pub(crate) fn unzip(zip_path: &Path, dir: &Path) -> Result<(), String> {
             std::fs::create_dir_all(p).map_err(|e| e.to_string())?;
         }
         let mut w = std::fs::File::create(&out).map_err(|e| format!("{}: {e}", out.display()))?;
-        std::io::copy(&mut entry, &mut w).map_err(|e| format!("unzip {}: {e}", out.display()))?;
+        // Cap the read so a lying uncompressed-size can't fill the disk; +1 detects overflow of the budget.
+        let remain = budget.saturating_sub(written);
+        let n = std::io::copy(&mut std::io::Read::take(&mut entry, remain + 1), &mut w)
+            .map_err(|e| format!("unzip {}: {e}", out.display()))?;
+        written += n;
+        if written > budget {
+            let _ = std::fs::remove_file(&out);
+            return Err("zip is too large (bomb?) or not enough free space".into());
+        }
+    }
+    Ok(())
+}
+
+/// `qemu-img info` → the virtual size in bytes. None if it can't be read (caller treats that as too risky).
+fn qemu_virtual_size(file: &Path) -> Option<u64> {
+    let out = Command::new("qemu-img").args(["info", "--output=json"]).arg(file).output().ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    // "virtual-size": 123456,  — parse without a JSON dep.
+    let v = text.split("\"virtual-size\"").nth(1)?.split([':', ',']).nth(1)?.trim().parse::<u64>().ok()?;
+    Some(v)
+}
+
+/// Every string a VMDK descriptor points at (extent file names + parentFileNameHint) must be a plain name inside the
+/// upload folder — a descriptor can otherwise name `/dev/sda` or a server file as an "extent", and qemu-img (root)
+/// would copy it into the golden. Non-descriptor (monolithic) vmdks have no such lines and pass.
+fn vmdk_refs_safe(vmdk: &Path) -> Result<(), String> {
+    let head = vmdk_head(vmdk);
+    if !is_vmdk_descriptor(vmdk) {
+        return Ok(());
+    }
+    // Quoted names on extent lines (RW/RDONLY/NOACCESS … "name" …) and parentFileNameHint="name".
+    let mut refs: Vec<&str> = Vec::new();
+    for line in head.lines() {
+        let t = line.trim_start();
+        if t.starts_with("RW") || t.starts_with("RDONLY") || t.starts_with("NOACCESS") {
+            if let Some(q) = t.split('"').nth(1) {
+                refs.push(q);
+            }
+        }
+    }
+    if let Some(h) = head.split("parentFileNameHint=\"").nth(1).and_then(|s| s.split('"').next()) {
+        refs.push(h);
+    }
+    for r in refs {
+        let bad = r.is_empty() || r.contains('/') || r.contains('\\') || r.contains("..") || r.starts_with(' ');
+        if bad {
+            return Err(format!("VMDK references an unsafe path {r:?} — export the VM as a single monolithic vmdk"));
+        }
     }
     Ok(())
 }
@@ -118,23 +287,50 @@ fn golden_from(dir: &Path, dest: &Path) -> Result<(), String> {
     // Pick the vmdk to convert: a .vmx names the disk the VM ACTUALLY uses (even with a branching
     // snapshot tree) → preferred. No .vmx: one file → use it; several → pick_vmdk.
     // qemu-img reads extents/parents from the same directory.
-    let from_vmx = files.iter().filter(|p| ext(p) == "vmx").find_map(|vmx| {
-        let disk = vmx_disk(&std::fs::read_to_string(vmx).ok()?)?;
-        let p = vmx.with_file_name(disk);
-        p.exists().then_some(p)
-    });
-    let chosen_vmdk = if from_vmx.is_some() {
-        from_vmx
+    // A .vmx lists every disk the VM attaches. broom serves ONE OS disk, so more than one disk is ambiguous (which
+    // is the OS?) — fail loudly instead of silently converting whichever comes first (e.g. a stale SCSI disk while
+    // the real OS is on nvme0:0).
+    let vmx = files.iter().find(|p| ext(p) == "vmx");
+    let chosen_vmdk = if let Some(vmx) = vmx {
+        let txt = std::fs::read_to_string(vmx).map_err(|e| format!("read {}: {e}", vmx.display()))?;
+        let disks: Vec<_> = vmx_disks(&txt).into_iter().map(|d| vmx.with_file_name(d)).filter(|p| p.exists()).collect();
+        match disks.len() {
+            0 if vmdks.len() == 1 => Some(vmdks.remove(0)),
+            0 => pick_vmdk(&vmdks), // .vmx named no on-disk vmdk (odd) → best-effort
+            1 => Some(disks[0].clone()),
+            _ => {
+                let names = disks.iter().filter_map(|p| p.file_name().map(|n| n.to_string_lossy().into_owned())).collect::<Vec<_>>().join(", ");
+                return Err(format!(
+                    "the VM has {} disks ({names}). broom serves ONE OS disk — in the VM settings remove the extra disk(s), \
+                     keep only the disk Ubuntu/Windows boots from, then upload again.",
+                    disks.len()
+                ));
+            }
+        }
     } else if vmdks.len() == 1 {
         Some(vmdks.remove(0))
     } else {
         pick_vmdk(&vmdks)
     };
     if let Some(v) = chosen_vmdk {
+        // Untrusted upload processed as root: every vmdk's extents must stay inside the folder (no /dev/sda,
+        // no server files), the virtual size must be sane, and -f vmdk stops a disguised qcow2 backing file.
+        for vmdk in walk(dir).iter().filter(|p| ext(p) == "vmdk") {
+            vmdk_refs_safe(vmdk)?;
+        }
+        match qemu_virtual_size(&v) {
+            Some(sz) if sz <= MAX_GOLDEN => {}
+            Some(sz) => return Err(format!("golden virtual size {sz} bytes is above the {MAX_GOLDEN} limit")),
+            None => return Err("could not read the vmdk (qemu-img info failed) — is it a valid disk?".into()),
+        }
         tracing::info!("golden: converting {}", v.display());
-        // -m 16: 16 parallel I/O coroutines (default 8); -W: out-of-order writes (sparse raw target).
-        run("qemu-img", &["convert", "-m", "16", "-W", "-O", "raw", &v.to_string_lossy(), &dest.to_string_lossy()])
+        // -f vmdk: don't probe the format (a descriptor could disguise a qcow2 backing file). -m 16: 16 parallel I/O
+        // coroutines (default 8); -W: out-of-order writes (sparse raw target).
+        run("qemu-img", &["convert", "-f", "vmdk", "-m", "16", "-W", "-O", "raw", &v.to_string_lossy(), &dest.to_string_lossy()])
     } else if let Some(r) = raw {
+        if std::fs::metadata(r).map(|m| m.len()).unwrap_or(0) > MAX_GOLDEN {
+            return Err(format!("raw image is above the {MAX_GOLDEN} byte limit"));
+        }
         mv(r, dest)
     } else if !vmdks.is_empty() {
         Err("several .vmdk files but no descriptor file — upload the whole VM folder (with the .vmx) or a single monolithic vmdk".into())
@@ -158,14 +354,21 @@ fn is_vmdk_descriptor(p: &Path) -> bool {
     head.contains("# Disk DescriptorFile") || head.contains("createType")
 }
 
-/// First disk the VM uses according to the .vmx: line `<bus>N:M.fileName = "x.vmdk"` (skip CD/ISO).
+/// Every disk the .vmx attaches: lines `<bus>N:M.fileName = "x.vmdk"` (skip CD/ISO), basename only.
+fn vmx_disks(vmx: &str) -> Vec<String> {
+    vmx.lines()
+        .filter_map(|l| {
+            let (k, v) = l.split_once('=')?;
+            let v = v.trim().trim_matches('"');
+            (k.trim().ends_with(".fileName") && v.to_ascii_lowercase().ends_with(".vmdk"))
+                .then(|| v.rsplit(['\\', '/']).next().unwrap_or(v).to_string())
+        })
+        .collect()
+}
+
+/// The first disk the VM uses according to the .vmx (used by tests + the single-disk path).
 fn vmx_disk(vmx: &str) -> Option<String> {
-    vmx.lines().find_map(|l| {
-        let (k, v) = l.split_once('=')?;
-        let v = v.trim().trim_matches('"');
-        (k.trim().ends_with(".fileName") && v.to_ascii_lowercase().ends_with(".vmdk"))
-            .then(|| v.rsplit(['\\', '/']).next().unwrap_or(v).to_string())
-    })
+    vmx_disks(vmx).into_iter().next()
 }
 
 /// The CURRENT descriptor among the vmdk files (split + snapshots): the descriptor that is not the parent
@@ -266,6 +469,7 @@ pub fn run_publish(st: &SharedState, name: &str, steps: &mut Steps) -> Result<St
 /// file (disk) or /dev/zramN (zram). Idempotent (re-creates). Returns the IQN.
 fn export_target(st: &SharedState, name: &str, cache_mode: &str, backing: &str) -> Result<String, String> {
     let iqn = iqn_of(st, name);
+    let store = store_of(name, gen_of(st, name));
     let lio = crate::iscsi::Lio::system()?;
     // ponytail: target named by the old fixed IQN (before iqn_base) — remove it too; drop this line later.
     lio.remove(name, &format!("iqn.2026-08.net.tiem:{name}"));
@@ -275,7 +479,7 @@ fn export_target(st: &SharedState, name: &str, cache_mode: &str, backing: &str) 
         let size = std::fs::metadata(backing).map_err(|e| format!("{backing}: {e}"))?.len();
         crate::iscsi::Backing::File { path: backing, size }
     };
-    lio.export(name, b, &iqn).map_err(|e| format!("iSCSI target: {e}"))?;
+    lio.export(&store, b, &iqn).map_err(|e| format!("iSCSI target: {e}"))?;
     tracing::info!("iSCSI target {iqn} ready ({cache_mode}: {backing})");
     Ok(iqn)
 }
@@ -323,8 +527,19 @@ fn publish_iscsi(st: &SharedState, id: i64, name: &str) -> Result<String, String
     // 2. cache_mode (images column): disk → serve the file directly; zram → load the img into /dev/zramN.
     // zram fails (RAM overflow / error) → fall back to disk BY ITSELF (DB updated) so the image always boots.
     let want = st.db.image(id)?.map_or_else(|| "disk".into(), |i| i.cache_mode);
+    // Disk cache serves ONE shared golden file → it can't be swapped under a live client. Refuse to (re)publish it
+    // while any client is connected (they would read changed bytes mid-session → FS corruption). zram is fine: each
+    // publish makes a fresh device + target, and the old one is kept for already-connected clients (M9).
+    if want != "zram" && crate::iscsi::any_session() {
+        return Err("clients are connected; a disk-cache image shares one golden file and can't be swapped live. \
+                    Reboot/close the clients (publish off-hours), or set this image to zram cache."
+            .into());
+    }
+    // New generation: new IQN + backstore (+ new zram device), leaving the previous target for connected clients.
+    let _ = bump_gen(st, name);
+    let g = gen_of(st, name);
     let (cache_mode, backing) = if want == "zram" {
-        match ensure_zram(st, name, &img_abs) {
+        match ensure_zram(st, name, g, &img_abs) {
             Ok(dev) => ("zram".to_string(), dev),
             Err(e) => {
                 tracing::warn!("image {name}: zram failed ({e}) → falling back to cache_mode=disk");
@@ -336,8 +551,9 @@ fn publish_iscsi(st: &SharedState, id: i64, name: &str) -> Result<String, String
         ("disk".to_string(), img_abs.to_string_lossy().to_string())
     };
 
-    // 3. Shared RO iSCSI target (zram = block backstore, disk = fileio).
+    // 3. Shared RO iSCSI target (zram = block backstore, disk = fileio), then drop any now-superseded target.
     let iqn = export_target(st, name, &cache_mode, &backing)?;
+    gc_superseded(st, name, &iqn);
 
     // 4. iPXE boot_script. The initrd reads broom.iscsi / broom.ssd from the cmdline.
     let ip = st.db.get_config("dhcp_server_ip", "");
@@ -351,12 +567,12 @@ fn publish_iscsi(st: &SharedState, id: i64, name: &str) -> Result<String, String
     // `quiet` left out so overlayroot/broom logs are visible during the PoC.
     // broom.name/hash/size: the initrd hook compares the hash with the SSD cache copy (match → boot from the SSD,
     // skip iSCSI; mismatch → iSCSI + background copy). Hash computed FIRST to embed it in the cmdline.
-    let img_str = img_abs.to_string_lossy().to_string();
-    let hash = file_hash(&img_str).ok_or("sha256sum golden failed")?;
+    // Same pass writes golden.chunks (broom.srv: where the cache script fetches it → patches only changed chunks).
+    let hash = write_manifest(&img_abs, &crate::tftp_dir().join("broom").join(name))?;
     let size = std::fs::metadata(&img_abs).map_err(|e| e.to_string())?.len();
     let bs = format!(
         "sanhook iscsi:{ip}::::{iqn} || shell\n\
-         kernel http://{ip}/tftp/broom/{name}/vmlinuz initrd=initrd.img ip=dhcp root=UUID={root_uuid} ro fsck.mode=skip overlayroot=device:dev=/dev/disk/by-label/broomwb,recurse=0 broom.name={name} broom.hash={hash} broom.size={size}\n\
+         kernel http://{ip}/tftp/broom/{name}/vmlinuz initrd=initrd.img ip=dhcp root=UUID={root_uuid} ro fsck.mode=skip overlayroot=device:dev=/dev/disk/by-label/broomwb,recurse=0 broom.name={name} broom.hash={hash} broom.size={size} broom.srv={ip}\n\
          initrd http://{ip}/tftp/broom/{name}/initrd.img\n\
          boot"
     );
@@ -370,13 +586,28 @@ fn publish_iscsi(st: &SharedState, id: i64, name: &str) -> Result<String, String
 /// (Linux kernel/initrd, Windows golden.vhdx + templates). Blocking.
 pub fn unpublish(st: &SharedState, name: &str) {
     if let Ok(lio) = crate::iscsi::Lio::system() {
-        lio.remove(name, &iqn_of(st, name));
+        // Every generation of this image's target + its zram device (the image is going away).
+        let prefix = format!("{}:{name}.g", st.db.get_config("iqn_base", "iqn.2026-01.local.broom"));
+        for iqn in lio.list_iqns() {
+            if !iqn.starts_with(&prefix) {
+                continue;
+            }
+            if let Some(g) = iqn.rsplit_once(".g").and_then(|(_, s)| s.parse::<u64>().ok()) {
+                lio.remove(&store_of(name, g), &iqn);
+                let dev = st.db.get_config(&zram_key(name, g), "");
+                if !dev.is_empty() {
+                    zram_remove(&dev);
+                    let _ = st.db.set_config(&zram_key(name, g), "");
+                }
+            }
+        }
+        lio.remove(name, &format!("iqn.2026-08.net.tiem:{name}")); // ponytail: legacy fixed IQN, drop later
     }
-    let key = format!("zram_dev:{name}");
-    let dev = st.db.get_config(&key, "");
-    if !dev.is_empty() {
-        zram_remove(&dev);
-        let _ = st.db.set_config(&key, "");
+    // Legacy single-device key (pre-versioning).
+    let old = st.db.get_config(&format!("zram_dev:{name}"), "");
+    if !old.is_empty() {
+        zram_remove(&old);
+        let _ = st.db.set_config(&format!("zram_dev:{name}"), "");
     }
     for d in ["broom", "broom-win"] {
         let _ = std::fs::remove_dir_all(crate::tftp_dir().join(d).join(name));
@@ -385,24 +616,16 @@ pub fn unpublish(st: &SharedState, name: &str) {
 
 /// Load the golden img into a zram device (zstd compressed), return /dev/zramN. Map stored in DB config.
 /// Reset the image's old device (if any) before creating a new one.
-fn ensure_zram(st: &SharedState, name: &str, img: &Path) -> Result<String, String> {
-    // Free the old device if the image was on zram before — its iSCSI backstore holds it open,
-    // so drop the target first (export_target re-creates it right after).
-    let old = st.db.get_config(&format!("zram_dev:{name}"), "");
-    if !old.is_empty() {
-        if let Ok(lio) = crate::iscsi::Lio::system() {
-            lio.remove(name, &iqn_of(st, name));
-        }
-        zram_remove(&old);
-        let _ = st.db.set_config(&format!("zram_dev:{name}"), "");
-    }
+fn ensure_zram(st: &SharedState, name: &str, g: u64, img: &Path) -> Result<String, String> {
+    // The previous generation's device (if any) is left in place for connected clients and freed by gc_superseded
+    // once they drain — this new publish gets its own device.
     let size = std::fs::metadata(img).map_err(|e| e.to_string())?.len();
 
     // VALIDATE RAM overflow: zram compresses but worst case (incompressible data) = full img size.
     // Require MemAvailable > img size + reserve (kept for the OS + iSCSI serving). The old device
     // was reset above so its RAM is returned; MemAvailable also reflects OTHER zram images being held.
     // reserve is set via the zram_reserve_mb config (web System page).
-    let reserve = st.db.get_config("zram_reserve_mb", "2048").parse::<u64>().unwrap_or(2048) * 1024 * 1024;
+    let reserve = st.db.get_config("zram_reserve_mb", "2048").parse::<u64>().unwrap_or(2048).saturating_mul(1 << 20);
     let avail = mem_available_bytes();
     if !zram_fits(size, avail, reserve) {
         let gb = |b: u64| b as f64 / (1024.0 * 1024.0 * 1024.0);
@@ -425,7 +648,7 @@ fn ensure_zram(st: &SharedState, name: &str, img: &Path) -> Result<String, Strin
         zram_remove(&dev);
         return Err(format!("copy golden → {dev}: {e}"));
     }
-    let _ = st.db.set_config(&format!("zram_dev:{name}"), &dev);
+    let _ = st.db.set_config(&zram_key(name, g), &dev);
     tracing::info!("image {name}: golden loaded into {dev} ({:.1} GB, zstd)", size as f64 / 1e9);
     Ok(dev)
 }
@@ -460,13 +683,73 @@ fn zram_remove(dev: &str) {
     let _ = std::fs::write("/sys/class/zram-control/hot_remove", n);
 }
 
+/// Publish generation for an image (config `iscsi_gen:<name>`, starts 0). Bumped on each Linux (re)publish so a new
+/// target gets a NEW IQN + backstore, leaving the previous one serving already-connected clients (M9).
+fn gen_of(st: &SharedState, name: &str) -> u64 {
+    st.db.get_config(&format!("iscsi_gen:{name}"), "0").parse().unwrap_or(0)
+}
+
+/// Increment the generation and return the new (current) IQN.
+fn bump_gen(st: &SharedState, name: &str) -> String {
+    let g = gen_of(st, name) + 1;
+    let _ = st.db.set_config(&format!("iscsi_gen:{name}"), &g.to_string());
+    iqn_of(st, name)
+}
+
+/// The current IQN for an image: `<iqn_base>:<name>.g<gen>`. Image names are `[A-Za-z0-9_-]` (no dot), so `.g` is an
+/// unambiguous separator.
 pub(crate) fn iqn_of(st: &SharedState, name: &str) -> String {
-    format!("{}:{name}", st.db.get_config("iqn_base", "iqn.2026-01.local.broom"))
+    format!("{}:{name}.g{}", st.db.get_config("iqn_base", "iqn.2026-01.local.broom"), gen_of(st, name))
+}
+
+/// LIO backstore name for a generation (must differ per gen, or two targets would collide on one backstore).
+fn store_of(name: &str, g: u64) -> String {
+    format!("{name}.g{g}")
+}
+
+/// DB key holding the zram device for one generation of an image.
+fn zram_key(name: &str, g: u64) -> String {
+    format!("zram_dev:{name}:g{g}")
+}
+
+/// Remove every superseded target of this image (all generations except `keep_iqn`) and free their zram devices —
+/// but only when no client is connected, so a running client is never cut off (M9). Runs after a new publish.
+fn gc_superseded(st: &SharedState, name: &str, keep_iqn: &str) {
+    if crate::iscsi::any_session() {
+        return; // someone is attached (portal-wide) → keep the old targets, GC on a later publish when idle
+    }
+    let Ok(lio) = crate::iscsi::Lio::system() else { return };
+    let prefix = format!("{}:{name}.g", st.db.get_config("iqn_base", "iqn.2026-01.local.broom"));
+    for iqn in lio.list_iqns() {
+        if !iqn.starts_with(&prefix) || iqn == keep_iqn {
+            continue;
+        }
+        if let Some(g) = iqn.rsplit_once(".g").and_then(|(_, s)| s.parse::<u64>().ok()) {
+            lio.remove(&store_of(name, g), &iqn);
+            let dev = st.db.get_config(&zram_key(name, g), "");
+            if !dev.is_empty() {
+                zram_remove(&dev);
+                let _ = st.db.set_config(&zram_key(name, g), "");
+            }
+            tracing::info!("iSCSI: removed superseded target {iqn}");
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{is_vmdk_descriptor, pick_vmdk, vmx_disk, zram_fits};
+    use super::{is_vmdk_descriptor, pick_vmdk, store_of, vmx_disk, zram_fits};
+
+    /// The generation parsed back out of a versioned IQN (gc_superseded / unpublish rely on this). Image names have
+    /// no dot, so `.g` is an unambiguous separator even for names like `pc-01`.
+    #[test]
+    fn iqn_generation_roundtrip() {
+        let parse = |iqn: &str| iqn.rsplit_once(".g").and_then(|(_, s)| s.parse::<u64>().ok());
+        assert_eq!(store_of("win11", 7), "win11.g7");
+        assert_eq!(parse("iqn.2026-01.local.broom:win11.g7"), Some(7));
+        assert_eq!(parse("iqn.2026-01.local.broom:pc-01.g0"), Some(0));
+        assert_eq!(parse("iqn.2026-01.local.broom:no-gen"), None);
+    }
 
     #[test]
     fn sha256_known_vector() {
@@ -497,6 +780,65 @@ mod tests {
         super::unzip(&zp, &out).unwrap();
         assert_eq!(std::fs::read(out.join("VM/disk.vmdk")).unwrap(), b"# Disk DescriptorFile");
         assert!(!d.join("escape.txt").exists());
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// Compressed chunk: decompresses to exactly the chunk, wrong sha → Err(true), cached after the first call.
+    #[test]
+    fn golden_chunk_zst_roundtrip() {
+        let home = std::env::temp_dir().join("broom_test_zchunk");
+        let _ = std::fs::remove_dir_all(&home);
+        let (dir, cache) = (home.join("w"), home.join("zchunks"));
+        std::fs::create_dir_all(&dir).unwrap();
+        let get = |i: u64, sha: &str| super::chunk_zst(&dir.join("golden.vhdx"), &cache, i, sha);
+        let mut data: Vec<u8> = (0..super::MANIFEST_CHUNK).map(|k| (k % 251) as u8).collect();
+        data.extend(vec![5u8; 777]); // partial last chunk
+        std::fs::write(dir.join("golden.vhdx"), &data).unwrap();
+        super::write_manifest(&dir.join("golden.vhdx"), &dir).unwrap();
+        let m = std::fs::read_to_string(dir.join("golden.chunks")).unwrap();
+        let shas: Vec<&str> = m.lines().skip(1).collect();
+        for (i, sha) in shas.iter().enumerate() {
+            let z = get(i as u64, sha).unwrap();
+            let raw = zstd::bulk::decompress(&z, super::MANIFEST_CHUNK).unwrap();
+            assert_eq!(raw, data[i * super::MANIFEST_CHUNK..data.len().min((i + 1) * super::MANIFEST_CHUNK)]);
+            assert!(cache.join(format!("{sha}.zst")).exists());
+        }
+        assert!(z_len_small(&get(0, shas[0]).unwrap()));
+        let _ = std::fs::remove_dir_all(&cache); // uncached: the sha check runs
+        assert!(get(1, shas[0]).unwrap_err().0, "sha of another chunk");
+        // Out-of-range chunk index → rejected from the file length, never read (M4).
+        assert!(get(999_999, shas[0]).unwrap_err().0, "chunk past end of golden");
+        assert!(get(u64::MAX, shas[0]).unwrap_err().0, "index * chunk overflows");
+        let _ = std::fs::remove_dir_all(&home);
+        fn z_len_small(z: &[u8]) -> bool {
+            z.len() < super::MANIFEST_CHUNK / 10 // a repeating pattern compresses a lot
+        }
+    }
+
+    /// golden.chunks: size line + one sha256/zero per 4 MB (last chunk partial); whole hash = sha256 of the file.
+    #[test]
+    fn manifest_chunks_and_whole_hash() {
+        let d = std::env::temp_dir().join("broom_test_manifest");
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let f = d.join("golden.vhdx");
+        let mut data = vec![7u8; super::MANIFEST_CHUNK]; // chunk 0: data
+        data.extend(vec![0u8; super::MANIFEST_CHUNK]); // chunk 1: zero
+        data.extend(vec![9u8; 1000]); // chunk 2: partial
+        std::fs::write(&f, &data).unwrap();
+        let hash = super::write_manifest(&f, &d).unwrap();
+        assert_eq!(hash, super::file_hash(f.to_str().unwrap()).unwrap());
+        let m = std::fs::read_to_string(d.join("golden.chunks")).unwrap();
+        let lines: Vec<&str> = m.lines().collect();
+        assert_eq!(lines[0], format!("size {}", data.len()));
+        assert_eq!(lines.len(), 4);
+        assert_eq!(lines[2], "zero");
+        let sha = |b: &[u8]| {
+            use sha2::{Digest, Sha256};
+            Sha256::digest(b).iter().map(|x| format!("{x:02x}")).collect::<String>()
+        };
+        assert_eq!(lines[1], sha(&data[..super::MANIFEST_CHUNK]));
+        assert_eq!(lines[3], sha(&data[2 * super::MANIFEST_CHUNK..]));
         let _ = std::fs::remove_dir_all(&d);
     }
 
@@ -543,6 +885,35 @@ mod tests {
     }
 
     /// .vmx: take the disk in use (current snapshot), skip CD/ISO.
+    /// A descriptor pointing at an absolute path / traversal / another disk is refused; a monolithic vmdk and a
+    /// descriptor whose extents are plain names in the folder pass.
+    #[test]
+    fn vmdk_refs_rejects_outside_paths() {
+        let d = std::env::temp_dir().join("broom_test_vmdkref");
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let write = |name: &str, body: &str| {
+            let p = d.join(name);
+            std::fs::write(&p, body).unwrap();
+            p
+        };
+        let ok = write("good.vmdk", "# Disk DescriptorFile\ncreateType=\"twoGbMaxExtentSparse\"\nRW 4192256 SPARSE \"good-s001.vmdk\"\n");
+        assert!(super::vmdk_refs_safe(&ok).is_ok());
+        // monolithic (binary magic, not a descriptor) → passes (no extent lines)
+        let mono = write("mono.vmdk", "KDMV\x01\x00\x00\x00 binary sparse header");
+        assert!(super::vmdk_refs_safe(&mono).is_ok());
+        for bad in [
+            "# Disk DescriptorFile\nRW 1 FLAT \"/dev/sda\" 0\n",
+            "# Disk DescriptorFile\nRW 1 FLAT \"../../etc/passwd\" 0\n",
+            "# Disk DescriptorFile\nRW 1 FLAT \"sub/disk.vmdk\" 0\n",
+            "# Disk DescriptorFile\nparentFileNameHint=\"/root/secret.img\"\n",
+        ] {
+            let p = write("bad.vmdk", bad);
+            assert!(super::vmdk_refs_safe(&p).is_err(), "{bad}");
+        }
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
     #[test]
     fn vmx_current_disk() {
         let vmx = "displayName = \"win\"\n\

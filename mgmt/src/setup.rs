@@ -3,14 +3,14 @@
 // the DB. The DHCP/TFTP servers themselves are built in (dhcp.rs/tftp.rs) and started by main().
 //
 // Flags (read from the args of the main command, e.g. `sudo ./bootrom-mgmt --mode full`):
-//   --iface --ip --subnet --mode <proxy|full>
+//   --iface --ip --subnet --mode <full|off>
 //   --range-start --range-end --netmask --gateway --dns
 use std::process::Command;
 
 use crate::{db, preflight};
 
 /// Distro services that older versions installed and the binary now replaces: stop + disable them
-/// if running so their ports (67/69/4011) are free. Anything else holding a port is left alone
+/// if running so their ports (67/69) are free. Anything else holding a port is left alone
 /// (the bind error then names the port).
 pub fn takeover(services: &[&str]) {
     // Probes only: a unit that isn't installed makes systemctl print "Failed to get unit file state" even
@@ -100,8 +100,9 @@ pub fn run(args: &[String]) {
             std::process::exit(1);
         }
     };
-    let mode = flag(args, "--mode").unwrap_or_else(|| "proxy".into());
-    tracing::info!("setup: iface {iface} - ip {ip} - subnet {subnet} - DHCP mode {mode}");
+    // broom is the LAN's DHCP server by default; `--mode off` seeds it disabled (another DHCP owns the LAN).
+    let mode = if flag(args, "--mode").as_deref() == Some("off") { "off" } else { "full" };
+    tracing::info!("setup: iface {iface} - ip {ip} - subnet {subnet} - DHCP {mode}");
 
     // 2. Root.
     if !preflight::is_root() {
@@ -140,7 +141,7 @@ pub fn run(args: &[String]) {
     seed("dhcp_iface", &iface);
     seed("dhcp_server_ip", &ip);
     seed("dhcp_subnet", &subnet);
-    seed("dhcp_mode", &mode);
+    seed("dhcp_mode", mode);
     for (fl, key) in [
         ("--range-start", "dhcp_range_start"),
         ("--range-end", "dhcp_range_end"),

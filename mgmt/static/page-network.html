@@ -3,7 +3,7 @@
   <div class="card">
     <h2>DHCP settings</h2>
     <div class="row">
-      <div class="field"><label>Mode</label><select id="dhcp_mode"><option value="proxy">proxyDHCP</option><option value="full">full DHCP</option></select></div>
+      <div class="field"><label>DHCP server</label><select id="dhcp_mode"><option value="full">on</option><option value="off">off</option></select></div>
       <div class="field"><label>IFACE</label><input id="dhcp_iface" size="8"></div>
       <div class="field"><label>Server IP</label><input id="dhcp_server_ip" size="12"></div>
       <div class="field"><label>Subnet</label><input id="dhcp_subnet" size="12"></div>
@@ -15,6 +15,6 @@
       <div class="field"><label>DNS</label><input id="dhcp_dns" size="12"></div>
     </div>
     <div class="row" style="margin-top:14px"><button class="primary" onclick="applyDhcp()">Apply (restart DHCP/TFTP)</button> <span id="dhcp_msg" class="msg"></span></div>
-    <p class="hint">DHCP + TFTP are built into bootrom-mgmt. proxyDHCP: the router hands out IPs, this server only answers PXE clients with boot info. full DHCP: this server hands out IPs + boot (turn off any other DHCP server on the LAN).</p>
+    <p class="hint">DHCP + TFTP are built into bootrom-mgmt. <b>On</b>: this server hands out IPs + PXE boot info (turn off any other DHCP server on the LAN). <b>Off</b>: another DHCP server owns the LAN — broom serves no DHCP/TFTP.</p>
   </div>
 </section>

@@ -13,6 +13,7 @@ pub const BINS: &[(&str, &str, &str)] = &[
     ("efibootmgr", "efibootmgr", "BootNext into Windows on the client SSD (stage)"),
     ("mkinitramfs", "initramfs-tools", "build the Windows stage initrd"),
     ("wget", "wget", "client stage downloads golden.vhdx"),
+    ("zstd", "zstd", "client stage decompresses delta golden chunks"),
     ("hivexregedit", "libwin-hivex-perl", "enable boot-start disk drivers in the Windows golden registry"),
 ];
 

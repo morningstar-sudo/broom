@@ -1,0 +1,54 @@
+<section class="page active" id="page-devices">
+  <div class="head"><h1>Devices</h1><p>edit machines, bulk actions, CSV</p>
+    <span class="sp"></span>
+    <button class="ghost" onclick="location.href='/api/machines/export.csv'">Export CSV</button>
+    <label class="btnlike">Import CSV<input type="file" accept=".csv,text/csv" hidden onchange="dvImport(this)"></label>
+    <button onclick="loadDevices()">↻</button></div>
+  <div id="dv_msg" class="msg" style="white-space:pre-wrap;margin-bottom:10px"></div>
+
+  <div class="card" id="dv_detail" hidden></div>
+
+  <div class="card">
+    <h2>Machines</h2>
+    <div class="row" style="margin-bottom:12px">
+      <span id="dv_sel" class="msg">0 selected</span>
+      <input id="dv_bulk_grp" placeholder="group" size="8">
+      <button onclick="dvBulk('group')">Set group</button>
+      <select id="dv_bulk_img"></select>
+      <button onclick="dvBulk('image')">Set image</button>
+      <button onclick="dvBulk('wake')">Wake</button>
+      <button class="ghost danger" onclick="dvBulk('delete')">Delete</button>
+      <span style="flex:1"></span>
+      <input id="dv_prefix" value="PC" size="4" title="name prefix">
+      <input id="dv_start" type="number" value="1" min="0" style="width:64px" title="first number">
+      <select id="dv_digits" title="digits"><option>1</option><option selected>2</option><option>3</option></select>
+      <button onclick="dvRegister()" title="register the selected NEW machines with numbered names + their current IP">Register selected new</button>
+    </div>
+    <div class="scroll"><table id="devices">
+      <thead><tr><th><input type="checkbox" id="dv_all" onclick="dvSelectAll(this.checked)"></th><th>Hostname</th><th>Group</th><th>IP</th><th>MAC</th><th>Status</th><th>Image</th><th>License</th><th>Notes</th></tr>
+        <tr class="filters" oninput="dvRender()">
+          <th></th>
+          <th><input id="dvf_host" placeholder="hostname"></th>
+          <th><input id="dvf_grp" placeholder="group"></th>
+          <th><input id="dvf_ip" placeholder="IP"></th>
+          <th><input id="dvf_mac" placeholder="MAC"></th>
+          <th><select id="dvf_state"><option value="">all</option><option value="on">ON</option><option value="off">OFF</option><option value="registered">registered</option><option value="new">new</option></select></th>
+          <th><input id="dvf_img" placeholder="image"></th>
+          <th><select id="dvf_lic"><option value="">all</option><option value="none">no key</option><option value="armed">armed</option><option value="sent">sent</option><option value="error">error</option></select></th>
+          <th><input id="dvf_notes" placeholder="notes"></th>
+        </tr></thead>
+      <tbody></tbody></table></div>
+    <p class="hint">Click a row for details / edit. Import CSV columns (header row, any order): <code>mac</code> (required), <code>hostname</code>, <code>ip</code>, <code>group</code>, <code>notes</code>, <code>image</code>, <code>license_key</code> —
+      rows are matched by MAC (update) or added; a missing column keeps the stored value. Export never contains license keys.</p>
+  </div>
+
+  <div class="card">
+    <h2>Add machine</h2>
+    <div class="row">
+      <div class="field"><label>MAC</label><input id="dv_add_mac" size="17" placeholder="aa:bb:cc:dd:ee:01"></div>
+      <div class="field"><label>IP</label><input id="dv_add_ip" size="12" placeholder="10.0.0.11"></div>
+      <div class="field"><label>Hostname</label><input id="dv_add_host" size="10" maxlength="15" placeholder="PC01"></div>
+      <button class="primary" style="align-self:flex-end" onclick="dvAdd()">Add</button>
+    </div>
+  </div>
+</section>

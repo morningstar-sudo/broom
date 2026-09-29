@@ -45,11 +45,14 @@ PREREQ=""
 prereqs(){ echo "$PREREQ"; }
 case $1 in prereqs) prereqs; exit 0;; esac
 . /usr/share/initramfs-tools/hook-functions
-for b in sfdisk blkid mkfs.fat mkntfs ntfsfix efibootmgr wget sha256sum tar gzip od dd; do
+for b in __TOOLS__; do
   p=$(command -v $b) && copy_exec "$p" /broom/bin/$b
 done
 manual_add_modules ntfs3 vfat nls_cp437 nls_iso8859_1 nls_utf8 efivarfs
 "#;
+
+/// Server tools the hook copies into the stage (/broom/bin, ahead of busybox).
+const STAGE_TOOLS: &str = "sfdisk blkid mkfs.fat mkntfs ntfsfix efibootmgr wget sha256sum tar gzip od dd awk zstd";
 
 /// Stage init-premount script — runs on the client, does NOT mount root; reboots into Windows when done.
 const STAGE_SCRIPT: &str = r#"#!/bin/sh
@@ -63,6 +66,10 @@ log(){ echo "broom: $*"; echo "$*" >> /run/broom-stage.log; }
 # panic = shell (initramfs); fix by hand then `exit` → the script CONTINUES from the failed step (on-site debug).
 die(){ panic "broom stage ERROR: $*"; }
 restart(){ log "$*"; sleep 2; reboot -f 2>/dev/null || echo b > /proc/sysrq-trigger; sleep 30; }
+# GNU wget copied by the hook, called by path: the initramfs busybox wget has no --header / --post-file / -T
+# (delta Range requests + driver list need them) and must never be picked instead.
+if [ -x /broom/bin/wget ]; then wget(){ /broom/bin/wget "$@"; }
+else log "WARNING: no GNU wget in the stage (publish again) -> delta updates + drivers fall back / skip"; fi
 NAME=""; HASH=""; SRV=""; HOST=""; LIC=""; MAC=""
 for a in $(cat /proc/cmdline); do
   case "$a" in broom.name=*) NAME=${a#*=};; broom.hash=*) HASH=${a#*=};; broom.srv=*) SRV=${a#*=};;
@@ -114,6 +121,112 @@ elif mnt rw || mnt force; then log "BROOMWIN: plain mount (the disk takes no TRI
 else die "mount ntfs3 $(part $disk 2)"; fi
 mkdir -p $B
 
+# Delta golden update: turn $1 (old golden, $2 = its manifest) into the new golden ($3 = its manifest) IN PLACE,
+# then rename it to $4. Only the 4 MB chunks the old copy lacks come from $5 (the server's /api/golden-chunk?name=X,
+# zstd-compressed). Manifest = "size N" + one
+# line per chunk (sha256 | zero). A new VHDX block early in the disk shifts later ones → those chunks exist in the
+# old copy at another offset ("moved"): phase 1 saves every moved chunk (sha256-checked) to a spare dir BEFORE
+# anything is overwritten; phase 2 writes moved chunks from there, downloads the missing ones, zeroes zero ones.
+# Unchanged chunks are never touched → disk IO ≈ 2×moved + downloaded instead of copying the whole golden.
+# A moved chunk that fails its check is downloaded instead; interrupted → the next run re-plans from the manifests
+# and the checks catch overwritten sources. Returns 1 → the caller does a full download.
+# DW workers in parallel (every DW-th chunk each, own temp file, disjoint regions): keeps the link busy while
+# others hash/write, and sha256 runs on several cores.
+DW=4
+delta(){
+  old=$1; om=$2; nm=$3; new=$4; url=$5; P=/run/broom-plan; F=/run/broom-delta-fail; SP=$1.spare
+  size=$(sed -n '1s/^size //p' $nm)
+  case "$size" in ''|*[!0-9]*) log "delta: bad manifest"; return 1;; esac
+  # $1.patching = the new manifest a previous (interrupted) run was patching towards. Same target → the same plan,
+  # safe to redo. Another target → unchanged chunks can't be trusted any more → full download.
+  id=$(sha256sum $nm | cut -c1-64)
+  if [ -f $1.patching ] && [ "$(cat $1.patching)" != "$id" ]; then
+    log "delta: old golden half-patched towards another version -> full download"; return 1
+  fi
+  # s = same position, c = moved (at old index, spare slot), d = download, z = zero
+  awk 'NR==FNR { if (FNR>1) { o[FNR-2]=$1; if (!($1 in at)) at[$1]=FNR-2 } next }
+       FNR>1 { i=FNR-2; h=$1
+         if (h=="zero") print "z", i, h
+         else if (o[i]==h) print "s", i, h
+         else if (h in at) print "c", i, h, at[h], nc++
+         else print "d", i, h }' $om $nm > $P || return 1
+  s=$(grep -c '^s ' $P); c=$(grep -c '^c ' $P); d=$(grep -c '^d ' $P); z=$(grep -c '^z ' $P)
+  avail=$(df -k $W | tail -1 | awk '{print $4}')
+  [ "$avail" -gt $((c * 4096 + 65536)) ] 2>/dev/null || { log "delta: not enough space to keep $c moved chunks"; return 1; }
+  rm -rf $SP; mkdir -p $SP
+  out=$old
+  log "delta: $s unchanged, $c moved, $d downloaded ($((d * 4)) MB), $z zero, $DW workers"
+  ok(){ [ "$(sha256sum $T | cut -c1-64)" = "$1" ]; }
+  # Progress: every finished step appends a line to $P.done, every download one to $P.dl (O_APPEND: safe from
+  # several workers); a reporter redraws one console line every 2 s.
+  # Chunk i comes zstd-compressed from /api/golden-chunk (Windows data ≈ 55 % → less on the wire); the sha256 check
+  # is on the decompressed bytes. Compressed sizes go to $P.dlz (the final log shows what really crossed the network).
+  dl(){ try=0
+    while [ $try -lt 3 ]; do
+      if wget -q -O $T.z "$url&i=$1&h=$2" 2>/dev/null && zstd -dqf $T.z -o $T 2>/dev/null && ok $2; then
+        wc -c < $T.z >> $P.dlz; rm -f $T.z; echo >> $P.dl; return 0
+      fi
+      try=$((try + 1))
+    done; rm -f $T.z; log "delta: chunk $1 failed 3 times"; return 1; }
+  put(){ dd if=$T of=$out bs=4M seek=$1 conv=notrunc 2>/dev/null; }
+  zero(){ dd if=/dev/zero of=$out bs=4M seek=$1 count=1 conv=notrunc 2>/dev/null; }
+  # One worker: plan lines NR % DW == $1, phase $2. A failure leaves $F (a background job can't return into delta).
+  work(){
+    awk -v n=$DW -v w=$1 'NR % n == w' $P | while read a i h j k; do
+      [ -f $F ] && break   # another worker failed → stop early
+      if [ "$2" = 1 ]; then
+        # phase 1: save moved chunks (exact bytes; a bad one is dropped → downloaded in phase 2)
+        [ "$a" = c ] || continue
+        T=$SP/$k; dd if=$old of=$T bs=4M skip=$j count=1 2>/dev/null; ok $h || rm -f $T
+      else
+        T=/run/broom-chunk.$1
+        case "$a" in
+          s) continue;;
+          c) if [ -f $SP/$k ]; then T=$SP/$k; else dl $i $h || { touch $F; break; }; fi; put $i;;
+          d) dl $i $h || { touch $F; break; }; put $i;;
+          z) zero $i;;
+        esac
+      fi
+      echo >> $P.done
+    done
+    rm -f /run/broom-chunk.$1 /run/broom-chunk.$1.z; }
+  tot=$((2 * c + d + z))
+  rm -f $F; : > $P.done; : > $P.dl; : > $P.dlz
+  t0=$(date +%s); rp=""
+  if [ $tot -gt 0 ]; then
+    ( while :; do
+        sleep 2; n=$(wc -l < $P.done); m=$(wc -l < $P.dl); t=$(( $(date +%s) - t0 )); [ $t -gt 0 ] || t=1
+        eta=0; [ $n -gt 0 ] && eta=$(( (tot - n) * t / n ))
+        # MB/s = chunks done (copied + downloaded) per second — the real pace, not only the network part.
+        printf '\rbroom: delta %3d%%  %d/%d chunks  %d/%d MB downloaded  %d MB/s  %dm%02ds left   ' \
+          $((n * 100 / tot)) $n $tot $((m * 4)) $((d * 4)) $((n * 4 / t)) $((eta / 60)) $((eta % 60))
+      done ) &
+    rp=$!
+  fi
+  # Phase 1 (every moved chunk saved) completes before phase 2 overwrites anything.
+  for phase in 1 2; do
+    [ $phase = 2 ] && { echo "$id" > $1.patching; sync; }
+    ts=$(date +%s)
+    pids=""; w=0; while [ $w -lt $DW ]; do work $w $phase & pids="$pids $!"; w=$((w + 1)); done
+    wait $pids
+    # Per-phase time in stage.log: 1 = reading the moved chunks (local disk), 2 = downloads + writes.
+    # (a newline first: the progress line is redrawn with \r and has none)
+    [ -n "$rp" ] && echo
+    log "delta phase $phase done in $(( $(date +%s) - ts ))s"
+  done
+  [ -n "$rp" ] && { kill $rp 2>/dev/null; echo; }
+  t=$(( $(date +%s) - t0 )); m=$(wc -l < $P.dl); mz=$(awk '{ s += $1 } END { print int(s / 1048576) }' $P.dlz)
+  rm -rf $P.done $P.dl $P.dlz $SP
+  [ -f $F ] && { rm -f $F $P; return 1; }
+  [ $t -gt 0 ] || t=1
+  log "delta done in ${t}s: $((tot * 4)) MB of disk work ($((tot * 4 / t)) MB/s), $((m * 4)) MB downloaded as $mz MB compressed"
+  dd if=/dev/null of=$out bs=1 seek=$size 2>/dev/null   # exact size (the last chunk may be partial)
+  mv $old $new && rm -f $1.patching
+  rm -f $P
+  return 0
+}
+# end delta
+
 # 1. Golden hash mismatch → re-download (delete old base/child: they point to the old golden).
 if [ "$(cat $B/golden.sha256 2>/dev/null)" != "$HASH" ]; then
   log "new golden ($HASH) -> downloading from $SRV"
@@ -131,8 +244,20 @@ if [ "$(cat $B/golden.sha256 2>/dev/null)" != "$HASH" ]; then
   done
   D=$B/dl-$HASH
   for x in $B/dl-*; do [ "$x" = "$D" ] || rm -rf "$x"; done
-  rm -f $B/golden.vhdx $B/golden.sha256 $B/base.vhdx $B/base.ok $B/first.pending $B/child.vhdx $B/child-local.vhdx
+  # The old golden + its manifest stay as the delta source; base/child point to the old golden → gone.
+  rm -f $B/golden.sha256 $B/base.vhdx $B/base.ok $B/first.pending $B/child.vhdx $B/child-local.vhdx
   mkdir -p $D
+  U=http://$SRV/tftp/broom-win/$NAME
+  # Delta: only the chunks the old copy lacks cross the network (see delta()). No old copy / no manifest /
+  # any failure → drop the old golden + partial file and download the whole golden below.
+  if [ ! -f $D/golden.vhdx.ok ]; then
+    if wget -q -O $D/golden.chunks $U/golden.chunks && [ -f $B/golden.vhdx ] && [ -f $B/golden.chunks ] \
+       && delta $B/golden.vhdx $B/golden.chunks $D/golden.chunks $D/golden.vhdx "http://$SRV/api/golden-chunk?name=$NAME"; then
+      touch $D/golden.vhdx.ok $D/golden.delta
+    else
+      rm -rf $D/golden.vhdx $B/golden.vhdx $B/golden.chunks $B/golden.vhdx.patching $B/golden.vhdx.spare
+    fi
+  fi
   # $f.ok = file fully downloaded (power loss midway → next boot skips finished files, resumes the partial one).
   # Only -c -O: works with both busybox and GNU wget. -c failing (e.g. 416 when the file is complete but not yet .ok)
   # → download again from scratch. NO $((...)) on external data: an ash arithmetic error exits the whole script.
@@ -144,9 +269,13 @@ if [ "$(cat $B/golden.sha256 2>/dev/null)" != "$HASH" ]; then
     touch $D/$f.ok
   done
   [ "$(srv_hash)" = "$HASH" ] || { rm -rf $D; restart "image $NAME changed on the server during the download -> reboot to get the new version"; }
-  log "checking golden sha256 - rereads the whole file, may take a few minutes, DO NOT power off..."
-  [ "$(sha256sum $D/golden.vhdx | cut -d' ' -f1)" = "$HASH" ] || { rm -rf $D; die "golden sha256 mismatch"; }
-  rm -f $D/*.ok
+  # Delta: every chunk was checked against the manifest → no second full read. Full download → whole-file sha256.
+  if [ ! -f $D/golden.delta ]; then
+    log "checking golden sha256 - rereads the whole file, may take a few minutes, DO NOT power off..."
+    [ "$(sha256sum $D/golden.vhdx | cut -d' ' -f1)" = "$HASH" ] || { rm -rf $D; die "golden sha256 mismatch"; }
+  fi
+  rm -f $D/*.ok $D/golden.delta
+  # golden.chunks (if fetched) moves along → the manifest of the copy we now have = next delta's source.
   mv $D/* $B/ && rmdir $D && sync && echo "$HASH" > $B/golden.sha256 && sync
 fi
 
@@ -252,6 +381,7 @@ if [ -n "$MAC" ] && wget -q -T 10 -O /run/broom-drv.txt --post-file=/run/broom-h
     [ -f "$f" ] || continue; n=${f##*/}; n=${n%.sha256}
     grep -q "^$n " /run/broom-drv.txt || { rm -rf drivers/$n "$f"; log "driver $n: removed"; }
   done
+  log "drivers: $(grep -c . /run/broom-drv.txt) package(s) for this machine, $(grep -c . /run/broom-drv-have.txt) ready"
   # Signature of the packages actually here; none → empty (a base built without drivers stays valid).
   DRV=""; [ -s /run/broom-drv-have.txt ] && DRV=$(sha256sum /run/broom-drv-have.txt | cut -c1-16)
   if [ -n "$DRV" ]; then echo "$DRV" > drv.txt; else rm -f drv.txt; fi
@@ -347,9 +477,12 @@ pub fn build_stage() -> Result<bool, String> {
     // zstd: multithreaded compression + faster decompression than gzip; server without zstd → gzip.
     let compress = if run("sh", &["-c", "command -v zstd"]).is_ok() { "zstd" } else { "gzip" };
     let initramfs_conf = format!("MODULES=most\nBUSYBOX=y\nCOMPRESS={compress}\n");
+    let hook = STAGE_HOOK.replace("__TOOLS__", STAGE_TOOLS);
+    // Where each tool resolves on the server is part of the key: a tool installed later (e.g. wget) → rebuilt.
+    let tools = run("sh", &["-c", &format!("for b in {STAGE_TOOLS}; do command -v $b; done; true")]).unwrap_or_default();
     let key = {
         let mut h = std::collections::hash_map::DefaultHasher::new();
-        (&kv, &initramfs_conf, STAGE_HOOK, STAGE_SCRIPT).hash(&mut h);
+        (&kv, &initramfs_conf, &hook, STAGE_SCRIPT, &tools).hash(&mut h);
         format!("{:016x}", h.finish())
     };
     let sd = stage_dir();
@@ -365,7 +498,7 @@ pub fn build_stage() -> Result<bool, String> {
     }
     std::fs::write(format!("{conf}/initramfs.conf"), &initramfs_conf).map_err(|e| e.to_string())?;
     std::fs::write(format!("{conf}/modules"), "").map_err(|e| e.to_string())?;
-    write_exec(&format!("{conf}/hooks/broom-stage"), STAGE_HOOK)?;
+    write_exec(&format!("{conf}/hooks/broom-stage"), &hook)?;
     write_exec(&format!("{conf}/scripts/init-premount/broom-stage"), STAGE_SCRIPT)?;
     std::fs::create_dir_all(&sd).map_err(|e| e.to_string())?;
     let tmp = format!("{sd}/stage.img.tmp");
@@ -373,12 +506,14 @@ pub fn build_stage() -> Result<bool, String> {
     // Tools WITHOUT a busybox replacement must really be in the initrd — report missing ones now
     // at publish time, not when a client gets stuck in a shell.
     let list = run("lsinitramfs", &[&tmp])?;
-    let missing: Vec<&str> = ["sfdisk", "mkfs.fat", "mkntfs", "ntfsfix", "efibootmgr"]
+    // wget: busybox's (initramfs build) lacks --header / --post-file → delta updates + drivers need GNU wget.
+    // zstd: delta chunks arrive compressed.
+    let missing: Vec<&str> = ["sfdisk", "mkfs.fat", "mkntfs", "ntfsfix", "efibootmgr", "awk", "wget", "zstd"]
         .into_iter()
         .filter(|b| !list.lines().any(|l| l.ends_with(&format!("broom/bin/{b}"))))
         .collect();
     if !missing.is_empty() {
-        return Err(format!("stage initrd is missing {} — install the packages on the server (fdisk ntfs-3g dosfstools efibootmgr) then Publish again", missing.join(", ")));
+        return Err(format!("stage initrd is missing {} — install the packages on the server (fdisk ntfs-3g dosfstools efibootmgr wget mawk zstd) then Publish again", missing.join(", ")));
     }
     std::fs::rename(&tmp, format!("{sd}/stage.img")).map_err(|e| e.to_string())?;
     std::fs::copy(format!("/boot/vmlinuz-{kv}"), format!("{sd}/vmlinuz"))
@@ -481,15 +616,16 @@ pub fn publish(st: &SharedState, id: i64, name: &str, steps: &mut crate::publish
         build_golden(&raw, &out, name, steps)?
     };
 
-    // Hash (clients compare it to know whether to re-download). Golden kept → reuse the stored hash (sha256 of 13GB
-    // takes ~2 minutes on a slow disk).
+    // Hash (clients compare it to know whether to re-download) + golden.chunks (the stage fetches only the chunks it
+    // lacks), one read pass. Golden kept + both present → reuse (13 GB takes ~2 minutes on a slow disk).
+    // golden.sha256 is written LAST: the stage treats its absence as "publish running".
     let sum_file = format!("{out}/golden.sha256");
     let cached = std::fs::read_to_string(&sum_file).ok().map(|s| s.trim().to_string()).filter(|s| s.len() == 64);
     let hash = match cached {
-        Some(h) if fresh => h,
+        Some(h) if fresh && Path::new(&format!("{out}/golden.chunks")).exists() => h,
         _ => {
-            steps.go("sha256 golden");
-            let h = crate::publish::file_hash(&golden).ok_or("sha256sum golden.vhdx failed")?;
+            steps.go("sha256 + chunk manifest golden");
+            let h = crate::publish::write_manifest(Path::new(&golden), Path::new(&out))?;
             std::fs::write(&sum_file, &h).map_err(|e| e.to_string())?;
             h
         }
@@ -540,6 +676,8 @@ fn build_golden(raw: &str, out: &str, name: &str, steps: &mut crate::publish::St
     // No golden.sha256 while the files below change: a client downloading now sees "publish running" (the stage
     // compares it to its own hash before + after downloading) instead of mixing files of two versions.
     let _ = std::fs::remove_file(format!("{out}/golden.sha256"));
+    // Compressed delta chunks of older goldens are useless now (content-addressed: only space is at stake).
+    let _ = std::fs::remove_dir_all(crate::publish::chunk_cache_dir());
 
     // 2. Edit image.img IN PLACE (no temporary full-disk copy): punch holes outside the Windows partition (ESP/
     //    MSR/Recovery don't go into the golden) + GPT with a single partition (standard native VHD boot), KEEP start →
@@ -804,7 +942,22 @@ $c = 'processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35" language="
 </unattend>
 "@ | Set-Content -Encoding utf8 "$B\unattend.xml"
 
-# 6. Sysprep → power off the VM. Errors: see C:\Windows\System32\Sysprep\Panther\setupact.log.
+# 6. Less churn between two builds of this golden (clients download only the 4 MB chunks that changed):
+#    throw away caches/logs that differ on every build, then TRIM → freed space reads as zeros in the exported disk
+#    (VMware thin disks reclaim it) → "zero" chunks, never downloaded. Best effort: nothing here may stop the prep.
+$ErrorActionPreference = 'Continue'
+Stop-Service wuauserv, bits, dosvc -Force -ErrorAction SilentlyContinue
+foreach ($p in "$env:SystemRoot\SoftwareDistribution\Download", "$env:SystemRoot\Temp", $env:TEMP,
+               "$env:SystemRoot\Prefetch", "$env:ProgramData\Microsoft\Windows\DeliveryOptimization\Cache",
+               "$env:SystemRoot\Logs\CBS", "$env:SystemRoot\LiveKernelReports", "$env:SystemRoot\Minidump") {
+  Get-ChildItem $p -Force -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+}
+Remove-Item "$env:SystemRoot\MEMORY.DMP" -Force -ErrorAction SilentlyContinue
+Write-Host '>>> Clearing event logs + TRIM of the free space...' -ForegroundColor Green
+foreach ($l in (wevtutil el)) { wevtutil cl "$l" 2>&1 | Out-Null }
+Optimize-Volume -DriveLetter $env:SystemDrive[0] -ReTrim -ErrorAction SilentlyContinue
+
+# 7. Sysprep → power off the VM. Errors: see C:\Windows\System32\Sysprep\Panther\setupact.log.
 Write-Host '>>> Sysprep... the VM will POWER OFF. Then upload the .vmdk file on the web (OS = windows).' -ForegroundColor Green
 & "$env:SystemRoot\System32\Sysprep\sysprep.exe" /generalize /oobe /shutdown /unattend:"$B\unattend.xml"
 "#;
@@ -848,7 +1001,7 @@ $sf = $v.Path + 'broom\srv.txt'
 if ([IO.File]::Exists($sf)) {
   $srv = [IO.File]::ReadAllText($sf).Trim()
   $k = ''
-  try { $k = (Invoke-WebRequest -UseBasicParsing -TimeoutSec 15 -Uri "http://$srv/api/license").Content.Trim() } catch { }
+  try { $k = (Invoke-WebRequest -UseBasicParsing -TimeoutSec 15 -Method Post -Uri "http://$srv/api/license").Content.Trim() } catch { }
   if ($k) {
     $slmgr = "$env:SystemRoot\System32\slmgr.vbs"
     $r = (& cscript //nologo $slmgr /ipk $k | Out-String) + (& cscript //nologo $slmgr /ato | Out-String)
@@ -931,10 +1084,13 @@ if (($want -join ',') -ne ($now -join ',')) {
 pub fn prep_script(db: &dyn Db) -> String {
     let user = db.get_config("ltsp_user", "guest");
     let pass = db.get_config("ltsp_password", "123456");
+    // The values sit inside unattend.xml (XML-escaped) AND inside a PowerShell here-string (`$`/backtick would be
+    // expanded). set_cafe_user already rejects those characters; escaping here too covers an old stored value.
+    let esc = |s: &str| xml(s).replace('`', "``").replace('$', "`$");
     PREP_WIN
         .replace("__BROOM_DONE__", BROOM_DONE)
-        .replace("__USER__", &xml(&user))
-        .replace("__PASS__", &xml(&pass))
+        .replace("__USER__", &esc(&user))
+        .replace("__PASS__", &esc(&pass))
 }
 
 /// Overwrite broom-done.ps1 in the golden (a golden prepped with an old version still gets the new logic).
@@ -951,11 +1107,24 @@ fn write_broom_done(mnt: &str) -> Result<bool, String> {
 
 #[cfg(test)]
 mod tests {
+    /// The shell the stage really runs in: the initramfs busybox ash (package busybox-initramfs). It runs its own
+    /// applets (wget, awk, od…) BEFORE anything in PATH — tests must see that. Not installed → the system sh.
+    fn stage_sh() -> std::process::Command {
+        const BB: &str = "/usr/lib/initramfs-tools/bin/busybox";
+        if std::path::Path::new(BB).exists() {
+            let mut c = std::process::Command::new(BB);
+            c.arg("sh");
+            c
+        } else {
+            std::process::Command::new("sh")
+        }
+    }
+
     /// The stage script runs inside the initramfs — a syntax error = client stuck in a shell.
     #[test]
     fn stage_syntax() {
         for s in [super::STAGE_SCRIPT, super::STAGE_HOOK] {
-            let ok = std::process::Command::new("sh").args(["-n", "-c", s]).status().unwrap();
+            let ok = stage_sh().args(["-n", "-c", s]).status().unwrap();
             assert!(ok.success());
         }
     }
@@ -975,7 +1144,7 @@ mod tests {
         let want = vhdx::guid_str(&vhdx::read_info(base).unwrap().data_write_guid);
         let off = vhdx::write_empty(child, &vhdx::Info { data_write_guid: [0; 16], ..parent }, Some(".\\base.vhdx")).unwrap();
         let sh = format!("{funcs}\ng=$(vhdx_guid {base}); echo \"$g\"; patch16 {child} \"$g\" {off}");
-        let o = std::process::Command::new("sh").args(["-c", &sh]).output().unwrap();
+        let o = stage_sh().args(["-c", &sh]).output().unwrap();
         assert_eq!(String::from_utf8_lossy(&o.stdout).trim(), want);
         let raw = std::fs::read(child).unwrap();
         let u: Vec<u16> = raw[off as usize..off as usize + 76].chunks(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
@@ -1000,7 +1169,7 @@ mod tests {
                  wget(){{ n=$(cat cnt); echo $((n+1)) > cnt; sed -n \"$((n+1))p\" seq; }}\n{lp}\necho \"GO $(cat cnt)\"",
                 d.display()
             );
-            let o = std::process::Command::new("sh").args(["-c", &sh]).output().unwrap();
+            let o = stage_sh().args(["-c", &sh]).output().unwrap();
             let _ = std::fs::remove_dir_all(&d);
             String::from_utf8_lossy(&o.stdout).trim().to_string()
         };
@@ -1015,7 +1184,7 @@ mod tests {
     #[test]
     fn stage_license_rebuilds_base() {
         let s = super::STAGE_SCRIPT;
-        let part = &s[s.find("# License key (Machines page)").unwrap()..s.find("# Last session's writes").unwrap()];
+        let part = &s[s.find("# License key (Machines page)").unwrap()..s.find("# Drivers (Drivers page)").unwrap()];
         let run = |lic: &str, base_lic: &str| {
             let d = std::env::temp_dir().join(format!("broom_t_lic_{lic}_{base_lic}"));
             std::fs::create_dir_all(&d).unwrap();
@@ -1024,7 +1193,7 @@ mod tests {
             }
             std::fs::write(d.join("base.lic"), format!("{base_lic}\n")).unwrap();
             let sh = format!("cd {}; SRV=10.0.0.12; LIC={lic}\nlog(){{ :; }}\n{part}", d.display());
-            assert!(std::process::Command::new("sh").args(["-c", &sh]).status().unwrap().success());
+            assert!(stage_sh().args(["-c", &sh]).status().unwrap().success());
             let has = |f: &str| d.join(f).exists();
             let out = (has("base.vhdx"), has("lic.txt"), std::fs::read_to_string(d.join("srv.txt")).unwrap());
             let _ = std::fs::remove_dir_all(&d);
@@ -1067,7 +1236,7 @@ mod tests {
                 }
             }
             std::fs::write(b.join("base.vhdx"), "x").unwrap_or(()); // a base exists before every boot
-            assert!(std::process::Command::new("sh").args(["-c", &mock]).status().unwrap().success());
+            assert!(stage_sh().args(["-c", &mock]).status().unwrap().success());
             let rebuilt = !b.join("base.vhdx").exists();
             // Commit what a finished base build would record (stage: cp drv.txt base.drv).
             match std::fs::read(b.join("drv.txt")) {
@@ -1113,7 +1282,7 @@ mod tests {
                  efibootmgr(){{ case \"$1\" in -v) cat v.txt;; -q) echo \"$3\" > set.txt;; *) cat plain.txt;; esac; }}\n{part}",
                 d.display()
             );
-            assert!(std::process::Command::new("sh").args(["-c", &sh]).status().unwrap().success());
+            assert!(stage_sh().args(["-c", &sh]).status().unwrap().success());
             let rd = |f: &str| std::fs::read_to_string(d.join(f)).unwrap_or_default().trim().to_string();
             let out = (rd("set.txt"), rd("bootorder.txt"), rd("log"));
             let _ = std::fs::remove_dir_all(&d);
@@ -1125,6 +1294,81 @@ mod tests {
         assert!(log.contains("PXE Boot0003 (IBA GE Slot 0100 v1553)"), "{log}");
         assert_eq!(run("").0, "0004,0003,0005,0007,0000,0001", "no BootCurrent → every network entry first");
         assert_eq!(run("0000").0, "0004,0003,0005,0007,0000,0001", "BootCurrent = Windows entry → ignored");
+    }
+
+    /// Stage delta() (cut from STAGE_SCRIPT, real files + manifests from publish::write_manifest, wget mocked with
+    /// HTTP Range): the result is byte-identical to the new golden and only the missing chunks are downloaded.
+    #[test]
+    fn stage_delta_golden() {
+        const C: usize = crate::publish::MANIFEST_CHUNK;
+        let s = super::STAGE_SCRIPT;
+        let func = &s[s.find("DW=4").unwrap()..s.find("# end delta").unwrap()];
+        let d = std::env::temp_dir().join("broom_t_delta");
+        let chunk = |b: u8| vec![b; C];
+        let file = |parts: &[Vec<u8>]| parts.concat();
+        // old: chunks 1..5 + a partial tail
+        let old = file(&[chunk(1), chunk(2), chunk(3), chunk(4), chunk(5), vec![6; 1000]]);
+        let run = |new: &[u8], server: &[u8], corrupt_old_chunk: Option<usize>, stale_patch: bool| {
+            let _ = std::fs::remove_dir_all(&d);
+            for p in ["o", "n", "run"] {
+                std::fs::create_dir_all(d.join(p)).unwrap();
+            }
+            std::fs::write(d.join("o/golden.vhdx"), &old).unwrap();
+            crate::publish::write_manifest(&d.join("o/golden.vhdx"), &d.join("o")).unwrap();
+            std::fs::write(d.join("n/golden.vhdx"), new).unwrap();
+            crate::publish::write_manifest(&d.join("n/golden.vhdx"), &d.join("n")).unwrap();
+            std::fs::write(d.join("server.bin"), server).unwrap();
+            if let Some(k) = corrupt_old_chunk {
+                let mut o = old.clone();
+                o[k * C..(k + 1) * C].fill(0xEE);
+                std::fs::write(d.join("o/golden.vhdx"), o).unwrap();
+            }
+            if stale_patch {
+                std::fs::write(d.join("o/golden.vhdx.patching"), "another-version\n").unwrap();
+            }
+            let body = func.replace("/run/", &format!("{}/run/", d.display()));
+            let sh = format!(
+                "cd {d}; W={d}\nlog(){{ echo \"$*\" >> {d}/log; }}\n\
+                 wget(){{ o=\"\"; u=\"\"; while [ $# -gt 0 ]; do case \"$1\" in -O) o=$2; shift;; -q) ;; *) u=$1;; esac; shift; done\n\
+                   case \"$u\" in *golden-chunk\\?name=w\\&i=*\\&h=*) ;; *) return 1;; esac\n\
+                   i=${{u#*&i=}}; i=${{i%%&*}}; echo \"$i\" >> {d}/dl\n\
+                   tail -c +$((i * 4194304 + 1)) {d}/server.bin | head -c 4194304 | zstd -q -c > \"$o\"; }}\n\
+                 {body}\ndelta {d}/o/golden.vhdx {d}/o/golden.chunks {d}/n/golden.chunks {d}/out.vhdx 'http://x/api/golden-chunk?name=w'",
+                d = d.display()
+            );
+            let ok = stage_sh().args(["-c", &sh]).status().unwrap().success();
+            let rd = |f: &str| std::fs::read_to_string(d.join(f)).unwrap_or_default();
+            let same = std::fs::read(d.join("out.vhdx")).map(|o| o == new).unwrap_or(false);
+            (ok, same, rd("dl").lines().count(), rd("log"))
+        };
+        // A: chunk 2 + the tail changed in place → nothing moved, 2 downloads.
+        let a = file(&[chunk(1), chunk(2), chunk(9), chunk(4), chunk(5), vec![8; 1000]]);
+        let (ok, same, dls, log) = run(&a, &a, None, false);
+        assert!(ok && same && dls == 2 && log.contains("0 moved"), "{log}");
+        // B: a new chunk early → every later chunk shifts → 5 moved (saved first, then written), 1 download.
+        let b = file(&[chunk(1), chunk(7), chunk(2), chunk(3), chunk(4), chunk(5), vec![6; 1000]]);
+        let (ok, same, dls, log) = run(&b, &b, None, false);
+        assert!(ok && same && dls == 1 && log.contains("5 moved") && log.contains("delta done"), "{log}");
+        // C: the old copy is damaged where a chunk is copied from → that chunk is downloaded instead.
+        let (ok, same, dls, _) = run(&b, &b, Some(3), false);
+        assert!(ok && same && dls == 2);
+        // D: the server sends wrong data → fails after 3 tries → the caller falls back to a full download.
+        let (ok, _, dls, log) = run(&b, &a, None, false);
+        assert!(!ok && dls == 3 && log.contains("failed 3 times"), "{log}");
+        // E: 4 workers over a longer file: reversed order + 3 new chunks, all workers busy → still byte-identical.
+        let mut parts: Vec<Vec<u8>> = vec![chunk(30), chunk(31)];
+        parts.extend([5u8, 4, 3, 2, 1].iter().map(|&b| chunk(b)));
+        parts.push(chunk(32));
+        parts.push(vec![6; 1000]);
+        let e = file(&parts);
+        let (ok, same, dls, log) = run(&e, &e, None, false);
+        assert!(ok && same && dls == 3 && log.contains("4 workers"), "{log}");
+        assert!(!d.join("o/golden.vhdx.spare").exists() && !d.join("o/golden.vhdx.patching").exists(), "cleaned up");
+        // F: a previous run was interrupted while patching towards ANOTHER version → unchanged chunks can't be trusted
+        // → no delta (the caller downloads everything).
+        let (ok, _, dls, log) = run(&b, &b, None, true);
+        assert!(!ok && dls == 0 && log.contains("half-patched"), "{log}");
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]

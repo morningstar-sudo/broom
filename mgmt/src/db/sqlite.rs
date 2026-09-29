@@ -39,7 +39,8 @@ const SCHEMA: &str = r#"
         license_state  TEXT,                 -- 'armed' | 'sent' | NULL
         license_gen    INTEGER NOT NULL DEFAULT 0,
         license_result TEXT,                 -- slmgr output reported by the client
-        grp            TEXT                  -- free-text group, driver packages can target it
+        grp            TEXT,                 -- free-text group, driver packages can target it
+        notes          TEXT                  -- free text for the admin
     );
 
     -- Windows driver packages (drivers.rs). hwids / groups: newline-separated lists.
@@ -139,6 +140,7 @@ impl Sqlite {
         let _ = c.execute("ALTER TABLE machines ADD COLUMN license_gen INTEGER NOT NULL DEFAULT 0", []);
         let _ = c.execute("ALTER TABLE machines ADD COLUMN license_result TEXT", []);
         let _ = c.execute("ALTER TABLE machines ADD COLUMN grp TEXT", []);
+        let _ = c.execute("ALTER TABLE machines ADD COLUMN notes TEXT", []);
         // iSCSI IQN base, random per server, generated once (first open without it) and kept.
         c.execute("INSERT OR IGNORE INTO config(key,value) VALUES('iqn_base',?1)", [random_iqn_base()]).map_err(e)?;
         Ok(Sqlite { c: Mutex::new(c) })
@@ -242,7 +244,7 @@ impl Db for Sqlite {
         let c = self.c();
         let mut s = c
             .prepare(
-                "SELECT id,mac,ip,hostname,image_id,license_key,license_state,license_gen,license_result,grp
+                "SELECT id,mac,ip,hostname,image_id,license_key,license_state,license_gen,license_result,grp,notes
                  FROM machines ORDER BY hostname",
             )
             .map_err(e)?;
@@ -261,10 +263,32 @@ impl Db for Sqlite {
                     license_gen: r.get(7)?,
                     license_result: r.get(8)?,
                     grp: r.get(9)?,
+                    notes: r.get(10)?,
                 })
             })
             .map_err(e)?;
         rows.collect::<Result<_, _>>().map_err(e)
+    }
+
+    fn update_machine(&self, m: &Machine) -> DbResult<()> {
+        self.c()
+            .execute(
+                "UPDATE machines SET mac=?1, ip=?2, hostname=?3, grp=?4, notes=?5, image_id=?6 WHERE id=?7",
+                params![m.mac, m.ip, m.hostname, m.grp, m.notes, m.image_id, m.id],
+            )
+            .map(|_| ())
+            .map_err(e)
+    }
+
+    fn delete_machine(&self, machine_id: i64) -> DbResult<()> {
+        self.c().execute("DELETE FROM machines WHERE id=?1", [machine_id]).map(|_| ()).map_err(e)
+    }
+
+    fn set_machine_image(&self, machine_id: i64, image_id: Option<i64>) -> DbResult<()> {
+        self.c()
+            .execute("UPDATE machines SET image_id=?1 WHERE id=?2", params![image_id, machine_id])
+            .map(|_| ())
+            .map_err(e)
     }
 
     fn set_license(&self, machine_id: i64, key: Option<&str>) -> DbResult<()> {
@@ -415,6 +439,10 @@ impl Db for Sqlite {
     fn delete_lease(&self, mac: &str) -> DbResult<()> {
         self.c().execute("DELETE FROM leases WHERE mac=?1", [mac]).map(|_| ()).map_err(e)
     }
+
+    fn prune_leases(&self, cutoff: i64) -> DbResult<usize> {
+        self.c().execute("DELETE FROM leases WHERE expires < ?1", [cutoff]).map_err(e)
+    }
 }
 
 #[cfg(test)]
@@ -482,6 +510,23 @@ mod tests {
         assert_eq!((mc.license_state.as_deref(), mc.license_tail.as_deref()), (None, None));
         db.rearm_license(m).unwrap(); // no key → stays without state
         assert_eq!(db.machines().unwrap()[0].license_state, None);
+
+        // Edit / image / delete; the mac stays unique.
+        let m2 = db.add_machine("aa:bb:cc:dd:ee:02", None, Some("PC02")).unwrap();
+        let mut row = db.machines().unwrap().into_iter().find(|x| x.id == m2).unwrap();
+        row.hostname = Some("PC22".into());
+        row.notes = Some("seat 22".into());
+        row.ip = Some("10.0.0.22".into());
+        db.update_machine(&row).unwrap();
+        db.set_machine_image(m2, Some(b)).unwrap();
+        let got = db.machines().unwrap().into_iter().find(|x| x.id == m2).unwrap();
+        assert_eq!((got.hostname.as_deref(), got.notes.as_deref(), got.image_id), (Some("PC22"), Some("seat 22"), Some(b)));
+        db.set_machine_image(m2, None).unwrap();
+        assert_eq!(db.machines().unwrap().into_iter().find(|x| x.id == m2).unwrap().image_id, None);
+        row.mac = "aa:bb:cc:dd:ee:01".into();
+        assert!(db.update_machine(&row).is_err(), "mac already used by PC01");
+        db.delete_machine(m2).unwrap();
+        assert_eq!(db.machines().unwrap().len(), 1);
 
         // Groups + reported hardware + driver packages (a re-upload keeps the targets).
         db.set_machine_group(m, Some("VIP")).unwrap();

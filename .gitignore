@@ -10,6 +10,11 @@ mgmt/ipxe/ipxe-src/src/bin*/
 # Local DB + images during development
 mgmt/bootrom.db*
 mgmt/images/
+# Build output + local runtime — the binary is published via CI Releases, not committed
+mgmt/dist/
+
+# --- local agent / assistant config ---
+.claude/
 # Disk images / VM exports never belong in git
 *.vmdk
 *.vhdx

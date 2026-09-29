@@ -24,6 +24,8 @@ tracing = "0.1.44"   # logging (events → stdout, warnings/errors → stderr)
 tracing-subscriber = "0.3.23"   # log output (RUST_LOG=level)
 ext4-view = "1.0.0"   # read ext4 inside Linux goldens (replaces libguestfs)
 zip = { version = "8.6.0", default-features = false, features = ["deflate"] }   # golden .zip upload (replaces unzip)
+zstd = "0.14.0"   # delta chunks sent compressed to the Windows stage (api/golden-chunk)
+argon2 = { version = "0.5.3", features = ["std"] }   # admin password hashing (auth.rs)
 
 [profile.release]
 strip = true

@@ -1,7 +1,9 @@
 // main.rs — bootrom mgmt app (Rust/axum). One binary, runs on the Linux server.
 // Modules split per the plan: M5 boot, M6 images(+versions), M7 monitor(+wol), M8 machines.
+mod auth;
 mod boot;
 mod db;
+mod devices;
 mod dhcp;
 mod drivers;
 mod images;
@@ -96,10 +98,15 @@ fn migrate_old_layout() {
 
 /// Web admin embedded in the binary — deploy a single file, no static/ directory to ship.
 const INDEX_HTML: &str = include_str!("../static/index.html");
+/// Standalone login/setup page (auth.rs). Served at /login; unauthenticated page requests are redirected here.
+const LOGIN_HTML: &str = include_str!("../static/login.html");
 /// Version (Cargo.toml) — shown on the web + in logs to tell deployed builds apart.
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 async fn index() -> Html<String> {
     Html(INDEX_HTML.replace("__VERSION__", VERSION))
+}
+async fn login_page() -> Html<&'static str> {
+    Html(LOGIN_HTML)
 }
 
 /// Server events (SSE): "ping" on connect + every 5 s (keep-alive) for the sidebar dot — the browser marks
@@ -133,6 +140,7 @@ const PAGE_IMAGES: &str = include_str!("../static/page-images.html");
 const PAGE_NETWORK: &str = include_str!("../static/page-network.html");
 const PAGE_SYSTEM: &str = include_str!("../static/page-system.html");
 const PAGE_DRIVERS: &str = include_str!("../static/page-drivers.html");
+const PAGE_DEVICES: &str = include_str!("../static/page-devices.html");
 async fn ui_page(axum::extract::Path(p): axum::extract::Path<String>) -> Html<&'static str> {
     Html(match p.as_str() {
         "machines" => PAGE_MACHINES,
@@ -140,6 +148,7 @@ async fn ui_page(axum::extract::Path(p): axum::extract::Path<String>) -> Html<&'
         "network" => PAGE_NETWORK,
         "system" => PAGE_SYSTEM,
         "drivers" => PAGE_DRIVERS,
+        "devices" => PAGE_DEVICES,
         _ => "",
     })
 }
@@ -152,8 +161,14 @@ pub struct AppState {
     pub jobs: Mutex<std::collections::HashMap<String, String>>,
     /// Job changes (name, status) → SSE "job" events.
     pub job_tx: tokio::sync::broadcast::Sender<(String, String)>,
+    /// Serializes the shared image-version store (versions.rs): snapshot/rollback/delete/gc must not overlap
+    /// (gc could free a chunk another op just decided to reuse).
+    pub versions_lock: Mutex<()>,
     /// Running network boot listeners (DHCP/TFTP) — dhcp::start() replaces them on config change.
     pub net: Mutex<Vec<tokio::task::JoinHandle<()>>>,
+    /// Bounds concurrent golden-chunk reads (each reads+hashes 4 MB on a blocking thread). Caps the blocking-pool
+    /// / disk cost of a flood of chunk requests from the (public) /api/golden-chunk endpoint.
+    pub chunk_sem: tokio::sync::Semaphore,
 }
 pub type SharedState = Arc<AppState>;
 
@@ -170,6 +185,9 @@ async fn main() {
     init_logging();
     migrate_old_layout();
     info!("data in {}", home().display());
+    if auth::test_mode() {
+        warn!("BOOTROM_TEST=1: admin authentication DISABLED (test mode) — never use this on a real server");
+    }
     let args: Vec<String> = std::env::args().collect();
 
     let skip_preflight = args.iter().any(|a| a == "--skip-preflight");
@@ -217,10 +235,13 @@ async fn main() {
         db: database,
         jobs: Mutex::new(std::collections::HashMap::new()),
         job_tx: tokio::sync::broadcast::channel(64).0,
+        versions_lock: Mutex::new(()),
         net: Mutex::new(Vec::new()),
+        // ponytail: fixed 8 concurrent chunk reads; make it num_cpus if a fast SSD ever wants more parallelism.
+        chunk_sem: tokio::sync::Semaphore::new(8),
     });
 
-    // Built-in DHCP (+ proxy boot server) + TFTP + iSCSI targets. Distro services from older versions
+    // Built-in DHCP server + TFTP + iSCSI targets. Distro services from older versions
     // (dnsmasq, tftpd, targetcli's restore service) → stopped first; stopping the latter clears LIO.
     if preflight::is_root() {
         setup::takeover(&["dnsmasq", "tftpd-hpa", "rtslib-fb-targetctl", "target"]);
@@ -231,9 +252,23 @@ async fn main() {
         // configfs targets + zram are lost on server reboot → re-export / rebuild (background, zram is slow).
         let st = state.clone();
         tokio::task::spawn_blocking(move || publish::restore_targets(&st));
+        // Prune expired DHCP leases every 10 min so a MAC flood can't grow the table without bound.
+        let st = state.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(600)).await;
+                let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs()) as i64;
+                match st.db.prune_leases(now) {
+                    Ok(n) if n > 0 => info!("pruned {n} expired DHCP lease(s)"),
+                    Err(e) => warn!("lease prune: {e}"),
+                    _ => {}
+                }
+            }
+        });
     }
 
     let app = Router::new()
+        .route("/login", get(login_page)) // standalone sign-in page (auth.rs); public
         .route("/", get(index)) // web admin shell (embedded in the binary)
         // One URL per page (F5 / bookmarks keep the page); same shell, JS picks the page from the path.
         .route("/machines", get(index))
@@ -241,6 +276,7 @@ async fn main() {
         .route("/network", get(index))
         .route("/system", get(index))
         .route("/drivers", get(index))
+        .route("/devices", get(index))
         .route("/ui/{page}", get(ui_page)) // fragment tab on-demand
         .route("/api/events", get(events)) // SSE: server liveness (sidebar dot) + image job status
         .route("/boot.ipxe", get(boot::render)) // M5
@@ -248,10 +284,14 @@ async fn main() {
         .merge(images::routes()) // M6
         .merge(drivers::routes()) // Windows driver packages
         .merge(machines::routes()) // M8
+        .merge(devices::routes()) // Devices page: edit / bulk / CSV / detail
         .merge(monitor::routes()) // M7
+        .merge(auth::routes()) // admin login
         // Serve boot assets over HTTP (kernel/initrd much faster than TFTP).
         // /tftp/... -> <home>/tftp/... (e.g. http://SERVER/tftp/broom-stage/vmlinuz)
         .nest_service("/tftp", ServeDir::new(tftp_dir()))
+        // Guard EVERYTHING: Host check + a session for non-public routes (auth.rs::is_public lists the open ones).
+        .layer(axum::middleware::from_fn_with_state(state.clone(), auth::guard))
         .with_state(state);
 
     let addr = format!("0.0.0.0:{port}");
