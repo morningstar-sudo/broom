@@ -8,8 +8,9 @@
 //   p1 ESP BROOMEFI, p2 NTFS BROOMWIN\broom\: golden.vhdx ← base.vhdx (golden specialized on THIS
 //   machine, created once) ← child.vhdx (reset every boot). Hash mismatch → re-download golden over HTTP.
 //   First boot (no base yet): child = base-template (parent golden) → Windows specialize/OOBE/first logon
-//   write into it → broom-done.ps1 writes base.ok + reboots → stage renames child→base, patches the GUID
-//   into child-template (parent base) → from then on each boot only copies child-local → child (instant).
+//   write into it → broom-done.ps1 writes base.ok + reboots (base mode on the image: waits for a technician's
+//   restart instead) → stage renames child→base → from then on each boot builds child = child-template with the
+//   GUID of base patched in (instant; the small templates are checked against the server's sha256 every boot).
 //   Done → efibootmgr BootNext "Broom Windows" → reboot → Windows boots the child from the SSD.
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
@@ -77,31 +78,56 @@ getfile(){
   if [ -x /broom/bin/wget ]; then /broom/bin/wget -q --show-progress --progress=bar:force:noscroll "$@"
   else wget "$@"; fi
 }
-NAME=""; HASH=""; SRV=""; HOST=""; LIC=""; MAC=""
+NAME=""; HASH=""; SRV=""; HOST=""; LIC=""; MAC=""; REG=""; BASE=""; STRICT=""
 for a in $(cat /proc/cmdline); do
   case "$a" in broom.name=*) NAME=${a#*=};; broom.hash=*) HASH=${a#*=};; broom.srv=*) SRV=${a#*=};;
-    broom.host=*) HOST=${a#*=};; broom.lic=*) LIC=${a#*=};; BOOTIF=01-*) MAC=$(echo "${a#BOOTIF=01-}" | tr - :);; esac
+    broom.host=*) HOST=${a#*=};; broom.lic=*) LIC=${a#*=};; BOOTIF=01-*) MAC=$(echo "${a#BOOTIF=01-}" | tr - :);;
+    broom.reg=*) REG=${a#*=};; broom.base=*) BASE=${a#*=};; broom.strict=*) STRICT=${a#*=};; esac
 done
 [ -n "$NAME" ] && [ -n "$HASH" ] && [ -n "$SRV" ] || die "missing broom.name/hash/srv on cmdline"
 for m in ntfs3 vfat nls_cp437 nls_iso8859_1 nls_utf8 efivarfs; do modprobe $m 2>/dev/null; done
 udevadm settle 2>/dev/null
 
-# Local SSD: not removable, size > 0.
+# Local disk: internal only — not removable, not on USB (an external USB HDD/SSD often reports removable=0), size > 0.
 part(){ case "$1" in *[0-9]) echo "/dev/${1}p$2";; *) echo "/dev/$1$2";; esac; }
 lbl(){ blkid -s LABEL -o value "$1" 2>/dev/null; }
+SYSB=/sys/block; CON=/dev/console
 disks=""
-for d in /sys/block/*; do
+for d in $SYSB/*; do
   n=${d##*/}
   case "$n" in loop*|ram*|dm-*|sr*|nbd*|md*|fd*|zram*) continue;; esac
   [ "$(cat $d/removable 2>/dev/null)" = 1 ] && continue
+  case "$(readlink -f $d)" in */usb*) continue;; esac
   [ "$(cat $d/size 2>/dev/null || echo 0)" -gt 0 ] || continue
   disks="$disks $n"
 done
-disk=""
+# Never guess which disk to wipe: an unknown machine (not on the Machines page — anyone can PXE-boot) or one with
+# several disks asks on its screen. Prints the disk typed, nothing for Enter / anything else.
+ask_disk(){
+  echo "broom: no Broom disk on this machine yet - one disk must be ERASED for Windows." > $CON
+  [ "$REG" = 1 ] || echo "broom: this machine is NOT registered on the server (Machines page)." > $CON
+  for n in "$@"; do
+    printf 'broom:   %-10s %6s GB  %s\n' "$n" "$(( $(cat $SYSB/$n/size) / 2097152 ))" "$(cat $SYSB/$n/device/model 2>/dev/null)" > $CON
+  done
+  printf 'broom: type the disk to ERASE (e.g. %s), or press Enter to reboot without touching any disk: ' "$1" > $CON
+  read -r ans < $CON
+  for n in "$@"; do [ "$ans" = "$n" ] && { echo "$n"; return; }; done
+}
+disk=""; NEWDISK=""
 for n in $disks; do [ "$(lbl $(part $n 2))" = BROOMWIN ] && { disk=$n; break; }; done
 if [ -z "$disk" ]; then
-  set -- $disks; disk=$1
-  [ -n "$disk" ] || die "no local SSD found"
+  set -- $disks
+  [ $# -gt 0 ] || die "no local disk found"
+  if [ "$REG" = 1 ] && [ $# -eq 1 ]; then
+    disk=$1
+  else
+    disk=$(ask_disk "$@")
+    [ -n "$disk" ] || restart "no disk chosen -> nothing was touched"
+  fi
+  NEWDISK=1
+fi
+# end disk choice
+if [ -n "$NEWDISK" ]; then
   log "partitioning /dev/$disk for the first time (WIPES the disk)"
   printf 'label: gpt\nsize=512MiB, type=U, name=BROOMEFI\ntype=EBD0A0A2-B9E5-4433-87C0-68B6B72699C7, name=BROOMWIN, attrs="GUID:63"\n' \
     | sfdisk -q --wipe always --wipe-partitions always /dev/$disk >/dev/null || die "sfdisk /dev/$disk"
@@ -134,7 +160,7 @@ mkdir -p $B
 # line per chunk (sha256 | zero). A new VHDX block early in the disk shifts later ones → those chunks exist in the
 # old copy at another offset ("moved"): phase 1 saves every moved chunk (sha256-checked) to a spare dir BEFORE
 # anything is overwritten; phase 2 writes moved chunks from there, downloads the missing ones, zeroes zero ones.
-# Unchanged chunks are never touched → disk IO ≈ 2×moved + downloaded instead of copying the whole golden.
+# Unchanged chunks are only read + checked → disk IO ≈ size + 2×moved + downloaded instead of a whole download.
 # A moved chunk that fails its check is downloaded instead; interrupted → the next run re-plans from the manifests
 # and the checks catch overwritten sources. Returns 1 → the caller does a full download.
 # DW workers in parallel (every DW-th chunk each, own temp file, disjoint regions): keeps the link busy while
@@ -197,7 +223,9 @@ delta(){
       else
         T=/run/broom-chunk.$1
         case "$a" in
-          s) continue;;
+          # Same position: still verified (a 4 MB read) — a chunk gone bad on the SSD would otherwise survive every
+          # update, since the plan only compares manifests.
+          s) have $i $h || { dl $i $h || { touch $F; break; }; put $i; };;
           c) if [ -f $SP/$k ]; then T=$SP/$k; else dl $i $h || { touch $F; break; }; fi; put $i;;
           d) have $i $h || { dl $i $h || { touch $F; break; }; put $i; };;
           z) zero $i;;
@@ -206,7 +234,7 @@ delta(){
       echo >> $P.done
     done
     rm -f /run/broom-chunk.$1 /run/broom-chunk.$1.z; }
-  tot=$((2 * c + d + z))
+  tot=$((2 * c + s + d + z))
   rm -f $F; : > $P.done; : > $P.dl; : > $P.dlz
   t0=$(date +%s); rp=""
   if [ $tot -gt 0 ]; then
@@ -310,6 +338,25 @@ if [ "$(cat $B/golden.sha256 2>/dev/null)" != "$HASH" ]; then
   mv $D/* $B/ && rmdir $D && sync && echo "$HASH" > $B/golden.sha256 && sync
 fi
 
+# 1b. The small boot files (EFI bundle, VHDX templates) are checked against the server's sha256 on EVERY boot: the
+# guest is a local admin and could swap them on BROOMWIN (e.g. a child template with its own data) to outlive the
+# reset. Wrong or missing → downloaded again.
+configure_networking
+if wget -q -O /run/broom-files.sha256 http://$SRV/tftp/broom-win/$NAME/files.sha256 2>/dev/null && [ -s /run/broom-files.sha256 ]; then
+  while read -r h f; do
+    case "$f" in efi.tar.gz|child-template.vhdx|child-template.off|base-template.vhdx) ;; *) continue;; esac
+    [ "$(sha256sum $B/$f 2>/dev/null | cut -c1-64)" = "$h" ] && continue
+    log "$f differs from the server's -> downloading it again"
+    if wget -q -O $B/$f.tmp http://$SRV/tftp/broom-win/$NAME/$f && [ "$(sha256sum $B/$f.tmp | cut -c1-64)" = "$h" ]; then
+      mv $B/$f.tmp $B/$f
+    else
+      rm -f $B/$f.tmp; restart "could not get a good $f (publish running?) -> retrying"
+    fi
+  done < /run/broom-files.sha256
+else
+  log "no files.sha256 on the server for $NAME (published by an older version) -> Publish again to check the boot files"
+fi
+
 # DataWriteGuid of the current header (highest seq) as {..}; empty if the log was not replayed.
 vhdx_guid(){
   f=$1; best=0; g=""
@@ -341,8 +388,6 @@ if [ -f first.pending ]; then
     g=$(vhdx_guid child.vhdx)
     if [ -n "$g" ]; then
       mv child.vhdx base.vhdx
-      cp child-template.vhdx child-local.vhdx
-      patch16 child-local.vhdx "$g" "$(cat child-template.off)"
       # Name that broom-done set inside base = host.txt of the boot that created base.
       cp host.txt base.host 2>/dev/null
       cp lic.txt base.lic 2>/dev/null
@@ -370,6 +415,8 @@ fi
 # License key (Machines page): LIC = generation from the server (a counter, never the key). Set / re-armed →
 # rebuild base so broom-done fetches the key (once) while base is built. srv.txt = where broom-done asks.
 echo "$SRV" > srv.txt
+# Base mode (per image, Images page): broom-done waits for a technician instead of committing base right away.
+if [ "$BASE" = 1 ]; then echo 1 > basemode.txt; else rm -f basemode.txt; fi
 if [ -n "$LIC" ]; then
   echo "$LIC" > lic.txt
   if [ -f base.vhdx ] && [ "$(cat base.lic 2>/dev/null)" != "$LIC" ]; then
@@ -399,12 +446,15 @@ if [ -n "$MAC" ] && wget -q -T 10 -O /run/broom-drv.txt --post-file=/run/broom-h
     [ -n "$n" ] || continue
     if [ "$(cat drivers/$n.sha256 2>/dev/null)" != "$h" ]; then
       log "driver $n: downloading"
-      rm -rf drivers/$n drivers/$n.sha256 drivers/$n.tmp; mkdir -p drivers/$n.tmp
-      if wget -q -O - "http://$SRV/tftp/broom-drivers/$n.tar.gz" | tar -xzf - -C drivers/$n.tmp; then
+      rm -rf drivers/$n drivers/$n.sha256 drivers/$n.tmp drivers/$n.tar.gz; mkdir -p drivers/$n.tmp
+      # Checked against the server's sha256 BEFORE extracting: broom-done pnputil-installs these into base.
+      if wget -q -O drivers/$n.tar.gz "http://$SRV/tftp/broom-drivers/$n.tar.gz" \
+         && [ "$(sha256sum drivers/$n.tar.gz | cut -c1-64)" = "$h" ] && tar -xzf drivers/$n.tar.gz -C drivers/$n.tmp; then
         mv drivers/$n.tmp drivers/$n && echo "$h" > drivers/$n.sha256
       else
-        rm -rf drivers/$n.tmp; log "driver $n: download failed (retried next boot)"
+        rm -rf drivers/$n.tmp; log "driver $n: download failed or sha256 mismatch (retried next boot)"
       fi
+      rm -f drivers/$n.tar.gz
     fi
     [ -f drivers/$n.sha256 ] && echo "$n $h" >> /run/broom-drv-have.txt
   done < /run/broom-drv.txt
@@ -424,9 +474,16 @@ else
   log "drivers: server did not answer -> keeping the current ones"
 fi
 # Last session's writes: delete first → freed (and TRIMmed, discard mount) before the fresh child is written.
-rm -f child.vhdx
-if [ -f base.vhdx ] && [ -f child-local.vhdx ]; then
-  cp child-local.vhdx child.vhdx; MODE=reset
+# The child is rebuilt from the (checked) template every boot, with base's DataWriteGuid as its parent link — base is
+# only ever opened read-only, so that GUID is still the one it had when committed. (child-local.vhdx: older layout.)
+rm -f child.vhdx child-local.vhdx
+g=""; [ -f base.vhdx ] && g=$(vhdx_guid base.vhdx)
+if [ -f base.vhdx ] && [ -z "$g" ]; then
+  log "base.vhdx header unreadable -> rebuilding base"; rm -f base.vhdx base.host base.lic base.drv
+fi
+if [ -n "$g" ]; then
+  cp child-template.vhdx child.vhdx && patch16 child.vhdx "$g" "$(cat child-template.off)" || die "build child.vhdx"
+  MODE=reset
 else
   cp base-template.vhdx child.vhdx; touch first.pending; MODE="first boot (specialize, a few minutes)"
 fi
@@ -480,7 +537,15 @@ for x in $order; do
   e="${e:+$e,}$x"
 done
 IFS=$old
-want=$(echo "$pxe,$b,$n,$c,$d,$e" | sed 's/,,*/,/g; s/^,//; s/,$//')
+if [ "$STRICT" = 1 ]; then
+  # Strict reset (Network page): no Windows entry of this SSD in BootOrder at all — Windows is reached only through
+  # this stage's BootNext. strict.txt tells the BroomBootOrder task in Windows to keep them out (+ drop the loader).
+  want=$(echo "$pxe,$b,$d,$e" | sed 's/,,*/,/g; s/^,//; s/,$//')
+  echo "$n,$c" | sed 's/,,*/,/g; s/,$//' > $B/strict.txt
+else
+  want=$(echo "$pxe,$b,$n,$c,$d,$e" | sed 's/,,*/,/g; s/^,//; s/,$//')
+  rm -f $B/strict.txt
+fi
 if [ "$want" != "$order" ]; then
   efibootmgr -q -o "$want" && log "BootOrder forced [$want]"
 fi
@@ -501,7 +566,6 @@ restart "-> Windows ($MODE)"
 /// Kernel + script + hook unchanged → keep the previous build (mkinitramfs MODULES=most takes about a minute).
 /// Returns true if freshly built.
 pub fn build_stage() -> Result<bool, String> {
-    use std::hash::{Hash, Hasher};
     let kv = std::fs::read_to_string("/proc/sys/kernel/osrelease").map_err(|e| format!("kernel release: {e}"))?;
     let kv = kv.trim().to_string();
     run("modinfo", &["ntfs3"]).map_err(|_| format!("server kernel {kv} has no ntfs3 module — the stage must write NTFS"))?;
@@ -511,11 +575,7 @@ pub fn build_stage() -> Result<bool, String> {
     let hook = STAGE_HOOK.replace("__TOOLS__", STAGE_TOOLS);
     // Where each tool resolves on the server is part of the key: a tool installed later (e.g. wget) → rebuilt.
     let tools = run("sh", &["-c", &format!("for b in {STAGE_TOOLS}; do command -v $b; done; true")]).unwrap_or_default();
-    let key = {
-        let mut h = std::collections::hash_map::DefaultHasher::new();
-        (&kv, &initramfs_conf, &hook, STAGE_SCRIPT, &tools).hash(&mut h);
-        format!("{:016x}", h.finish())
-    };
+    let key = stable_key(&[kv.as_str(), initramfs_conf.as_str(), hook.as_str(), STAGE_SCRIPT, tools.as_str()]);
     let sd = stage_dir();
     let key_file = format!("{sd}/stage.key");
     let have = |f: &str| Path::new(&format!("{sd}/{f}")).exists();
@@ -648,7 +708,7 @@ pub fn publish(st: &SharedState, id: i64, name: &str, steps: &mut crate::publish
 
     // golden.vhdx gets a new GUID on every convert → new hash → every client re-downloads. Golden still newer than
     // image.img → keep it, only rebuild stage + boot_script (Publish after changing the stage = cheap).
-    // ponytail: changing the extract/registry logic needs a rebuild → upload again or `touch image.img`.
+    // Note: changing the extract/registry logic needs a rebuild → upload again or `touch image.img`.
     let fresh = golden_fresh(&raw, &out);
     let drivers = if fresh {
         "kept (golden already built from image.img + the current embedded logic)".to_string()
@@ -670,6 +730,13 @@ pub fn publish(st: &SharedState, id: i64, name: &str, steps: &mut crate::publish
             h
         }
     };
+    // The stage checks these small files against this list on every boot (a guest could swap them on the SSD).
+    let mut sums = String::new();
+    for f in ["efi.tar.gz", "child-template.vhdx", "child-template.off", "base-template.vhdx"] {
+        let h = crate::publish::file_hash(&format!("{out}/{f}")).ok_or(format!("sha256 of {f} failed"))?;
+        sums.push_str(&format!("{h}  {f}\n"));
+    }
+    std::fs::write(format!("{out}/files.sha256"), sums).map_err(|e| format!("files.sha256: {e}"))?;
     steps.go("initrd stage");
     let stage = if build_stage()? { "rebuilt" } else { "kept" };
     let ip = st.db.get_config("dhcp_server_ip", "");
@@ -677,14 +744,30 @@ pub fn publish(st: &SharedState, id: i64, name: &str, steps: &mut crate::publish
         return Err("dhcp_server_ip is empty — run `setup` first".into());
     }
     let bs = format!(
-        "kernel http://{ip}/tftp/broom-stage/vmlinuz initrd=stage.img ip=dhcp BOOTIF=01-${{mac:hexhyp}} broom.name={name} broom.hash={hash} broom.srv={ip} broom.host=${{broom-host}} broom.lic=${{broom-lic}}\n\
+        "kernel http://{ip}/tftp/broom-stage/vmlinuz initrd=stage.img ip=dhcp BOOTIF=01-${{mac:hexhyp}} broom.name={name} broom.hash={hash} broom.srv={ip} broom.host=${{broom-host}} broom.lic=${{broom-lic}} broom.reg=${{broom-reg}} broom.base=${{broom-base}} broom.strict=${{broom-strict}}\n\
          initrd http://{ip}/tftp/broom-stage/stage.img\n\
          boot"
     );
+    let before = st.db.image(id)?;
     st.db.set_published(id, &bs, &hash)?;
+    // A new golden → every machine booting it rebuilds its base, which needs the license key once more.
+    if let Some(img) = before.filter(|i| i.hash.as_deref() != Some(hash.as_str())) {
+        rearm_for_image(st, &img);
+    }
     Ok(format!(
         "Publish OK — Windows '{name}': golden.vhdx + EFI + child templates; stage {stage}; boot-start disk drivers: {drivers}"
     ))
+}
+
+/// License keys already handed out ('sent') go back to 'armed' for the machines that boot `img` by default (their own
+/// image, or none set and `img` is the global default): their base is rebuilt on the next boot and fetches the key once.
+fn rearm_for_image(st: &SharedState, img: &crate::db::Image) {
+    for m in st.db.machines().unwrap_or_default() {
+        let boots_it = m.image_id == Some(img.id) || (m.image_id.is_none() && img.is_default);
+        if boots_it && st.db.rearm_quiet(m.id).unwrap_or(false) {
+            tracing::info!("license of {} armed again (new golden {} → base rebuilt)", m.hostname.as_deref().unwrap_or(&m.mac), img.name);
+        }
+    }
 }
 
 /// All 5 output files exist AND golden.vhdx is newer than image.img (not re-uploaded since the last build).
@@ -700,10 +783,18 @@ fn golden_fresh(raw: &str, out: &str) -> bool {
 /// that code → key changes → the next publish rebuilds the golden BY ITSELF (no manual `touch image.img`; an old
 /// golden keeps old scripts = out of sync with the new stage, e.g. old broom-done couldn't write base.ok → OOBE loop).
 fn golden_key() -> String {
-    use std::hash::{Hash, Hasher};
-    let mut h = std::collections::hash_map::DefaultHasher::new();
-    (BROOM_DONE, BROOM_BOOTORDER, BOOT_STORAGE, "skip-oobe-v1").hash(&mut h);
-    format!("{:016x}", h.finish())
+    stable_key(&[BROOM_DONE, BROOM_BOOTORDER, &BOOT_STORAGE.join(","), "skip-oobe-v1"])
+}
+
+/// Hash of the parts, stable across Rust releases (std's DefaultHasher is not: a toolchain update would rebuild every
+/// golden + stage, and every client would re-download and rebuild its base). Each part is length-prefixed.
+fn stable_key(parts: &[&str]) -> String {
+    let mut h = blake3::Hasher::new();
+    for p in parts {
+        h.update(&(p.len() as u64).to_le_bytes());
+        h.update(p.as_bytes());
+    }
+    h.finalize().to_hex()[..16].to_string()
 }
 
 /// image.img (raw whole VM disk) → golden.vhdx + efi.tar.gz + 2 empty child VHDX. Returns the enabled drivers.
@@ -842,7 +933,7 @@ const BOOT_STORAGE: &[&str] = &[
 
 /// Edit the SYSTEM hive offline (hivexregedit): Start=0 + StartOverride\0=0 for drivers in
 /// BOOT_STORAGE that EXIST in the image (no empty service keys created). Returns the enabled list.
-/// ponytail: ControlSet001 only (a sysprepped image always uses set 1).
+/// ControlSet001 only (a sysprepped image always uses set 1).
 fn enable_boot_storage(mnt: &str) -> Result<String, String> {
     let hive = format!("{mnt}/Windows/System32/config/SYSTEM");
     if !Path::new(&hive).exists() {
@@ -1024,8 +1115,9 @@ Write-Host '>>> Sysprep... the VM will POWER OFF. Then upload the .vmdk file on 
 & "$env:SystemRoot\System32\Sysprep\sysprep.exe" /generalize /oobe /shutdown /unattend:"$B\unattend.xml"
 "#;
 
-/// First logon (when base.vhdx is created on each machine): write base.ok to BROOMWIN, then BASE MODE — a popup tells
-/// the technician to set up apps (FACEIT AC...) and restart; that restart → the stage commits base. BROOMWIN has no
+/// First logon (when base.vhdx is created on each machine): write base.ok to BROOMWIN, then restart at once → the stage
+/// commits base. With base mode on for the image (broom\basemode.txt from the stage): a popup tells the technician to
+/// set up apps (FACEIT AC...) and restart; that restart → the stage commits base. BROOMWIN has no
 /// drive letter (GPT bit 63, set by the stage) → write directly via the volume path `\\?\Volume{..}\`. ASCII only
 /// (Set-Content -Encoding ascii).
 const BROOM_DONE: &str = r#"$v = Get-Volume -FileSystemLabel BROOMWIN -ErrorAction SilentlyContinue
@@ -1098,10 +1190,17 @@ if ([IO.File]::Exists($hook)) {
 # (the old version picked a letter via Test-Path -> clashed with an empty CD drive -> write failed -> OOBE loop every boot).
 $f = $v.Path + 'broom\base.ok'
 try { [IO.File]::WriteAllText($f, 'ok') } catch { }
-# BASE MODE: base.ok is written, nothing restarts by itself. The technician sets up what must survive the reset on
-# THIS machine (e.g. FACEIT AC: open it, it wants one restart through its own RESTART button), then restarts -> that
-# restart commits base. Nobody there -> the next restart / power-off commits it.
 if (-not [IO.File]::Exists($f)) { step 'could not write base.ok on BROOMWIN -> base is rebuilt next boot'; exit }
+# Default (base mode off for this image): restart NOW -> the stage commits base before anyone can use the machine, so
+# a guest's session can never become the base.
+if (-not [IO.File]::Exists($v.Path + 'broom\basemode.txt')) {
+  step 'base ready - restarting to save it'
+  Restart-Computer -Force
+  exit
+}
+# BASE MODE (ticked on the image): nothing restarts by itself. The technician sets up what must survive the reset on
+# THIS machine (e.g. FACEIT AC: open it, it wants one restart through its own RESTART button), then restarts -> that
+# restart commits base. Nobody there -> the next restart / power-off commits it, whoever used the machine meanwhile.
 step 'BASE MODE: set up apps now (e.g. open FACEIT AC), then RESTART - that restart saves base for every boot'
 $msg = "BASE MODE - this machine is building its base.`n`n" +
   "Everything done now is KEPT on this machine after every reset.`n`n" +
@@ -1119,6 +1218,30 @@ try { (New-Object -ComObject WScript.Shell).Popup($msg, 0, 'Broom - BASE MODE', 
 /// later) are kept, after. Writes NVRAM only when different. ASCII only.
 const BROOM_BOOTORDER: &str = r#"$v = Get-Volume -FileSystemLabel BROOMWIN -ErrorAction SilentlyContinue
 if (-not $v) { exit }
+# Tell the server this Windows boot happened (once per boot; retried every 5 minutes until it answers). The server
+# flags the machine "not reset" when no PXE boot came just before = Windows started from the SSD without the stage.
+$bootId = (Get-CimInstance Win32_OperatingSystem).LastBootUpTime.ToString('o')
+$mark = "$env:SystemRoot\Temp\broom-booted.txt"
+$srvf = $v.Path + 'broom\srv.txt'
+if ((-not (Test-Path $mark) -or (Get-Content $mark -Raw).Trim() -ne $bootId) -and [IO.File]::Exists($srvf)) {
+  try {
+    Invoke-WebRequest -UseBasicParsing -TimeoutSec 5 -Method Post -Uri ('http://' + [IO.File]::ReadAllText($srvf).Trim() + '/api/booted') | Out-Null
+    Set-Content -Encoding ascii $mark $bootId
+  } catch { }
+}
+# Strict reset (stage wrote strict.txt = the SSD's Windows entries): remove the Windows boot loader from the ESP once
+# Windows is up - the stage puts it back on every PXE boot, so without the stage (cable out, F12, BootOrder edited)
+# the SSD cannot start Windows at all.
+$sf = $v.Path + 'broom\strict.txt'
+$strict = [IO.File]::Exists($sf)
+if ($strict) {
+  $L = (69..90 | ForEach-Object { [char]$_ } | Where-Object { -not (Test-Path "${_}:\") } | Select-Object -Last 1)
+  if ($L) {
+    & mountvol "${L}:" /s | Out-Null
+    if (Test-Path "${L}:\EFI\Microsoft") { Remove-Item "${L}:\EFI\Microsoft" -Recurse -Force -ErrorAction SilentlyContinue }
+    & mountvol "${L}:" /d | Out-Null
+  }
+}
 $of = $v.Path + 'broom\bootorder.txt'
 if (-not [IO.File]::Exists($of)) { exit }
 Add-Type -TypeDefinition @'
@@ -1168,6 +1291,13 @@ foreach ($x in ([IO.File]::ReadAllText($of).Trim() -split ',')) {
 }
 if ($want.Count -eq 0) { exit }
 foreach ($n in $now) { if ($want -notcontains $n) { $want += $n } }
+# Strict: the SSD's Windows entries stay OUT (Windows re-adds "Windows Boot Manager" on every boot).
+if ($strict) {
+  $drop = @()
+  foreach ($x in ([IO.File]::ReadAllText($sf).Trim() -split ',')) { if ($x -match '^[0-9A-Fa-f]{4}$') { $drop += [Convert]::ToUInt16($x, 16) } }
+  $want = @($want | Where-Object { $drop -notcontains $_ })
+  if ($want.Count -eq 0) { exit }
+}
 if (($want -join ',') -ne ($now -join ',')) {
   $b = New-Object byte[] ($want.Count * 2)
   for ($i = 0; $i -lt $want.Count; $i++) { [BitConverter]::GetBytes([uint16]$want[$i]).CopyTo($b, $i * 2) }
@@ -1267,6 +1397,44 @@ mod tests {
         let _ = std::fs::remove_file(child);
     }
 
+    /// Stage disk choice (cut from STAGE_SCRIPT, fake /sys/block): a registered machine with ONE internal disk is
+    /// partitioned by itself; USB disks never count; anything else asks — Enter / an unknown name = reboot untouched;
+    /// an existing BROOMWIN is reused without asking.
+    #[test]
+    fn stage_disk_choice() {
+        let s = super::STAGE_SCRIPT;
+        let part = &s[s.find("part(){").unwrap()..s.find("# end disk choice").unwrap()];
+        let run = |name: &str, disks: &[(&str, bool)], reg: &str, answer: &str, broomwin: &str| {
+            let d = std::env::temp_dir().join(format!("broom_t_disk_{name}"));
+            let _ = std::fs::remove_dir_all(&d);
+            std::fs::create_dir_all(d.join("block")).unwrap();
+            for (n, usb) in disks {
+                let dev = d.join(if *usb { "devices/pci0/usb1/1-1" } else { "devices/pci0/ata1" }).join(n);
+                std::fs::create_dir_all(dev.join("device")).unwrap();
+                std::fs::write(dev.join("removable"), "0\n").unwrap(); // USB disks often say 0 too
+                std::fs::write(dev.join("size"), "500118192\n").unwrap();
+                std::fs::write(dev.join("device/model"), "TestDisk\n").unwrap();
+                std::os::unix::fs::symlink(&dev, d.join("block").join(n)).unwrap();
+            }
+            std::fs::write(d.join("answer"), format!("{answer}\n")).unwrap();
+            let body = part
+                .replace("lbl(){ blkid -s LABEL -o value \"$1\" 2>/dev/null; }", &format!("lbl(){{ [ \"$1\" = \"/dev/{broomwin}2\" ] && echo BROOMWIN; }}"))
+                .replace("SYSB=/sys/block; CON=/dev/console", &format!("SYSB={}/block; CON=/dev/null", d.display()))
+                .replace("read -r ans < $CON", &format!("read -r ans < {}/answer", d.display()));
+            let sh = format!("REG={reg}\nlog(){{ :; }}; die(){{ echo DIE; exit; }}; restart(){{ echo RESTART; exit; }}\n{body}\necho \"DISK $disk $NEWDISK\"");
+            let o = stage_sh().args(["-c", &sh]).output().unwrap();
+            let _ = std::fs::remove_dir_all(&d);
+            String::from_utf8_lossy(&o.stdout).trim().to_string()
+        };
+        assert_eq!(run("a", &[("sda", false), ("sdc", true)], "1", "", "-"), "DISK sda 1", "registered, one internal disk (USB ignored)");
+        assert_eq!(run("b", &[("sda", false)], "", "", "-"), "RESTART", "unknown machine + Enter → untouched");
+        assert_eq!(run("c", &[("sda", false)], "", "sda", "-"), "DISK sda 1", "unknown machine, typed");
+        assert_eq!(run("d", &[("sda", false), ("sdb", false)], "1", "sdb", "-"), "DISK sdb 1", "two disks → asked");
+        assert_eq!(run("e", &[("sda", false), ("sdb", false)], "1", "sdz", "-"), "RESTART", "not one of the listed disks");
+        assert_eq!(run("f", &[("sda", false), ("sdb", false)], "", "", "sdb"), "DISK sdb", "existing BROOMWIN reused, no question");
+        assert_eq!(run("g", &[("sdc", true)], "1", "", "-"), "DIE", "only a USB disk → no local disk");
+    }
+
     /// Stage vs server golden.sha256 before downloading (cut from STAGE_SCRIPT, wget mocked by a list of answers,
     /// "" = no file): same hash → go on; missing → wait; other hash → reboot; missing for good → die.
     #[test]
@@ -1333,11 +1501,12 @@ mod tests {
         assert!(std::process::Command::new("tar").args(["-czf", "../nv.tar.gz", "-C", ".", "nv.inf"]).current_dir(d.join("pkgs/src")).status().unwrap().success());
         let part = s[s.find("# Drivers (Drivers page)").unwrap()..s.find("# Last session's writes").unwrap()]
             .replace("/run/", &format!("{}/", run.display()));
-        // wget mock: POST → answer.txt (missing = server down); GET → pkgs/<file> on stdout.
+        let nv = crate::publish::file_hash(&d.join("pkgs/nv.tar.gz").to_string_lossy()).unwrap();
+        // wget mock: POST → answer.txt (missing = server down); GET → pkgs/<file> into -O.
         let mock = format!(
             "cd {}; SRV=x; MAC=aa:bb:cc:dd:ee:01\nlog(){{ echo \"$*\" >> {}/log; }}; configure_networking(){{ :; }}\n\
              wget(){{ o=\"\"; p=\"\"; u=\"\"; while [ $# -gt 0 ]; do case \"$1\" in -O) o=$2; shift;; -T) shift;; --post-file=*) p=1;; -q) ;; *) u=$1;; esac; shift; done\n\
-               if [ -n \"$p\" ]; then [ -f {d}/answer.txt ] && cp {d}/answer.txt \"$o\"; else cat {d}/pkgs/${{u##*/}}; fi; }}\n{part}",
+               if [ -n \"$p\" ]; then [ -f {d}/answer.txt ] && cp {d}/answer.txt \"$o\"; else cat {d}/pkgs/${{u##*/}} > \"$o\"; fi; }}\n{part}",
             b.display(),
             d.display(),
             d = d.display()
@@ -1361,14 +1530,17 @@ mod tests {
             }
             (rebuilt, b.join("drivers/nv/nv.inf").exists())
         };
+        let ans = format!("nv {nv}\n");
         assert_eq!(step(Some("")), (false, false), "no packages: an old base stays");
-        assert_eq!(step(Some("nv s1\n")), (true, true), "new package → downloaded + base rebuilt");
-        assert_eq!(step(Some("nv s1\n")), (false, true), "unchanged → nothing to do");
+        assert_eq!(step(Some(&ans)), (true, true), "new package → downloaded + base rebuilt");
+        assert!(!b.join("drivers/nv.tar.gz").exists(), "archive removed after extracting");
+        assert_eq!(step(Some(&ans)), (false, true), "unchanged → nothing to do");
         assert_eq!(step(None), (false, true), "server down → keep");
         assert_eq!(step(Some("")), (true, false), "package gone → removed + rebuilt");
         assert_eq!(step(Some("bad s2\n")), (false, false), "download fails → not counted, retried next boot");
+        assert_eq!(step(Some("nv 0000\n")), (false, false), "sha256 mismatch → not extracted, retried next boot");
         let log = std::fs::read_to_string(d.join("log")).unwrap();
-        assert!(log.contains("driver bad: download failed"), "{log}");
+        assert!(log.contains("driver bad: download failed") && log.contains("driver nv: download failed or sha256 mismatch"), "{log}");
         let _ = std::fs::remove_dir_all(&d);
     }
 
@@ -1384,30 +1556,34 @@ mod tests {
                  Boot0004* UEFI: PXE IPv6 Intel(R) I219-V\tPciRoot(0x0)/Pci(0x1f,0x6)/MAC(001122334455,0)/IPv6(0)\n\
                  Boot0005* EFI Network 1\tVenHw(1234)\n\
                  Boot0007* Broom Windows\tHD(1,GPT,bbbb)/File(\\EFI\\Microsoft\\Boot\\bootmgfw.efi)\n";
-        let run = |current: &str| {
-            let d = std::env::temp_dir().join(format!("broom_t_order_{}", if current.is_empty() { "none" } else { current }));
+        let run = |current: &str, strict: &str| {
+            let d = std::env::temp_dir().join(format!("broom_t_order_{}_{strict}", if current.is_empty() { "none" } else { current }));
             std::fs::create_dir_all(&d).unwrap();
             std::fs::write(d.join("v.txt"), v).unwrap();
             let plain: String = v.lines().map(|l| l.split('\t').next().unwrap().to_string() + "\n").collect();
             let head = if current.is_empty() { String::new() } else { format!("BootCurrent: {current}\n") };
             std::fs::write(d.join("plain.txt"), format!("{head}BootOrder: 0000,0004,0003,0007,0001,0005\n{plain}")).unwrap();
             let sh = format!(
-                "cd {}; B=.; n=0007\nlog(){{ echo \"$*\" >> log; }}\n\
+                "cd {}; B=.; n=0007; STRICT={strict}\nlog(){{ echo \"$*\" >> log; }}\n\
                  efibootmgr(){{ case \"$1\" in -v) cat v.txt;; -q) echo \"$3\" > set.txt;; *) cat plain.txt;; esac; }}\n{part}",
                 d.display()
             );
             assert!(stage_sh().args(["-c", &sh]).status().unwrap().success());
             let rd = |f: &str| std::fs::read_to_string(d.join(f)).unwrap_or_default().trim().to_string();
-            let out = (rd("set.txt"), rd("bootorder.txt"), rd("log"));
+            let out = (rd("set.txt"), rd("bootorder.txt"), rd("log"), rd("strict.txt"));
             let _ = std::fs::remove_dir_all(&d);
             out
         };
-        let (set, file, log) = run("0003");
+        let (set, file, log, strict) = run("0003", "");
         assert_eq!(set, "0003,0007,0000,0004,0005,0001", "PXE (named IBA GE…) first, other network after Windows");
         assert_eq!(file, set, "the order Windows restores");
         assert!(log.contains("PXE Boot0003 (IBA GE Slot 0100 v1553)"), "{log}");
-        assert_eq!(run("").0, "0004,0003,0005,0007,0000,0001", "no BootCurrent → every network entry first");
-        assert_eq!(run("0000").0, "0004,0003,0005,0007,0000,0001", "BootCurrent = Windows entry → ignored");
+        assert_eq!(strict, "", "no strict.txt without strict reset");
+        assert_eq!(run("", "").0, "0004,0003,0005,0007,0000,0001", "no BootCurrent → every network entry first");
+        assert_eq!(run("0000", "").0, "0004,0003,0005,0007,0000,0001", "BootCurrent = Windows entry → ignored");
+        // Strict reset: every Windows entry (Broom Windows + Windows Boot Manager) out of BootOrder, listed for Windows.
+        let (set, file, _, strict) = run("0003", "1");
+        assert_eq!((set.as_str(), file.as_str(), strict.as_str()), ("0003,0004,0005,0001", "0003,0004,0005,0001", "0007,0000"));
     }
 
     /// Stage delta() (cut from STAGE_SCRIPT, real files + manifests from publish::write_manifest, wget mocked with
@@ -1459,11 +1635,14 @@ mod tests {
         let a = file(&[chunk(1), chunk(2), chunk(9), chunk(4), chunk(5), vec![8; 1000]]);
         let (ok, same, dls, log) = run(&a, &a, None, false);
         assert!(ok && same && dls == 2 && log.contains("0 moved"), "{log}");
-        // A2: a delta cut by a power loss already wrote the new chunk 2 (here 0xEE) in place → only the tail is
+        // Resume case: a delta cut by a power loss already wrote the new chunk 2 (here 0xEE) in place → only the tail is
         // downloaded; the plan still says "download" for chunk 2 but the bytes on disk already match.
         let a2 = file(&[chunk(1), chunk(2), vec![0xEE; C], chunk(4), chunk(5), vec![8; 1000]]);
         let (ok, same, dls, log) = run(&a2, &a2, Some(2), false);
         assert!(ok && same && dls == 1, "{log}");
+        // A3: an UNCHANGED chunk (0) went bad on the SSD → caught by the check and downloaded too.
+        let (ok, same, dls, log) = run(&a, &a, Some(0), false);
+        assert!(ok && same && dls == 3, "{log}");
         // B: a new chunk early → every later chunk shifts → 5 moved (saved first, then written), 1 download.
         let b = file(&[chunk(1), chunk(7), chunk(2), chunk(3), chunk(4), chunk(5), vec![6; 1000]]);
         let (ok, same, dls, log) = run(&b, &b, None, false);

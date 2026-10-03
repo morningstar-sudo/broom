@@ -10,8 +10,8 @@
 // mount/loop — so the server's own LVM never sees the golden's VG). Copies the newest vmlinuz+initrd to
 // <home>/tftp/broom/<name>/ + reads the root UUID (for boot_script root=UUID=).
 //
-// ⚠ The overlay/iSCSI part inside the initrd (PREP_SCRIPT) is the riskiest part — MUST be PoC'd + tuned on
-// a real server (B5).
+// The overlay/iSCSI hook inside the initrd is the most fragile part: after changing it, boot a real client
+// (SSD cache hit and miss) before releasing.
 use std::path::Path;
 use std::process::Command;
 
@@ -41,7 +41,7 @@ const OVERLAYROOT_CONF: &str =
 ///     on the SSD as root, NO iSCSI attach (zero network/server load).
 ///     MISS → bring up the NIC + iscsistart -b (iBFT from iPXE sanhook) as before; broom-cache.service (golden)
 ///     copies golden iSCSI → SSD in the background for the next boot.
-///  3. No sfdisk/losetup in the initramfs (old golden prep) → writeback on the whole disk, no cache.
+///  3. No sfdisk/losetup (old golden prep), unregistered machine or several disks → writeback in zram, no disk touched.
 const BROOM_ISCSI: &str = r#"#!/bin/sh
 case "$1" in prereqs) echo ""; exit 0;; esac
 # Log to console + /run/broom-wb.log (/run moves to the real root → readable after boot).
@@ -49,19 +49,22 @@ log(){ echo "broom: $*"; echo "$*" >> /run/broom-wb.log; }
 WB_GB=30   # writeback size of p1; the rest = cache + /games. Change = wipefs the disk to repartition.
 modprobe iscsi_tcp 2>/dev/null
 modprobe iscsi_ibft 2>/dev/null
-NAME=""; HASH=""; SIZE=""; NOCACHE=""; SRV=""
+NAME=""; HASH=""; SIZE=""; NOCACHE=""; SRV=""; REG=""
 for a in $(cat /proc/cmdline); do
   case "$a" in
     broom.name=*) NAME=${a#*=};; broom.hash=*) HASH=${a#*=};; broom.size=*) SIZE=${a#*=};; broom.srv=*) SRV=${a#*=};;
     broom.nocache) NOCACHE=1;;
+    broom.reg=*) REG=${a#*=};;
   esac
 done
-# LOCAL disks = physical disks present BEFORE attaching iSCSI (golden iSCSI not visible yet). Skip removable USB.
+# LOCAL disks = physical disks present BEFORE attaching iSCSI (golden iSCSI not visible yet). Skip removable and
+# USB disks (an external USB HDD/SSD often reports removable=0).
 localdisks=""
 for d in /sys/block/*; do
   n=${d##*/}
   case "$n" in loop*|ram*|dm-*|sr*|nbd*|md*|fd*|zram*) continue;; esac
   [ "$(cat "$d/removable" 2>/dev/null)" = 1 ] && continue
+  case "$(readlink -f "$d")" in */usb*) continue;; esac
   sz=$(cat "$d/size" 2>/dev/null || echo 0); [ "$sz" -gt 0 ] || continue
   localdisks="$localdisks $n"
 done
@@ -76,9 +79,15 @@ if command -v sfdisk >/dev/null && command -v losetup >/dev/null; then
   for n in $localdisks; do
     if has_label "$(part $n 2)" broomcache; then wb=$(part $n 1); cache=$(part $n 2); break; fi
   done
-  if [ -z "$cache" ]; then
+  # A disk is partitioned (WIPED) only on a REGISTERED machine (broom.reg=1, Machines page) with exactly ONE local
+  # disk: an unknown machine that PXE-boots, or one with several disks (which one is the scratch SSD?), keeps
+  # its disks untouched and writes to zram below.
+  set -- $localdisks
+  if [ -z "$cache" ] && { [ "$REG" != 1 ] || [ $# -ne 1 ]; }; then
+    log "not partitioning any disk (registered=${REG:-no}, local disks: $#) -> writeback in RAM (zram)"
+  elif [ -z "$cache" ]; then
     for n in $localdisks; do
-      # Disk too small (< WB + 8GB) → skip, fall back to whole-disk writeback.
+      # Disk too small (< WB + 8GB) → skip (zram below).
       [ $(( $(cat /sys/block/$n/size) / 2097152 )) -ge $((WB_GB + 8)) ] || continue
       log "partitioning /dev/$n for the first time: p1 ${WB_GB}G writeback + p2 cache (WIPES the disk)"
       printf 'label: gpt\nsize=%sGiB, name=broomwb\nname=broomcache\n' "$WB_GB" \
@@ -98,14 +107,7 @@ fi
 if [ -n "$wb" ]; then
   mkfs.ext4 -qF -L broomwb -O ^has_journal "$wb" 2>/dev/null || { log "mkfs $wb failed"; wb=""; }
 fi
-# Could not partition (old golden prep / small disk) → writeback on the WHOLE DISK as before, no cache.
-if [ -z "$wb" ] && [ -z "$cache" ]; then
-  for n in $localdisks; do
-    mkfs.ext4 -qF -L broomwb -O ^has_journal "/dev/$n" 2>/dev/null && { wb=/dev/$n; break; }
-    log "mkfs /dev/$n failed (is mkfs.ext4 in the initramfs?)"
-  done
-fi
-# Fallback without SSD: zram (compressed RAM). ponytail: needs the zram module in the initramfs (new broom-prep).
+# Fallback without SSD: zram (compressed RAM). Needs the zram module in the initramfs (new broom-prep).
 if [ -z "$wb" ] && modprobe zram 2>/dev/null && [ -e /sys/block/zram0/disksize ]; then
   mem=$(sed -n 's/^MemTotal: *\([0-9]*\) kB/\1/p' /proc/meminfo)
   echo "$((mem * 512))" > /sys/block/zram0/disksize
@@ -119,7 +121,7 @@ if [ -n "$cache" ] && mkdir -p $C && mount -t ext4 "$cache" $C; then
   MODE=miss
   if [ -z "$NOCACHE" ] && [ -n "$HASH" ] && [ -f "$C/$NAME.img" ] \
      && [ "$(cat "$C/$NAME.sha256" 2>/dev/null)" = "$HASH" ]; then
-    # ponytail: trust the sha256 written when the copy finished, don't rehash the whole golden every boot. Suspect corruption → broom.nocache.
+    # Trust the sha256 written when the copy finished, don't rehash the whole golden every boot. Suspect corruption → broom.nocache.
     if losetup -f -r -P "$C/$NAME.img"; then MODE=hit; else log "losetup failed -> iSCSI"; fi
   fi
 fi
@@ -197,7 +199,7 @@ UDEV
 fi
 mkdir -p /games && mount --bind $C/games /games && chmod 1777 $C/games
 [ "$MODE" = miss ] && [ -b "$GOLDEN" ] && [ -n "$HASH" ] && [ -n "$SIZE" ] || exit 0
-# ponytail: spread over 0–5 minutes so all clients don't pull the golden at once after Publish; still congested →
+# Spread over 0–5 minutes so all clients don't pull the golden at once after Publish; still congested →
 # limit bandwidth on the server side.
 sleep $(( $(od -An -N2 -tu2 /dev/urandom) % 300 ))
 # Only keep the cache of the running image (other images + partial files go).
@@ -284,7 +286,7 @@ fn inject_initrd(initrd: &str, name: &str) -> Result<(), String> {
 /// Script RUN INSIDE THE GOLDEN VM: installs open-iscsi + overlayroot + update-initramfs (packages only;
 /// the broom-wb hook + overlayroot.conf are injected into the initrd by the server → no golden rebuild when tuning).
 /// Usage: curl -fsSL http://<server>/broom-prep | sudo bash
-/// ⚠ DRAFT — tune on the PoC server (B5). __IP__ is replaced by the server IP.
+/// __IP__ is replaced by the server IP.
 pub const PREP_SCRIPT: &str = r#"#!/usr/bin/env bash
 # Run INSIDE the golden VM (Ubuntu) once: installs packages for iSCSI-root + overlay.
 # SSD reset hook (broom-wb) + overlayroot.conf are injected into the initrd by the SERVER → tune without a golden rebuild.

@@ -1,5 +1,16 @@
 <section class="page active" id="page-system">
-  <div class="head"><h1>Settings</h1><p>guest user + boot menu + zram</p></div>
+  <div class="head"><h1>Settings</h1><p>admin password + guest user + boot menu + zram</p></div>
+  <div class="card">
+    <h2>Admin password</h2>
+    <div class="row">
+      <div class="field"><label>Current</label><input id="pw_cur" type="password" size="10" autocomplete="current-password"></div>
+      <div class="field"><label>New</label><input id="pw_new" type="password" size="10" autocomplete="new-password"></div>
+      <div class="field"><label>Confirm</label><input id="pw_new2" type="password" size="10" autocomplete="new-password"></div>
+      <button class="primary" style="align-self:flex-end" onclick="savePw()">Change</button>
+      <span id="pw_msg" class="msg"></span>
+    </div>
+    <p class="hint">Changing the password signs out every other browser (all old sessions stop working). This one stays signed in.</p>
+  </div>
   <div class="card">
     <h2>Guest user (Windows)</h2>
     <div class="row">
@@ -8,7 +19,7 @@
       <button class="primary" style="align-self:flex-end" onclick="saveCafe()">Save</button>
       <span id="cafe_msg" class="msg"></span>
     </div>
-    <p class="hint">The user is created + set to autologon in the Windows golden when <code>broom-prep-win</code> runs in the VM. Changes here only apply to goldens prepared <b>afterwards</b> (run prep again → upload). Linux golden: the user already exists in the image.</p>
+    <p class="hint">The user is created + set to autologon in the Windows golden when the Windows prep command (Images page) runs in the VM. Changes here only apply to goldens prepared <b>afterwards</b> (run prep again → upload). Linux golden: the user already exists in the image.</p>
   </div>
   <div class="card">
     <h2>Countdown boot menu</h2>

@@ -1,5 +1,5 @@
 // db/sqlite.rs — SQLite driver (rusqlite, bundled). The only place with SQL.
-// ponytail: one Mutex<Connection> — admin + DHCP load is a few queries/second at most; a pool
+// One Mutex<Connection> — admin + DHCP load is a few queries/second at most; a pool
 // (r2d2) only if there are ever many concurrent writers.
 use rusqlite::{params, Connection, OptionalExtension, Row};
 use std::sync::{Mutex, MutexGuard};
@@ -26,7 +26,8 @@ const SCHEMA: &str = r#"
         boot_script TEXT,                    -- iPXE boot snippet; empty = not published
         hash        TEXT,                    -- sha256 of the golden (version check for the SSD cache)
         cache_mode  TEXT NOT NULL DEFAULT 'disk', -- where the golden is kept: 'disk' | 'zram'
-        active_version TEXT                  -- versions.rs version image.img equals (NULL = none)
+        active_version TEXT,                 -- versions.rs version image.img equals (NULL = none)
+        base_mode   INTEGER NOT NULL DEFAULT 0 -- Windows: 1 = first logon waits in BASE MODE (technician), 0 = auto-commit
     );
 
     CREATE TABLE IF NOT EXISTS machines(
@@ -91,7 +92,7 @@ const SCHEMA: &str = r#"
     INSERT OR IGNORE INTO config(key,value) VALUES('ltsp_password','123456');
 "#;
 
-const IMAGE_COLS: &str = "id,name,os,is_default,boot_script,hash,cache_mode,active_version";
+const IMAGE_COLS: &str = "id,name,os,is_default,boot_script,hash,cache_mode,active_version,base_mode";
 
 fn image_row(r: &Row) -> rusqlite::Result<Image> {
     Ok(Image {
@@ -103,6 +104,7 @@ fn image_row(r: &Row) -> rusqlite::Result<Image> {
         hash: r.get(5)?,
         cache_mode: r.get(6)?,
         active_version: r.get(7)?,
+        base_mode: r.get::<_, i64>(8)? == 1,
     })
 }
 
@@ -134,6 +136,7 @@ impl Sqlite {
         let _ = c.execute("ALTER TABLE images ADD COLUMN hash TEXT", []);
         let _ = c.execute("ALTER TABLE images ADD COLUMN cache_mode TEXT NOT NULL DEFAULT 'disk'", []);
         let _ = c.execute("ALTER TABLE images ADD COLUMN active_version TEXT", []);
+        let _ = c.execute("ALTER TABLE images ADD COLUMN base_mode INTEGER NOT NULL DEFAULT 0", []);
         let _ = c.execute("ALTER TABLE images DROP COLUMN dataset", []); // ZFS versioning removed
         let _ = c.execute("ALTER TABLE machines ADD COLUMN license_key TEXT", []);
         let _ = c.execute("ALTER TABLE machines ADD COLUMN license_state TEXT", []);
@@ -233,6 +236,13 @@ impl Db for Sqlite {
             .map_err(e)
     }
 
+    fn set_base_mode(&self, id: i64, on: bool) -> DbResult<()> {
+        self.c()
+            .execute("UPDATE images SET base_mode=?1 WHERE id=?2", params![on as i64, id])
+            .map(|_| ())
+            .map_err(e)
+    }
+
     fn set_active_version(&self, id: i64, version: Option<&str>) -> DbResult<()> {
         self.c()
             .execute("UPDATE images SET active_version=?1 WHERE id=?2", params![version, id])
@@ -308,6 +318,13 @@ impl Db for Sqlite {
                 [machine_id],
             )
             .map(|_| ())
+            .map_err(e)
+    }
+
+    fn rearm_quiet(&self, machine_id: i64) -> DbResult<bool> {
+        self.c()
+            .execute("UPDATE machines SET license_state='armed' WHERE id=?1 AND license_state='sent'", [machine_id])
+            .map(|n| n > 0)
             .map_err(e)
     }
 
@@ -484,6 +501,9 @@ mod tests {
         let ia = db.image_by_name("a").unwrap().unwrap();
         assert_eq!((ia.boot_script.as_deref(), ia.hash.as_deref(), ia.cache_mode.as_str()), (Some("boot"), Some("h1"), "zram"));
         assert_eq!(ia.active_version.as_deref(), Some("v2"));
+        assert!(!ia.base_mode, "base mode off by default (first logon commits base by itself)");
+        db.set_base_mode(a, true).unwrap();
+        assert!(db.image(a).unwrap().unwrap().base_mode);
         db.delete_image(a).unwrap();
         assert!(db.image(a).unwrap().is_none());
 
@@ -504,6 +524,12 @@ mod tests {
         db.rearm_license(m).unwrap();
         let mc = &db.machines().unwrap()[0];
         assert_eq!((mc.license_state.as_deref(), mc.license_gen, mc.license_result.as_deref()), (Some("armed"), 2, None));
+        assert_eq!(db.take_license(m).unwrap().as_deref(), Some(key));
+        // Quiet re-arm (base rebuilt by the server's own change): armed again, SAME generation (no extra rebuild).
+        assert!(db.rearm_quiet(m).unwrap());
+        assert!(!db.rearm_quiet(m).unwrap(), "only from 'sent'");
+        let mc = &db.machines().unwrap()[0];
+        assert_eq!((mc.license_state.as_deref(), mc.license_gen), (Some("armed"), 2));
         assert_eq!(db.take_license(m).unwrap().as_deref(), Some(key));
         db.set_license(m, None).unwrap();
         let mc = &db.machines().unwrap()[0];

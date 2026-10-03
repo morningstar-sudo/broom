@@ -1,22 +1,34 @@
 <section class="page active" id="page-network">
-  <div class="head"><h1>Network</h1><p>DHCP + PXE</p></div>
+  <div class="head"><h1>Network</h1><p>DHCP + PXE + reset policy</p></div>
   <div class="card">
     <h2>DHCP settings</h2>
     <div class="row">
-      <div class="field"><label>DHCP server</label><select id="dhcp_mode"><option value="full">on</option><option value="off">off</option></select></div>
+      <div class="field"><label>DHCP server</label><select id="dhcp_mode"><option value="off">off</option><option value="full">on</option></select></div>
       <div class="field"><label>IFACE</label><input id="dhcp_iface" size="8"></div>
       <div class="field"><label>Server IP</label><input id="dhcp_server_ip" size="12"></div>
       <div class="field"><label>Subnet</label><input id="dhcp_subnet" size="12"></div>
+      <div class="field"><label title="Clients get the official, signed iPXE (works with Secure Boot on). Menu footer shows as lines under the images.">Secure Boot clients</label>
+        <label style="display:flex;gap:6px;align-items:center"><input id="dhcp_ipxe_signed" type="checkbox"> Official signed iPXE (test)</label></div>
     </div>
     <div class="row" id="full_only" style="margin-top:12px">
       <div class="field"><label>Range start</label><input id="dhcp_range_start" size="12" placeholder="auto .100"></div>
       <div class="field"><label>Range end</label><input id="dhcp_range_end" size="12" placeholder=".200"></div>
       <div class="field"><label>Gateway</label><input id="dhcp_gateway" size="12"></div>
       <div class="field"><label>DNS</label><input id="dhcp_dns" size="12"></div>
-      <div class="field"><label title="Clients get the official, signed iPXE (works with Secure Boot on). Menu footer shows as lines under the images.">Secure Boot clients</label>
-        <label style="display:flex;gap:6px;align-items:center"><input id="dhcp_ipxe_signed" type="checkbox"> Official signed iPXE (test)</label></div>
+    </div>
+    <div class="row" style="margin-top:12px">
+      <div class="field"><label title="Windows images: the machine can only start Windows through the network stage.">Strict reset (Windows)</label>
+        <label style="display:flex;gap:6px;align-items:center"><input id="dhcp_strict_reset" type="checkbox"> Windows starts only via PXE</label></div>
     </div>
     <div class="row" style="margin-top:14px"><button class="primary" onclick="applyDhcp()">Apply (restart DHCP/TFTP)</button> <span id="dhcp_msg" class="msg"></span></div>
-    <p class="hint">DHCP + TFTP are built into bootrom-mgmt. <b>On</b>: this server hands out IPs + PXE boot info (turn off any other DHCP server on the LAN). <b>Off</b>: another DHCP server owns the LAN — broom serves no DHCP/TFTP.</p>
+    <p class="hint"><b>Off</b> (default): the LAN's DHCP server (router) hands out IPs. Point its PXE options here:
+      next-server / option 66 = <b id="pxe_srv">this server</b>, boot file / option 67 = <code>snponly.efi</code>
+      (Secure Boot clients: <code>sb/snponly-shim.efi</code>). broom serves iPXE over TFTP and the menu over HTTP.<br>
+      <b>On</b>: this server hands out IPs + PXE boot info on that interface — turn off any other DHCP server on the LAN first;
+      gateway and DNS are required.</p>
+    <p class="hint"><b>Strict reset</b>: the SSD's Windows boot entries are kept out of the boot order and Windows removes its
+      boot loader from the SSD after each start, so a machine reaches Windows ONLY through PXE (every session reset).
+      Server or network down = the machines don't start Windows. Off: they still boot from the SSD (that session not reset;
+      the Machines page flags it).</p>
   </div>
 </section>

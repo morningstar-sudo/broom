@@ -131,11 +131,11 @@ fn chunk_zst(golden: &Path, cache: &Path, i: u64, sha: &str) -> Result<Vec<u8>, 
         return Ok(z);
     }
     let f = std::fs::File::open(golden).map_err(|e| {
-        tracing::error!("open golden {}: {e}", golden.display()); // L7: keep the path in the log, not the response
+        tracing::error!("open golden {}: {e}", golden.display()); // keep the path in the log, not the response
         (false, "golden not available".to_string())
     })?;
     let off = i.checked_mul(MANIFEST_CHUNK as u64).ok_or((true, "chunk index out of range".to_string()))?;
-    // Reject an out-of-range chunk from the file length (cheap) before reading + hashing 4 MB (M4).
+    // Reject an out-of-range chunk from the file length (cheap) before reading + hashing 4 MB.
     if off >= f.metadata().map_err(|e| (false, e.to_string()))?.len() {
         return Err((true, "chunk index out of range".to_string()));
     }
@@ -419,7 +419,7 @@ fn mem_available_bytes() -> u64 {
     0
 }
 
-/// Walk the files in dir (recursive). ponytail: enough for a golden zip with a few files.
+/// Walk the files in dir (recursive). Plain recursion: a golden zip holds only a few files.
 pub(crate) fn walk(dir: &Path) -> Vec<std::path::PathBuf> {
     let mut out = Vec::new();
     if let Ok(rd) = std::fs::read_dir(dir) {
@@ -460,7 +460,7 @@ fn run(bin: &str, args: &[&str]) -> Result<(), String> {
 pub(crate) fn refresh_shim() {
     let src = ["/usr/lib/shim/shimx64.efi.signed.latest", "/usr/lib/shim/shimx64.efi.signed"].into_iter().find(|p| Path::new(p).is_file());
     let Some(src) = src else {
-        return tracing::warn!("no Ubuntu shim (apt install shim-signed): Secure Boot clients cannot boot the kernels");
+        return tracing::warn!("no shim-signed on this server (apt install shim-signed): Secure Boot clients cannot boot the kernels");
     };
     let dir = crate::tftp_dir().join("shim");
     if let Err(e) = std::fs::create_dir_all(&dir).and_then(|_| std::fs::copy(src, dir.join("shimx64.efi"))) {
@@ -488,7 +488,7 @@ fn export_target(st: &SharedState, name: &str, cache_mode: &str, backing: &str) 
     let iqn = iqn_of(st, name);
     let store = store_of(name, gen_of(st, name));
     let lio = crate::iscsi::Lio::system()?;
-    // ponytail: target named by the old fixed IQN (before iqn_base) — remove it too; drop this line later.
+    // Targets made before iqn_base used a fixed IQN — remove that one too (legacy; drop once no such server is left).
     lio.remove(name, &format!("iqn.2026-08.net.tiem:{name}"));
     let b = if cache_mode == "zram" {
         crate::iscsi::Backing::Block { dev: backing }
@@ -546,7 +546,7 @@ fn publish_iscsi(st: &SharedState, id: i64, name: &str) -> Result<String, String
     let want = st.db.image(id)?.map_or_else(|| "disk".into(), |i| i.cache_mode);
     // Disk cache serves ONE shared golden file → it can't be swapped under a live client. Refuse to (re)publish it
     // while any client is connected (they would read changed bytes mid-session → FS corruption). zram is fine: each
-    // publish makes a fresh device + target, and the old one is kept for already-connected clients (M9).
+    // publish makes a fresh device + target, and the old one is kept for already-connected clients.
     if want != "zram" && crate::iscsi::any_session() {
         return Err("clients are connected; a disk-cache image shares one golden file and can't be swapped live. \
                     Reboot/close the clients (publish off-hours), or set this image to zram cache."
@@ -581,7 +581,7 @@ fn publish_iscsi(st: &SharedState, id: i64, name: &str) -> Result<String, String
     // /dev/sda golden RO → root=UUID mounted RO; overlayroot (baked into the golden) overlays it onto the
     // SSD writeback (reset every boot). ip=dhcp gives the initrd a network.
     // overlayroot on the CMDLINE (takes precedence over the conf file) → root RO + upper on the SSD LABEL broomwb.
-    // `quiet` left out so overlayroot/broom logs are visible during the PoC.
+    // `quiet` left out so overlayroot/broom logs show on the client console (easier to debug a boot).
     // broom.name/hash/size: the initrd hook compares the hash with the SSD cache copy (match → boot from the SSD,
     // skip iSCSI; mismatch → iSCSI + background copy). Hash computed FIRST to embed it in the cmdline.
     // Same pass writes golden.chunks (broom.srv: where the cache script fetches it → patches only changed chunks).
@@ -589,7 +589,7 @@ fn publish_iscsi(st: &SharedState, id: i64, name: &str) -> Result<String, String
     let size = std::fs::metadata(&img_abs).map_err(|e| e.to_string())?.len();
     let bs = format!(
         "sanhook iscsi:{ip}::::{iqn} || shell\n\
-         kernel http://{ip}/tftp/broom/{name}/vmlinuz initrd=initrd.img ip=dhcp root=UUID={root_uuid} ro fsck.mode=skip overlayroot=device:dev=/dev/disk/by-label/broomwb,recurse=0 broom.name={name} broom.hash={hash} broom.size={size} broom.srv={ip}\n\
+         kernel http://{ip}/tftp/broom/{name}/vmlinuz initrd=initrd.img ip=dhcp root=UUID={root_uuid} ro fsck.mode=skip overlayroot=device:dev=/dev/disk/by-label/broomwb,recurse=0 broom.name={name} broom.hash={hash} broom.size={size} broom.srv={ip} broom.reg=${{broom-reg}}\n\
          initrd http://{ip}/tftp/broom/{name}/initrd.img\n\
          boot"
     );
@@ -618,7 +618,7 @@ pub fn unpublish(st: &SharedState, name: &str) {
                 }
             }
         }
-        lio.remove(name, &format!("iqn.2026-08.net.tiem:{name}")); // ponytail: legacy fixed IQN, drop later
+        lio.remove(name, &format!("iqn.2026-08.net.tiem:{name}")); // legacy fixed IQN (see restore above), drop later
     }
     // Legacy single-device key (pre-versioning).
     let old = st.db.get_config(&format!("zram_dev:{name}"), "");
@@ -701,7 +701,7 @@ fn zram_remove(dev: &str) {
 }
 
 /// Publish generation for an image (config `iscsi_gen:<name>`, starts 0). Bumped on each Linux (re)publish so a new
-/// target gets a NEW IQN + backstore, leaving the previous one serving already-connected clients (M9).
+/// target gets a NEW IQN + backstore, leaving the previous one serving already-connected clients.
 fn gen_of(st: &SharedState, name: &str) -> u64 {
     st.db.get_config(&format!("iscsi_gen:{name}"), "0").parse().unwrap_or(0)
 }
@@ -730,7 +730,7 @@ fn zram_key(name: &str, g: u64) -> String {
 }
 
 /// Remove every superseded target of this image (all generations except `keep_iqn`) and free their zram devices —
-/// but only when no client is connected, so a running client is never cut off (M9). Runs after a new publish.
+/// but only when no client is connected, so a running client is never cut off. Runs after a new publish.
 fn gc_superseded(st: &SharedState, name: &str, keep_iqn: &str) {
     if crate::iscsi::any_session() {
         return; // someone is attached (portal-wide) → keep the old targets, GC on a later publish when idle
@@ -823,7 +823,7 @@ mod tests {
         assert!(z_len_small(&get(0, shas[0]).unwrap()));
         let _ = std::fs::remove_dir_all(&cache); // uncached: the sha check runs
         assert!(get(1, shas[0]).unwrap_err().0, "sha of another chunk");
-        // Out-of-range chunk index → rejected from the file length, never read (M4).
+        // Out-of-range chunk index → rejected from the file length, never read.
         assert!(get(999_999, shas[0]).unwrap_err().0, "chunk past end of golden");
         assert!(get(u64::MAX, shas[0]).unwrap_err().0, "index * chunk overflows");
         let _ = std::fs::remove_dir_all(&home);

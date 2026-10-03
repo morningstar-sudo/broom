@@ -1,5 +1,5 @@
 // main.rs — bootrom mgmt app (Rust/axum). One binary, runs on the Linux server.
-// Modules split per the plan: M5 boot, M6 images(+versions), M7 monitor(+wol), M8 machines.
+// Modules: boot (iPXE menu), images (+versions, publish), monitor (+wol), machines/devices, dhcp/tftp/iscsi, auth.
 mod auth;
 mod boot;
 mod db;
@@ -103,8 +103,13 @@ const INDEX_HTML: &str = include_str!("../static/index.html");
 const LOGIN_HTML: &str = include_str!("../static/login.html");
 /// Version (Cargo.toml) — shown on the web + in logs to tell deployed builds apart.
 const VERSION: &str = env!("CARGO_PKG_VERSION");
+/// The web admin's script (index.html loads it as /app.js?v=<version>, so a new build is never served from cache).
+const APP_JS: &str = include_str!("../static/app.js");
 async fn index() -> Html<String> {
     Html(INDEX_HTML.replace("__VERSION__", VERSION))
+}
+async fn app_js() -> impl axum::response::IntoResponse {
+    ([(axum::http::header::CONTENT_TYPE, "text/javascript; charset=utf-8")], APP_JS)
 }
 async fn login_page() -> Html<&'static str> {
     Html(LOGIN_HTML)
@@ -170,6 +175,15 @@ pub struct AppState {
     /// Bounds concurrent golden-chunk reads (each reads+hashes 4 MB on a blocking thread). Caps the blocking-pool
     /// / disk cost of a flood of chunk requests from the (public) /api/golden-chunk endpoint.
     pub chunk_sem: tokio::sync::Semaphore,
+    /// mac → unix time of its last menu choice (/boot/start): the machine went through PXE (→ stage / iSCSI boot).
+    pub pxe_seen: Mutex<std::collections::HashMap<String, u64>>,
+    /// mac → unix time Windows reported a boot WITHOUT a PXE boot just before (session not reset). Cleared by the
+    /// next PXE boot. Shown on the Machines page.
+    pub not_reset: Mutex<std::collections::HashMap<String, u64>>,
+}
+
+pub fn now_secs() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs())
 }
 pub type SharedState = Arc<AppState>;
 
@@ -184,12 +198,10 @@ impl AppState {
 #[tokio::main]
 async fn main() {
     init_logging();
-    migrate_old_layout();
-    info!("data in {}", home().display());
-    if auth::test_mode() {
-        warn!("BOOTROM_TEST=1: admin authentication DISABLED (test mode) — never use this on a real server");
-    }
     let args: Vec<String> = std::env::args().collect();
+    if args.get(1).map(String::as_str) == Some("install-service") {
+        setup::install_service(&args);
+    }
 
     let skip_preflight = args.iter().any(|a| a == "--skip-preflight");
     let port: u16 = args
@@ -198,10 +210,20 @@ async fn main() {
         .and_then(|i| args.get(i + 1))
         .and_then(|s| s.parse().ok())
         .unwrap_or(80);
+    // Bind HTTP FIRST: the UDP listeners use SO_REUSEPORT (hot Apply), so a second instance started by mistake would
+    // happily share :67/:69 — it must die here, before it stops services, touches the DB or rebuilds iSCSI targets.
+    let addr = format!("0.0.0.0:{port}");
+    let listener = tokio::net::TcpListener::bind(&addr).await.unwrap_or_else(|e| {
+        error!("bind http {addr}: {e} (another bootrom-mgmt already running?)");
+        std::process::exit(1)
+    });
+
+    migrate_old_layout();
+    info!("data in {}", home().display());
 
     // Preflight: pass → continue. Fail, or network never configured → run setup BY ITSELF (detect network +
     // install packages + seed DHCP config) then preflight again; still failing → report clearly + exit ≠ 0
-    // (rule.md). (dev: --skip-preflight skips it.)
+    // (dev: --skip-preflight skips it).
     if !skip_preflight {
         let unconfigured = db::open(&db::url())
             .map(|d| d.get_config("dhcp_server_ip", "").is_empty())
@@ -238,9 +260,12 @@ async fn main() {
         job_tx: tokio::sync::broadcast::channel(64).0,
         versions_lock: Mutex::new(()),
         net: Mutex::new(Vec::new()),
-        // ponytail: fixed 8 concurrent chunk reads; make it num_cpus if a fast SSD ever wants more parallelism.
+        // Fixed 8 concurrent chunk reads; make it num_cpus if a fast SSD ever wants more parallelism.
         chunk_sem: tokio::sync::Semaphore::new(8),
+        pxe_seen: Mutex::new(std::collections::HashMap::new()),
+        not_reset: Mutex::new(std::collections::HashMap::new()),
     });
+    auth::init_setup_token(&state);
 
     // Built-in DHCP server + TFTP + iSCSI targets. Distro services from older versions
     // (dnsmasq, tftpd, targetcli's restore service) → stopped first; stopping the latter clears LIO.
@@ -273,6 +298,7 @@ async fn main() {
     let app = Router::new()
         .route("/login", get(login_page)) // standalone sign-in page (auth.rs); public
         .route("/", get(index)) // web admin shell (embedded in the binary)
+        .route("/app.js", get(app_js))
         // One URL per page (F5 / bookmarks keep the page); same shell, JS picks the page from the path.
         .route("/machines", get(index))
         .route("/images", get(index))
@@ -282,13 +308,13 @@ async fn main() {
         .route("/devices", get(index))
         .route("/ui/{page}", get(ui_page)) // fragment tab on-demand
         .route("/api/events", get(events)) // SSE: server liveness (sidebar dot) + image job status
-        .route("/boot.ipxe", get(boot::render)) // M5
+        .route("/boot.ipxe", get(boot::render)) // iPXE menu
         .route("/boot/start", get(boot::start)) // menu choice → "client started" log + image boot script
-        .merge(images::routes()) // M6
+        .merge(images::routes()) // images, versions, upload, publish
         .merge(drivers::routes()) // Windows driver packages
-        .merge(machines::routes()) // M8
+        .merge(machines::routes()) // machines, DHCP/boot config, license
         .merge(devices::routes()) // Devices page: edit / bulk / CSV / detail
-        .merge(monitor::routes()) // M7
+        .merge(monitor::routes()) // online status, Wake-on-LAN
         .merge(auth::routes()) // admin login
         // Serve boot assets over HTTP (kernel/initrd much faster than TFTP).
         // /tftp/... -> <home>/tftp/... (e.g. http://SERVER/tftp/broom-stage/vmlinuz)
@@ -297,11 +323,6 @@ async fn main() {
         .layer(axum::middleware::from_fn_with_state(state.clone(), auth::guard))
         .with_state(state);
 
-    let addr = format!("0.0.0.0:{port}");
-    let listener = tokio::net::TcpListener::bind(&addr).await.unwrap_or_else(|e| {
-        error!("bind http {addr}: {e}");
-        std::process::exit(1)
-    });
     info!("bootrom-mgmt v{VERSION} serving on http://{addr}");
     // ConnectInfo: /api/license picks a machine by the peer IP (machines.rs).
     if let Err(e) = axum::serve(listener, app.into_make_service_with_connect_info::<std::net::SocketAddr>()).await {

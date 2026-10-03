@@ -1,6 +1,7 @@
 // tftp.rs — built-in read-only TFTP server (replaces dnsmasq's): RFC 1350 + blksize (RFC 2348) +
 // tsize/timeout (RFC 2349). Only boot files: snponly.efi straight from the bytes embedded in the
 // binary, anything else read-only from <home>/tftp. One task + one socket per transfer.
+use std::borrow::Cow;
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::time::Duration;
 use tokio::net::UdpSocket;
@@ -55,17 +56,25 @@ fn parse_rrq(b: &[u8]) -> Option<(String, Vec<(String, String)>)> {
 }
 
 /// TFTP serves ONLY the embedded iPXE binaries, from memory: our own `snponly.efi`, and the official Secure Boot pair
-/// `sb/snponly-shim.efi` + `sb/snponly.efi`. Firmware fetches just those over TFTP; iPXE then pulls kernel/initrd/golden
-/// over HTTP (`/tftp/...` ServeDir). Refusing everything else stops a spoofed UDP packet from making the server read a
-/// multi-GB golden into RAM (no handshake on UDP → an amplification/OOM vector).
-fn load(name: &str) -> Result<&'static [u8], String> {
+/// `sb/snponly-shim.efi` + `sb/snponly.efi` — plus `autoexec.ipxe`, which every iPXE (ours and the signed one) fetches
+/// from the TFTP server it was loaded from and runs first: it chains the boot menu, so iPXE works even when the LAN's
+/// own DHCP server (router) hands out the boot file and would otherwise just give iPXE `snponly.efi` again (a loop).
+/// iPXE then pulls kernel/initrd/golden over HTTP (`/tftp/...` ServeDir). Refusing everything else stops a spoofed UDP
+/// packet from making the server read a multi-GB golden into RAM (no handshake on UDP → an amplification/OOM vector).
+fn load(name: &str, server: Ipv4Addr) -> Result<Cow<'static, [u8]>, String> {
     let name = name.replace('\\', "/");
     match name.trim_start_matches('/') {
-        "snponly.efi" => Ok(crate::boot::SNPONLY_EFI),
-        "sb/snponly-shim.efi" => Ok(crate::boot::SB_SHIM_EFI),
-        "sb/snponly.efi" => Ok(crate::boot::SB_IPXE_EFI),
+        "snponly.efi" => Ok(Cow::Borrowed(crate::boot::SNPONLY_EFI)),
+        "sb/snponly-shim.efi" => Ok(Cow::Borrowed(crate::boot::SB_SHIM_EFI)),
+        "sb/snponly.efi" => Ok(Cow::Borrowed(crate::boot::SB_IPXE_EFI)),
+        "autoexec.ipxe" | "sb/autoexec.ipxe" => Ok(Cow::Owned(autoexec(server).into_bytes())),
         other => Err(format!("TFTP serves only the iPXE binaries (asked {other:?}); other files go over HTTP")),
     }
+}
+
+/// First script of every iPXE: configure the NIC by DHCP, then the server's boot menu.
+fn autoexec(server: Ipv4Addr) -> String {
+    format!("#!ipxe\ndhcp || dhcp || shell\nchain http://{server}/boot.ipxe?mac=${{net0/mac}}&ip=${{net0/ip}} || shell\n")
 }
 
 async fn send_error(sock: &UdpSocket, to: SocketAddr, code: u16, msg: &str) {
@@ -106,7 +115,7 @@ async fn transfer(req: &[u8], peer: SocketAddr, server: Ipv4Addr, iface: &str) -
     };
     // serve_inner only forwards RRQ (WRQ etc. are dropped there).
     let (name, opts) = parse_rrq(&req[2..]).ok_or("malformed RRQ")?;
-    let data = match load(&name) {
+    let data = match load(&name, server) {
         Ok(d) => d,
         Err(e) => {
             send_error(&sock, peer, 1, "file not found").await;
@@ -221,6 +230,17 @@ mod tests {
             got.extend(&b[4..]);
         }
         assert_eq!(got, &want[..got.len()]); // first 4 blocks stream byte-for-byte
+    }
+
+    /// iPXE runs autoexec.ipxe first (looked up next to its own image, then at /): it must chain THIS server's menu.
+    #[test]
+    fn autoexec_chains_the_menu() {
+        let ip = Ipv4Addr::new(10, 0, 0, 12);
+        for name in ["autoexec.ipxe", "/autoexec.ipxe", "sb/autoexec.ipxe"] {
+            let s = String::from_utf8(load(name, ip).unwrap().into_owned()).unwrap();
+            assert!(s.starts_with("#!ipxe\ndhcp"), "{name}");
+            assert!(s.contains("chain http://10.0.0.12/boot.ipxe?mac=${net0/mac}&ip=${net0/ip}"), "{name}");
+        }
     }
 
     #[tokio::test]

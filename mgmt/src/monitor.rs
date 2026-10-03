@@ -1,4 +1,4 @@
-// monitor.rs — M7. Machine list (registered + discovered via DHCP) + on/off (ICMP ping) + Wake-on-LAN.
+// monitor.rs — Machine list (registered + discovered via DHCP) + on/off (ICMP ping) + Wake-on-LAN.
 // The web polls /api/status every 15 s → pings are never logged (only real events are).
 use axum::{
     extract::State,
@@ -35,6 +35,8 @@ struct MachineStatus {
     grp: Option<String>,
     image_id: Option<i64>,
     notes: Option<String>,
+    /// Started Windows without a PXE boot just before (session not reset) — unix time, until the next PXE boot.
+    not_reset: Option<u64>,
 }
 
 /// Machines = registered (machines table) + discovered via DHCP (leases table, dhcp.rs).
@@ -76,6 +78,7 @@ async fn status(State(st): State<SharedState>) -> Json<Vec<MachineStatus>> {
             online[i] = on;
         }
     }
+    let not_reset = st.not_reset.lock().unwrap().clone();
     let mut out: Vec<MachineStatus> = entries
         .into_iter()
         .zip(online)
@@ -90,6 +93,7 @@ async fn status(State(st): State<SharedState>) -> Json<Vec<MachineStatus>> {
                 grp: m.as_ref().and_then(|m| m.grp.clone()),
                 image_id: m.as_ref().and_then(|m| m.image_id),
                 notes: m.and_then(|m| m.notes),
+                not_reset: not_reset.get(&mac).copied(),
                 mac,
                 ip,
                 hostname,

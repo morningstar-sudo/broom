@@ -31,7 +31,7 @@ pub fn routes() -> Router<SharedState> {
 }
 
 fn ise(e: impl ToString) -> ApiError {
-    tracing::error!("internal error: {}", e.to_string()); // keep OS paths/errors in the server log, not the response (L7)
+    tracing::error!("internal error: {}", e.to_string()); // keep OS paths/errors in the server log, not the response
     (StatusCode::INTERNAL_SERVER_ERROR, "internal error".to_string())
 }
 
@@ -264,6 +264,9 @@ async fn delete(State(st): State<SharedState>, Json(b): Json<IdBody>) -> Result<
     Ok(Json(serde_json::json!({"ok": true})))
 }
 
+/// mac → the "name sha256" package list last answered (see for_machine).
+static DRV_SETS: std::sync::LazyLock<std::sync::Mutex<std::collections::HashMap<String, Vec<String>>>> = std::sync::LazyLock::new(Default::default);
+
 #[derive(Deserialize)]
 struct ForQuery {
     mac: String,
@@ -279,13 +282,26 @@ async fn for_machine(State(st): State<SharedState>, Query(q): Query<ForQuery>, b
     let hw: BTreeSet<String> = body.lines().map(|l| l.trim().to_ascii_uppercase()).filter(|l| !l.is_empty()).take(4096).collect();
     let m = st.db.machines().map_err(ise)?.into_iter().find(|m| m.mac.eq_ignore_ascii_case(&mac));
     // Only remember hardware for a MAC we already know (registered, or currently holding a lease). An unknown MAC
-    // still gets its driver list, but can't pollute machine_hw with junk (L5).
+    // still gets its driver list, but can't pollute machine_hw with junk.
     let known = m.is_some() || st.db.leases().map_err(ise)?.iter().any(|l| l.mac.eq_ignore_ascii_case(&mac));
     if known {
         st.db.put_machine_hw(&mac, &hw.iter().cloned().collect::<Vec<_>>(), now()).map_err(ise)?;
     }
     let drivers = st.db.drivers().map_err(ise)?;
     let got = pick(&drivers, &hw, m.as_ref().and_then(|m| m.grp.as_deref()));
+    // The stage asks this on every boot, near its end → the machine IS going through PXE (license window,
+    // "not reset" check in machines.rs).
+    st.pxe_seen.lock().unwrap().insert(mac.clone(), crate::now_secs());
+    st.not_reset.lock().unwrap().remove(&mac);
+    // Another package set than last time → the stage rebuilds base → it needs the license key once more.
+    // (Baseline in RAM: the first query after a server restart only records it.)
+    let set: Vec<String> = got.iter().map(|d| format!("{} {}", d.name, d.sha256)).collect();
+    let changed = DRV_SETS.lock().unwrap().insert(mac.clone(), set.clone()).is_some_and(|old| old != set);
+    if let Some(m) = m.as_ref().filter(|_| changed) {
+        if st.db.rearm_quiet(m.id).map_err(ise)? {
+            tracing::info!("license of {} armed again (driver set changed → base rebuilt)", m.hostname.as_deref().unwrap_or(&m.mac));
+        }
+    }
     let who = m.and_then(|m| m.hostname).unwrap_or_else(|| mac.clone());
     tracing::info!(
         "client {who} drivers: {}",

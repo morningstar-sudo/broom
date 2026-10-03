@@ -139,7 +139,7 @@ impl Lio {
 }
 
 /// Any iSCSI initiator currently connected to the portal (all targets share :3260, so this is portal-wide, not
-/// per-target). Used to decide when it is safe to tear down a superseded target or republish a disk image (M9).
+/// per-target). Used to decide when it is safe to tear down a superseded target or republish a disk image.
 pub fn any_session() -> bool {
     match std::process::Command::new("ss")
         .args(["-H", "-tn", "state", "established", "( sport = :3260 )"])
