@@ -1,4 +1,4 @@
-// machines.rs — M8 mgmt-config. Machine table (MAC/IP/hostname), image assignment,
+// machines.rs — machine config: Machine table (MAC/IP/hostname), image assignment,
 // default image + countdown timeout, DHCP mode/parameters → restart the built-in DHCP (dhcp.rs).
 use axum::{
     extract::{ConnectInfo, State},
@@ -27,6 +27,49 @@ pub fn routes() -> Router<SharedState> {
         .route("/api/machines/license/rearm", post(rearm_license))
         .route("/api/license", post(license))
         .route("/api/license/result", post(license_result))
+        .route("/api/booted", post(booted))
+}
+
+/// A key is only handed out this long after the machine's last PXE boot (/boot/start or the stage's driver query):
+/// broom-done asks while base is being built right after the stage, not hours into a guest's session.
+const LICENSE_WINDOW_S: u64 = 30 * 60;
+/// A Windows boot reported more than this after the last PXE boot = Windows started from the SSD without the stage.
+const BOOT_WINDOW_S: u64 = 15 * 60;
+
+/// MAC of the host at `ip`: the kernel's ARP entry (it just talked to us), else its DHCP lease or static IP.
+fn mac_at(st: &SharedState, ip: &str) -> Option<String> {
+    arp_mac(ip)
+        .or_else(|| st.db.leases().ok()?.into_iter().find(|l| l.ip.as_deref() == Some(ip)).map(|l| l.mac))
+        .or_else(|| st.db.machines().ok()?.into_iter().find(|m| m.ip.as_deref() == Some(ip)).map(|m| m.mac))
+        .map(|m| m.to_lowercase())
+}
+
+/// One report per IP per minute (public endpoint).
+static BOOTED_SEEN: std::sync::LazyLock<std::sync::Mutex<std::collections::HashMap<String, u64>>> = std::sync::LazyLock::new(Default::default);
+
+/// POST /api/booted — Windows (BroomBootOrder task) reports each boot. No PXE boot of that machine just before →
+/// it started Windows from the SSD without the stage (cable out, server down, boot order changed): the session was
+/// NOT reset → warning in the log + flag on the Machines page until its next PXE boot.
+async fn booted(State(st): State<SharedState>, ConnectInfo(peer): ConnectInfo<SocketAddr>) -> StatusCode {
+    let (ip, now) = (peer.ip().to_string(), crate::now_secs());
+    {
+        let mut seen = BOOTED_SEEN.lock().unwrap();
+        seen.retain(|_, t| now.saturating_sub(*t) < 60);
+        if seen.insert(ip.clone(), now).is_some() {
+            return StatusCode::TOO_MANY_REQUESTS;
+        }
+    }
+    let Some(mac) = mac_at(&st, &ip) else { return StatusCode::NO_CONTENT };
+    let recent = st.pxe_seen.lock().unwrap().get(&mac).is_some_and(|t| now.saturating_sub(*t) <= BOOT_WINDOW_S);
+    if !recent {
+        let name = st.db.machines().unwrap_or_default().into_iter().find(|m| m.mac.eq_ignore_ascii_case(&mac)).map(|m| who(&m));
+        tracing::warn!(
+            "machine {} ({mac}, {ip}) started Windows WITHOUT a PXE boot just before — this session was NOT reset",
+            name.as_deref().unwrap_or(&mac)
+        );
+        st.not_reset.lock().unwrap().insert(mac, now);
+    }
+    StatusCode::NO_CONTENT
 }
 
 // ---- Windows license keys (retail, one per machine) ----
@@ -183,6 +226,10 @@ async fn license(State(st): State<SharedState>, ConnectInfo(peer): ConnectInfo<S
     if m.license_key.is_none() {
         return refuse(format!("{}: no key set", who(m)));
     }
+    let pxe = st.pxe_seen.lock().unwrap().get(&m.mac.to_lowercase()).copied();
+    if !pxe.is_some_and(|t| crate::now_secs().saturating_sub(t) <= LICENSE_WINDOW_S) {
+        return refuse(format!("{}: no PXE boot in the last {} min — keys only go to a base being built", who(m), LICENSE_WINDOW_S / 60));
+    }
     match st.db.take_license(m.id).map_err(ise)? {
         Some(key) => {
             tracing::info!("license sent to {} - mac {} - ip {ip}", who(m), m.mac);
@@ -234,7 +281,7 @@ pub(crate) fn cafe_pass_ok(p: &str) -> bool {
 type ApiError = (StatusCode, String);
 
 fn ise(e: String) -> ApiError {
-    tracing::error!("internal error: {e}"); // keep OS paths/errors in the server log, not the response (L7)
+    tracing::error!("internal error: {e}"); // keep OS paths/errors in the server log, not the response
     (StatusCode::INTERNAL_SERVER_ERROR, "internal error".into())
 }
 
@@ -338,6 +385,7 @@ async fn add(
     };
     let all = st.db.machines().map_err(ise)?;
     crate::devices::validate(&mut m, &all).map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+    crate::devices::ip_free(&m, &st.db.leases().map_err(ise)?, crate::now_secs() as i64).map_err(|e| (StatusCode::BAD_REQUEST, e))?;
     let id = st.db.add_machine(&m.mac, m.ip.as_deref(), m.hostname.as_deref()).map_err(|e| (StatusCode::BAD_REQUEST, e))?;
     tracing::info!("machine registered - mac {} - ip {} - hostname {}", m.mac, m.ip.as_deref().unwrap_or("-"), m.hostname.as_deref().unwrap_or("-"));
     Ok(Json(serde_json::json!({"ok": true, "id": id})))
@@ -401,7 +449,7 @@ async fn set_zram_reserve(
 async fn get_dhcp(State(st): State<SharedState>) -> Json<serde_json::Value> {
     let g = |k: &str, d: &str| st.db.get_config(k, d);
     Json(serde_json::json!({
-        "mode": g("dhcp_mode", "full"),
+        "mode": g("dhcp_mode", "off"),
         "iface": g("dhcp_iface", ""),
         "server_ip": g("dhcp_server_ip", ""),
         "subnet": g("dhcp_subnet", ""),
@@ -412,6 +460,7 @@ async fn get_dhcp(State(st): State<SharedState>) -> Json<serde_json::Value> {
         "dns": g("dhcp_dns", ""),
         "lease": g("dhcp_lease", "12h"),
         "ipxe_signed": g("ipxe_signed", "0") == "1",
+        "strict_reset": g("strict_reset", "0") == "1",
     }))
 }
 
@@ -429,6 +478,7 @@ struct DhcpBody {
     lease: Option<String>,
     /// "Secure Boot clients": "1" = official signed iPXE for UEFI PXE, "0" = our own build.
     ipxe_signed: Option<String>,
+    strict_reset: Option<String>,
 }
 
 /// Validate one DHCP field. IPv4 fields must parse; a stored server IP / gateway / DNS flows into scripts + boot
@@ -442,7 +492,7 @@ fn dhcp_field_ok(key: &str, v: &str) -> Result<(), String> {
         "dhcp_server_ip" | "dhcp_subnet" | "dhcp_netmask" | "dhcp_range_start" | "dhcp_range_end" => ipv4(v),
         "dhcp_gateway" | "dhcp_dns" => v.is_empty() || v.split(',').all(|p| ipv4(p.trim())),
         "dhcp_lease" => v.parse::<u32>().is_ok() || matches!(v.chars().last(), Some('h' | 'm' | 's')),
-        "ipxe_signed" => v == "0" || v == "1",
+        "ipxe_signed" | "strict_reset" => v == "0" || v == "1",
         _ => true,
     };
     if ok { Ok(()) } else { Err(format!("{}: invalid value {v:?}", key.trim_start_matches("dhcp_"))) }
@@ -466,6 +516,7 @@ async fn set_dhcp(
         ("dhcp_dns", &b.dns),
         ("dhcp_lease", &b.lease),
         ("ipxe_signed", &b.ipxe_signed),
+        ("strict_reset", &b.strict_reset),
     ];
     for (k, v) in &fields {
         if let Some(val) = v {
@@ -474,10 +525,15 @@ async fn set_dhcp(
     }
     // When the DHCP server is on, it needs a bound interface (empty = all interfaces → a rogue DHCP server on a
     // WAN/VPN link). "off" needs nothing.
-    let mode = b.mode.as_deref().unwrap_or(&st.db.get_config("dhcp_mode", "full")).to_string();
+    let mode = b.mode.as_deref().unwrap_or(&st.db.get_config("dhcp_mode", "off")).to_string();
     let iface = b.iface.clone().unwrap_or_else(|| st.db.get_config("dhcp_iface", ""));
     if mode == "full" && iface.trim().is_empty() {
         return Err((StatusCode::BAD_REQUEST, "the DHCP server needs a specific interface (leaving it blank binds every interface)".into()));
+    }
+    // A lease without gateway/DNS takes every machine that gets it off the internet.
+    let cur = |v: &Option<String>, k: &str| v.clone().unwrap_or_else(|| st.db.get_config(k, ""));
+    if mode == "full" && (cur(&b.gateway, "dhcp_gateway").trim().is_empty() || cur(&b.dns, "dhcp_dns").trim().is_empty()) {
+        return Err((StatusCode::BAD_REQUEST, "the DHCP server needs a gateway and DNS (clients would get no internet)".into()));
     }
     for (k, v) in &fields {
         if let Some(val) = v {

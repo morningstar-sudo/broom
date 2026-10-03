@@ -1,8 +1,11 @@
 // auth.rs — admin login for the web UI + API. The web admin controls DHCP, images and license keys and runs as
 // root on a shared LAN, so every admin route needs a session. Client/boot routes stay open (a PXE client can't log
-// in). One admin password (argon2 hash in config `admin_pw`), set on first use. Sessions are STATELESS signed
-// cookies: `<expiry>.<blake3-keyed-MAC>` with a per-install secret in config `session_secret`. No server-side
-// session map, so restarting the binary does not log admins out. Also a Host-header check (anti DNS-rebinding).
+// in). One admin password (argon2 hash in config `admin_pw`), set on first use with a one-time setup token that is
+// printed to the server log (so only someone with access to the server can claim the install). Sessions are
+// STATELESS signed cookies: `<expiry>.<blake3-keyed-MAC>` with a per-install secret in config `session_secret`. No
+// server-side session map, so restarting the binary does not log admins out; changing the password rotates the
+// secret, which logs every session out. Password checks are throttled per client IP and run off the async workers.
+// Also a Host-header check (anti DNS-rebinding).
 use argon2::password_hash::rand_core::{OsRng, RngCore};
 use argon2::password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString};
 use argon2::Argon2;
@@ -16,12 +19,16 @@ use axum::{
     Json, Router,
 };
 use serde::Deserialize;
-use std::net::SocketAddr;
+use std::collections::HashMap;
+use std::net::{IpAddr, SocketAddr};
+use std::sync::{LazyLock, Mutex, OnceLock};
 
 use crate::SharedState;
 
 const COOKIE: &str = "broom_session";
 const SESSION_SECS: u64 = 8 * 3600;
+
+type ApiErr = (StatusCode, String);
 
 pub fn routes() -> Router<SharedState> {
     Router::new()
@@ -29,14 +36,36 @@ pub fn routes() -> Router<SharedState> {
         .route("/api/auth/setup", post(setup))
         .route("/api/auth/login", post(login))
         .route("/api/auth/logout", post(logout))
+        // Not under /api/auth/ (public prefix): the guard requires a session for it.
+        .route("/api/password", post(change_pw))
 }
 
 fn now() -> u64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs())
 }
 
+fn hex(b: &[u8]) -> String {
+    b.iter().map(|x| format!("{x:02x}")).collect()
+}
+
+fn random32() -> [u8; 32] {
+    let mut k = [0u8; 32];
+    OsRng.fill_bytes(&mut k);
+    k
+}
+
+/// 128-bit random token, hex (setup token, one-time prep links).
+pub(crate) fn random_token() -> String {
+    hex(&random32()[..16])
+}
+
+/// Constant-time string equality (blake3::Hash eq is constant-time).
+pub(crate) fn same(a: &str, b: &str) -> bool {
+    blake3::hash(a.as_bytes()) == blake3::hash(b.as_bytes())
+}
+
 /// argon2id hash (PHC string) — stored in config `admin_pw`.
-pub fn hash_pw(pw: &str) -> Result<String, String> {
+fn hash_pw(pw: &str) -> Result<String, String> {
     let salt = SaltString::generate(&mut OsRng);
     Argon2::default().hash_password(pw.as_bytes(), &salt).map(|h| h.to_string()).map_err(|e| e.to_string())
 }
@@ -45,14 +74,90 @@ fn verify_pw(pw: &str, phc: &str) -> bool {
     PasswordHash::new(phc).is_ok_and(|p| Argon2::default().verify_password(pw.as_bytes(), &p).is_ok())
 }
 
+/// argon2 costs ~tens of ms of CPU: at most 2 run at once, on blocking threads, so a login flood (even from many
+/// IPs) can neither stall the async workers nor take over the blocking pool other handlers need.
+static ARGON: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(2);
+
+/// Failed password tries per client IP: (failures, locked until unix secs).
+type Fails = HashMap<IpAddr, (u32, u64)>;
+static FAILS: LazyLock<Mutex<Fails>> = LazyLock::new(|| Mutex::new(HashMap::new()));
+const FREE_TRIES: u32 = 5;
+const MAX_LOCK_SECS: u64 = 300;
+
+/// Seconds `ip` must still wait before its next password try (0 = may try now).
+fn locked_for(f: &Fails, ip: IpAddr, now: u64) -> u64 {
+    f.get(&ip).map_or(0, |&(_, until)| until.saturating_sub(now))
+}
+
+/// Record one password check. Success forgets the IP; from the 5th failure on, each failure locks it for 1, 2, 4 …
+/// up to 300 s. Entries idle for 15 min are dropped, so the map stays small.
+fn record(f: &mut Fails, ip: IpAddr, ok: bool, now: u64) {
+    if ok {
+        f.remove(&ip);
+        return;
+    }
+    f.retain(|_, &mut (_, until)| until + 900 > now);
+    let e = f.entry(ip).or_insert((0, now));
+    e.0 += 1;
+    e.1 = now + if e.0 >= FREE_TRIES { (1u64 << (e.0 - FREE_TRIES).min(9)).min(MAX_LOCK_SECS) } else { 0 };
+}
+
+fn too_many(wait: u64) -> ApiErr {
+    (StatusCode::TOO_MANY_REQUESTS, format!("too many wrong passwords — retry in {wait}s"))
+}
+
+/// Throttled password check: 429 while `ip` is locked out, else argon2-verify on a blocking thread and record it.
+async fn check_pw(ip: IpAddr, pw: String, phc: String) -> Result<bool, ApiErr> {
+    let ise = |e: String| (StatusCode::INTERNAL_SERVER_ERROR, e);
+    let wait = || locked_for(&FAILS.lock().unwrap(), ip, now());
+    if wait() > 0 {
+        return Err(too_many(wait()));
+    }
+    let _permit = ARGON.acquire().await.map_err(|e| ise(e.to_string()))?;
+    if wait() > 0 {
+        return Err(too_many(wait())); // locked while queued behind other checks
+    }
+    let ok = tokio::task::spawn_blocking(move || verify_pw(&pw, &phc)).await.map_err(|e| ise(e.to_string()))?;
+    record(&mut FAILS.lock().unwrap(), ip, ok, now());
+    Ok(ok)
+}
+
+/// hash_pw on a blocking thread (same limit as checks).
+async fn hash_blocking(pw: String) -> Result<String, ApiErr> {
+    let ise = |e: String| (StatusCode::INTERNAL_SERVER_ERROR, e);
+    let _permit = ARGON.acquire().await.map_err(|e| ise(e.to_string()))?;
+    tokio::task::spawn_blocking(move || hash_pw(&pw)).await.map_err(|e| ise(e.to_string()))?.map_err(ise)
+}
+
+/// One-time setup token, made at startup when no admin password exists and printed to the server log. Setting the
+/// first password needs it, so a random LAN host that opens the web first cannot claim the install.
+static SETUP_TOKEN: OnceLock<String> = OnceLock::new();
+
+pub fn init_setup_token(st: &SharedState) {
+    if !st.db.get_config("admin_pw", "").is_empty() {
+        return;
+    }
+    let tok = random_token();
+    let ip = st.db.get_config("dhcp_server_ip", "<server-ip>");
+    tracing::info!("no admin password yet — open http://{ip}/login and enter the setup token: {tok}");
+    let _ = SETUP_TOKEN.set(tok);
+}
+
 fn cookie_token(req: &Request<Body>) -> Option<String> {
     let raw = req.headers().get(header::COOKIE)?.to_str().ok()?;
     raw.split(';').find_map(|c| c.trim().strip_prefix(&format!("{COOKIE}=")).map(str::to_string))
 }
 
+/// New random session secret, stored → every cookie signed with the old one stops working.
+fn rotate_secret(st: &SharedState) -> Result<[u8; 32], String> {
+    let k = random32();
+    st.db.set_config("session_secret", &hex(&k))?;
+    Ok(k)
+}
+
 /// Per-install 32-byte secret that signs session cookies, stored hex in config `session_secret` (generated once).
-/// ponytail: a first-request race can generate it twice; last write wins and only invalidates a cookie minted in
-/// the same instant — negligible for a single-admin tool.
+/// A first-request race can generate it twice; last write wins and only invalidates a cookie minted in the same
+/// instant — negligible for a single-admin tool.
 fn secret(st: &SharedState) -> [u8; 32] {
     let parse = |h: &str| -> Option<[u8; 32]> {
         let b: Vec<u8> = (0..h.len() / 2).map(|i| u8::from_str_radix(&h[i * 2..i * 2 + 2], 16).ok()).collect::<Option<_>>()?;
@@ -61,10 +166,10 @@ fn secret(st: &SharedState) -> [u8; 32] {
     if let Some(k) = parse(&st.db.get_config("session_secret", "")) {
         return k;
     }
-    let mut k = [0u8; 32];
-    OsRng.fill_bytes(&mut k);
-    let _ = st.db.set_config("session_secret", &k.iter().map(|x| format!("{x:02x}")).collect::<String>());
-    k
+    rotate_secret(st).unwrap_or_else(|e| {
+        tracing::error!("session secret not saved ({e}) — logins won't stick until the database is writable");
+        random32()
+    })
 }
 
 /// Stateless session token: `<expiry-unix-secs>.<blake3 keyed MAC of the expiry>`.
@@ -90,6 +195,7 @@ fn is_public(method: &axum::http::Method, path: &str) -> bool {
         "/api/drivers/for",
         "/api/license",
         "/api/license/result",
+        "/api/booted",
         "/broom-prep",
         "/broom-prep-win",
     ];
@@ -114,18 +220,8 @@ fn host_ok(st: &SharedState, req: &Request<Body>) -> bool {
     host == ip || host == "localhost" || host == "127.0.0.1"
 }
 
-/// Test mode (BOOTROM_TEST=1): skip the whole guard so automated e2e scripts don't need a login. Never set on a
-/// real server; a WARN is logged at startup (main.rs) when it is on.
-pub fn test_mode() -> bool {
-    static M: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *M.get_or_init(|| std::env::var("BOOTROM_TEST").is_ok())
-}
-
 /// Guard middleware on the whole router: Host check, then a session for everything that is not public.
 pub async fn guard(State(st): State<SharedState>, req: Request<Body>, next: Next) -> Response {
-    if test_mode() {
-        return next.run(req).await;
-    }
     if !host_ok(&st, &req) {
         return (StatusCode::MISDIRECTED_REQUEST, "bad Host").into_response();
     }
@@ -155,6 +251,19 @@ struct Pw {
     password: String,
 }
 
+#[derive(Deserialize)]
+struct SetupBody {
+    password: String,
+    #[serde(default)]
+    token: String,
+}
+
+#[derive(Deserialize)]
+struct NewPw {
+    current: String,
+    new: String,
+}
+
 fn session_cookie(token: &str, max_age: u64) -> [(header::HeaderName, String); 1] {
     [(
         header::SET_COOKIE,
@@ -166,36 +275,41 @@ fn new_session(st: &SharedState) -> String {
     sign(&secret(st), now() + SESSION_SECS)
 }
 
-/// POST /api/auth/setup — set the admin password the FIRST time only (no password stored yet). Logs the caller.
+/// POST /api/auth/setup {password, token} — set the admin password the FIRST time only (no password stored yet),
+/// with the setup token printed to the server log at startup. Logs the caller.
 async fn setup(
     State(st): State<SharedState>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
-    Json(b): Json<Pw>,
-) -> Result<impl IntoResponse, (StatusCode, String)> {
+    Json(b): Json<SetupBody>,
+) -> Result<impl IntoResponse, ApiErr> {
     if !st.db.get_config("admin_pw", "").is_empty() {
         return Err((StatusCode::CONFLICT, "admin password already set — log in".into()));
+    }
+    if !SETUP_TOKEN.get().is_some_and(|t| same(t, b.token.trim())) {
+        tracing::warn!("admin setup with a wrong setup token from {}", peer.ip());
+        return Err((StatusCode::FORBIDDEN, "wrong setup token — copy it from the server log".into()));
     }
     if b.password.len() < 8 {
         return Err((StatusCode::BAD_REQUEST, "password must be at least 8 characters".into()));
     }
-    let hash = hash_pw(&b.password).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    let hash = hash_blocking(b.password).await?;
     st.db.set_config("admin_pw", &hash).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
     tracing::warn!("admin password set from {}", peer.ip());
     let token = new_session(&st);
     Ok((session_cookie(&token, SESSION_SECS), Json(serde_json::json!({"ok": true}))))
 }
 
-/// POST /api/auth/login — check the password, start a session. A wrong try is logged (brute-force visibility).
+/// POST /api/auth/login — check the password (throttled per IP), start a session. A wrong try is logged.
 async fn login(
     State(st): State<SharedState>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
     Json(b): Json<Pw>,
-) -> Result<impl IntoResponse, (StatusCode, String)> {
+) -> Result<impl IntoResponse, ApiErr> {
     let stored = st.db.get_config("admin_pw", "");
     if stored.is_empty() {
         return Err((StatusCode::CONFLICT, "no admin password set yet".into()));
     }
-    if !verify_pw(&b.password, &stored) {
+    if !check_pw(peer.ip(), b.password, stored).await? {
         tracing::warn!("failed admin login from {}", peer.ip());
         return Err((StatusCode::UNAUTHORIZED, "wrong password".into()));
     }
@@ -203,8 +317,31 @@ async fn login(
     Ok((session_cookie(&token, SESSION_SECS), Json(serde_json::json!({"ok": true}))))
 }
 
-/// POST /api/auth/logout — clear the cookie. ponytail: stateless tokens can't be revoked server-side; for a
-/// single-admin LAN tool, clearing the browser's cookie is enough (add a denylist only if that ever matters).
+/// POST /api/password {current, new} — change the admin password (session required). Rotates the session secret,
+/// so every other signed-in browser is logged out; the caller gets a fresh cookie and stays in.
+async fn change_pw(
+    State(st): State<SharedState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    Json(b): Json<NewPw>,
+) -> Result<impl IntoResponse, ApiErr> {
+    let ise = |e: String| (StatusCode::INTERNAL_SERVER_ERROR, e);
+    if b.new.len() < 8 {
+        return Err((StatusCode::BAD_REQUEST, "new password must be at least 8 characters".into()));
+    }
+    if !check_pw(peer.ip(), b.current, st.db.get_config("admin_pw", "")).await? {
+        tracing::warn!("password change with a wrong current password from {}", peer.ip());
+        // 403, not 401: the web app treats 401 as "session expired" and jumps to the login page.
+        return Err((StatusCode::FORBIDDEN, "wrong current password".into()));
+    }
+    let hash = hash_blocking(b.new).await?;
+    st.db.set_config("admin_pw", &hash).map_err(ise)?;
+    let key = rotate_secret(&st).map_err(ise)?;
+    tracing::warn!("admin password changed from {} — all other sessions logged out", peer.ip());
+    Ok((session_cookie(&sign(&key, now() + SESSION_SECS), SESSION_SECS), Json(serde_json::json!({"ok": true}))))
+}
+
+/// POST /api/auth/logout — clear the cookie. Stateless tokens can't be revoked one by one; changing the password
+/// (rotates the signing secret) revokes them all.
 async fn logout() -> impl IntoResponse {
     (session_cookie("", 0), Json(serde_json::json!({"ok": true})))
 }
@@ -241,10 +378,43 @@ mod tests {
         let pub_post = |p| is_public(&Method::POST, p);
         assert!(pub_get("/login"), "the standalone sign-in page is public");
         assert!(pub_get("/boot.ipxe") && pub_get("/tftp/broom/x/vmlinuz"));
-        assert!(pub_post("/api/license") && pub_post("/api/auth/login") && pub_get("/api/golden-chunk"));
+        assert!(pub_post("/api/license") && pub_post("/api/auth/login") && pub_get("/api/golden-chunk") && pub_post("/api/booted"));
+        assert!(!pub_post("/api/prep-token") && !pub_post("/api/images/base-mode"), "admin only");
         // guarded now: the app shell + its fragments (login is a separate page)
         assert!(!pub_get("/") && !pub_get("/machines") && !pub_get("/ui/images"));
         assert!(!pub_get("/api/status") && !pub_get("/api/images") && !pub_post("/api/images/delete"));
         assert!(!pub_post("/api/dhcp") && !pub_post("/api/machines/import") && !pub_get("/api/events"));
+        assert!(!pub_post("/api/password"), "changing the password needs a session");
+    }
+
+    #[test]
+    fn throttle_per_ip() {
+        let mut f = Fails::new();
+        let ip: IpAddr = "10.0.0.5".parse().unwrap();
+        let other: IpAddr = "10.0.0.6".parse().unwrap();
+        for _ in 0..4 {
+            record(&mut f, ip, false, 100);
+            assert_eq!(locked_for(&f, ip, 100), 0, "first tries are free");
+        }
+        record(&mut f, ip, false, 100);
+        assert_eq!(locked_for(&f, ip, 100), 1, "5th failure locks 1 s");
+        record(&mut f, ip, false, 101);
+        assert_eq!(locked_for(&f, ip, 101), 2, "then doubles");
+        assert_eq!(locked_for(&f, ip, 103), 0, "lock expires");
+        assert_eq!(locked_for(&f, other, 101), 0, "other IPs unaffected");
+        for _ in 0..30 {
+            record(&mut f, ip, false, 200);
+        }
+        assert_eq!(locked_for(&f, ip, 200), MAX_LOCK_SECS, "capped");
+        record(&mut f, ip, true, 1000);
+        assert!(f.is_empty(), "success forgets the IP");
+        record(&mut f, ip, false, 0);
+        record(&mut f, other, false, 10_000);
+        assert!(!f.contains_key(&ip), "idle entries dropped");
+    }
+
+    #[test]
+    fn setup_token_compare() {
+        assert!(same("abc", "abc") && !same("abc", "abd") && !same("abc", ""));
     }
 }

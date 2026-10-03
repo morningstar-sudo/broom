@@ -31,6 +31,7 @@
   <div class="brand">Broom Console</div>
   <h2 id="title">Sign in</h2>
   <p class="hint" id="hint">Enter the admin password.</p>
+  <input id="tok" placeholder="Setup token (from the server log)" autocomplete="off" spellcheck="false" hidden>
   <input id="pw" type="password" placeholder="Admin password" autocomplete="current-password" required>
   <input id="pw2" type="password" placeholder="Confirm password" autocomplete="new-password" hidden>
   <button id="go" type="submit">Continue</button>
@@ -47,8 +48,8 @@ const $=id=>document.getElementById(id);
     if(!s.configured){
       setup=true;
       $('title').textContent='Set the admin password';
-      $('hint').textContent='First run — choose a password for the web admin (min 8 characters). Anyone on the LAN can reach this page, so set it now.';
-      $('pw').autocomplete='new-password';$('pw2').hidden=false;
+      $('hint').textContent='First run — enter the setup token printed in the server log (journalctl -u bootrom-mgmt, or the terminal running it), then choose the admin password (min 8 characters).';
+      $('pw').autocomplete='new-password';$('pw2').hidden=false;$('tok').hidden=false;$('tok').focus();
     }
   }catch(e){/* offline — let the submit surface the error */}
 })();
@@ -58,11 +59,12 @@ $('f').onsubmit=async e=>{
   if(setup){
     if(pw.length<8){msg.textContent='at least 8 characters';return;}
     if(pw!==$('pw2').value){msg.textContent='passwords do not match';return;}
+    if(!$('tok').value.trim()){msg.textContent='enter the setup token';return;}
   }
   $('go').disabled=true;msg.textContent='';
   let r;
   try{r=await fetch(setup?'/api/auth/setup':'/api/auth/login',
-    {method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({password:pw})});}
+    {method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(setup?{password:pw,token:$('tok').value.trim()}:{password:pw})});}
   catch(err){msg.textContent='✗ '+err.message;$('go').disabled=false;return;}
   if(!r.ok){msg.textContent='✗ '+((await r.text())||('HTTP '+r.status));$('go').disabled=false;return;}
   location.replace('/');   // session cookie set → the app is now reachable

@@ -292,21 +292,39 @@ fn in_range(ip: Ipv4Addr, cfg: &Cfg) -> bool {
     (u32::from(cfg.start)..=u32::from(cfg.end)).contains(&u32::from(ip))
 }
 
-/// May `mac` use `ip`? A bound machine only gets its binding; others get free IPs in the range.
+/// Another MAC holds a live lease on `ip`.
+fn held_by_other<'a>(mac: &str, ip: Ipv4Addr, st: &'a Store) -> Option<&'a str> {
+    st.leases.iter().find(|(m, (l, exp))| m.as_str() != mac && *l == ip && *exp > st.now).map(|(m, _)| m.as_str())
+}
+
+/// The machine's static IP, if it is free to hand out (no other MAC still holds a live lease on it — the admin may
+/// have bound an address that a guest laptop got from the pool; handing it out twice = IP conflict until renewal).
+fn usable_binding(mac: &str, st: &Store) -> Option<Ipv4Addr> {
+    let (b, _) = st.bindings.get(mac)?;
+    held_by_other(mac, *b, st).is_none().then_some(*b)
+}
+
+/// May `mac` use `ip`? A bound machine gets its binding (once free) — or, while another MAC still holds it, a free
+/// pool IP for now; others get free IPs in the range.
 fn allowed(mac: &str, ip: Ipv4Addr, cfg: &Cfg, st: &Store) -> bool {
     if let Some((b, _)) = st.bindings.get(mac) {
-        return *b == ip;
+        if *b == ip {
+            return held_by_other(mac, ip, st).is_none();
+        }
+        if usable_binding(mac, st).is_some() {
+            return false;
+        }
     }
     in_range(ip, cfg)
         && ip != cfg.server
         && Some(ip) != cfg.gateway
         && !st.bindings.values().any(|(b, _)| *b == ip)
-        && !st.leases.iter().any(|(m, (l, exp))| m != mac && *l == ip && *exp > st.now)
+        && held_by_other(mac, ip, st).is_none()
 }
 
 fn pick(mac: &str, cfg: &Cfg, st: &Store) -> Option<Ipv4Addr> {
-    if let Some((b, _)) = st.bindings.get(mac) {
-        return Some(*b);
+    if let Some(b) = usable_binding(mac, st) {
+        return Some(b);
     }
     if let Some((l, _)) = st.leases.get(mac) {
         if allowed(mac, *l, cfg, st) {
@@ -357,10 +375,16 @@ pub fn handle(req: &Packet, from: SocketAddrV4, port: u16, cfg: &Cfg, st: &Store
         return out;
     }
     let mac = mac_str(&req.chaddr);
+    // Relayed (giaddr set): from another subnet — this server only serves its own segment (pool, gateway and the
+    // broadcast reply are all for this LAN).
+    if !req.giaddr.is_unspecified() {
+        tracing::debug!("dhcp: ignoring relayed packet from {mac} via {}", req.giaddr);
+        return out;
+    }
     let k = kind(req);
     let want = req.opt_ip(50).or((!req.ciaddr.is_unspecified()).then_some(req.ciaddr));
     // Option 12 is attacker-controlled (any laptop on the LAN). Keep only NetBIOS-safe characters (letters, digits,
-    // '-', max 15) so a hostname can never carry markup/quotes into the admin UI, iPXE scripts or logs (H6).
+    // '-', max 15) so a hostname can never carry markup/quotes into the admin UI, iPXE scripts or logs.
     let host = req.opt(12).and_then(|h| {
         let s: String = String::from_utf8_lossy(h).chars().filter(|c| c.is_ascii_alphanumeric() || *c == '-').take(15).collect();
         (!s.is_empty()).then_some(s)
@@ -377,6 +401,11 @@ pub fn handle(req: &Packet, from: SocketAddrV4, port: u16, cfg: &Cfg, st: &Store
         DISCOVER => match pick(&mac, cfg, st) {
             Some(ip) => {
                 out.log = format!("client {} ({}) DHCP offer {ip} - mac {mac}", who(&mac, st), k.label());
+                if let Some((b, _)) = st.bindings.get(&mac).filter(|(b, _)| *b != ip) {
+                    let holder = held_by_other(&mac, *b, st).unwrap_or("?");
+                    out.log += &format!(" (its static IP {b} is still leased to {holder} — given a pool IP until that lease ends)");
+                    out.warn = true;
+                }
                 out.reply = Some((full_reply(req, OFFER, ip, &mac, k, cfg, st), Dest::Broadcast));
                 // An OFFER hold must NOT shorten a longer lease this MAC already has (else a spoofed DISCOVER frees
                 // the victim's IP in 60 s → IP conflict). Keep the later expiry.
@@ -404,11 +433,15 @@ pub fn handle(req: &Packet, from: SocketAddrV4, port: u16, cfg: &Cfg, st: &Store
                     out.reply = Some((full_reply(req, ACK, ip, &mac, k, cfg, st), dest));
                     out.lease = set(ip, cfg.lease_s as u64);
                 }
-                Some(ip) => {
+                // NAK only a client we know (bound, or holding/held a lease here). An unknown MAC asking for an IP
+                // without naming a server is renewing/rebooting with ANOTHER DHCP server's lease — stay silent
+                // (RFC 2131 4.3.2), never knock it off the LAN.
+                Some(ip) if st.bindings.contains_key(&mac) || st.leases.contains_key(&mac) => {
                     out.log = format!("client {mac} asked for {ip}: refused (NAK)");
                     out.warn = true;
                     out.reply = Some((reply(req, NAK, cfg), Dest::Broadcast));
                 }
+                Some(ip) => tracing::debug!("dhcp: {mac} asked for {ip}, no record of it here → silent"),
                 None => {}
             }
         }
@@ -416,8 +449,10 @@ pub fn handle(req: &Packet, from: SocketAddrV4, port: u16, cfg: &Cfg, st: &Store
             // Only honour a DECLINE for OUR server, for an in-range IP this MAC actually holds. Otherwise anyone
             // could park `declined-<ip>` rows over the whole pool. (opt 54 must be us or absent.)
             let ours = req.opt_ip(54).is_none_or(|s| s == cfg.server);
+            let leased = |ip| st.leases.get(&mac).map(|(l, _)| *l) == Some(ip);
+            let bound = |ip| st.bindings.get(&mac).map(|(b, _)| *b) == Some(ip);
             match req.opt_ip(50) {
-                Some(ip) if ours && in_range(ip, cfg) && st.leases.get(&mac).map(|(l, _)| *l) == Some(ip) => {
+                Some(ip) if ours && in_range(ip, cfg) && leased(ip) && !bound(ip) => {
                     out.log = format!("client {mac} declined {ip} (address in use on the LAN): held for one lease");
                     out.warn = true;
                     out.lease = LeaseOp::Set {
@@ -427,6 +462,11 @@ pub fn handle(req: &Packet, from: SocketAddrV4, port: u16, cfg: &Cfg, st: &Store
                         expires: st.now + cfg.lease_s as u64,
                         source: "full",
                     };
+                }
+                // A static IP is not parked (the admin chose it) — but the conflict must be visible.
+                Some(ip) if ours && (leased(ip) || bound(ip)) => {
+                    out.log = format!("client {} declined {ip}: another device on the LAN uses that address", who(&mac, st));
+                    out.warn = true;
                 }
                 _ => {}
             }
@@ -523,21 +563,13 @@ async fn serve(sock: tokio::net::UdpSocket, port: u16, st: SharedState) {
     }
 }
 
-/// (Re)start the network boot services: the built-in DHCP server (:67) + TFTP (:69), or nothing when the DHCP
-/// server is turned off (`dhcp_mode` = "off"). Stops the previous listeners first (config change from the web).
+/// (Re)start the network boot services: TFTP (:69, iPXE) always, the DHCP server (:67) only when it is on
+/// (`dhcp_mode` = "full"). With the DHCP server off, the LAN's own DHCP (a router) points PXE clients here with
+/// next-server/option 66 + boot file/option 67, and tftp.rs's autoexec.ipxe sends iPXE on to the boot menu.
+/// Stops the previous listeners after the new ones are bound (config change from the web).
 pub async fn start(st: &SharedState) -> Result<String, String> {
-    let stop_old = |st: &SharedState| {
-        let old: Vec<_> = std::mem::take(&mut *st.net.lock().unwrap());
-        old
-    };
-    if st.db.get_config("dhcp_mode", "full") != "full" {
-        for h in stop_old(st) {
-            h.abort();
-            let _ = h.await;
-        }
-        return Ok("DHCP server off (dhcp_mode=off) — no DHCP/TFTP listeners".into());
-    }
     let cfg = Cfg::load(&*st.db)?;
+    let full = st.db.get_config("dhcp_mode", "off") == "full";
     let bind = |port: u16, bcast: bool| {
         udp(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, port), &cfg.iface, bcast).map_err(|e| {
             let hint = if e.kind() == std::io::ErrorKind::AddrInUse { " — another DHCP/TFTP server is running" } else { "" };
@@ -546,24 +578,25 @@ pub async fn start(st: &SharedState) -> Result<String, String> {
     };
     // Bind the NEW listeners first (SO_REUSEPORT lets them share the ports with the old ones). Only once all binds
     // succeed do we stop the old listeners — a rejected config never leaves the café with no DHCP/TFTP.
-    let dhcp = bind(67, true)?;
+    let dhcp = if full { Some(bind(67, true)?) } else { None };
     let tftp = bind(69, false)?;
-    for h in stop_old(st) {
+    let old: Vec<_> = std::mem::take(&mut *st.net.lock().unwrap());
+    for h in old {
         h.abort();
         let _ = h.await;
     }
-    let handles = vec![
-        tokio::spawn(serve(dhcp, 67, st.clone())),
-        tokio::spawn(crate::tftp::serve(tftp, cfg.server, cfg.iface.clone())),
-    ];
+    let mut handles = vec![tokio::spawn(crate::tftp::serve(tftp, cfg.server, cfg.iface.clone()))];
+    handles.extend(dhcp.map(|d| tokio::spawn(serve(d, 67, st.clone()))));
     st.net.lock().unwrap().extend(handles);
-    Ok(format!(
-        "DHCP {}-{} on {} (server {}), TFTP :69",
-        cfg.start,
-        cfg.end,
-        if cfg.iface.is_empty() { "all interfaces" } else { &cfg.iface },
-        cfg.server
-    ))
+    let on = if cfg.iface.is_empty() { "all interfaces" } else { &cfg.iface };
+    Ok(if full {
+        format!("DHCP {}-{} on {on} (server {}), TFTP :69", cfg.start, cfg.end, cfg.server)
+    } else {
+        format!(
+            "DHCP server off — TFTP :69 on {on}: set the LAN's DHCP to next-server {} + boot file snponly.efi",
+            cfg.server
+        )
+    })
 }
 
 #[cfg(test)]
@@ -726,10 +759,57 @@ mod tests {
         let (p, _) = ok.reply.unwrap();
         assert_eq!((p.opt(53), p.yiaddr), (Some(&[ACK][..]), Ipv4Addr::new(10, 0, 0, 101)));
         assert!(matches!(ok.lease, LeaseOp::Set { expires: 4600, .. }));
-        let bad = handle(&req(REQUEST, &[(50, &[192, 168, 1, 5])]), FROM, 67, &cfg(), &store());
+        // A client we know (it has a lease here) asking for a wrong IP → NAK.
+        let mut known = store();
+        known.leases.insert(MACS.into(), (Ipv4Addr::new(10, 0, 0, 100), 5000));
+        let bad = handle(&req(REQUEST, &[(50, &[192, 168, 1, 5])]), FROM, 67, &cfg(), &known);
         assert_eq!(bad.reply.unwrap().0.opt(53), Some(&[NAK][..]));
         let other = handle(&req(REQUEST, &[(50, &[10, 0, 0, 101]), (54, &[10, 0, 0, 9])]), FROM, 67, &cfg(), &store());
         assert!(other.reply.is_none());
+    }
+
+    /// A REQUEST without option 54 for an IP outside our pool, from a MAC we have no record of = a client renewing
+    /// with ANOTHER DHCP server → never NAK it off the LAN.
+    #[test]
+    fn foreign_client_is_not_naked() {
+        let out = handle(&req(REQUEST, &[(50, &[192, 168, 1, 5])]), FROM, 67, &cfg(), &store());
+        assert!(out.reply.is_none() && matches!(out.lease, LeaseOp::None));
+        let mut renewing = req(REQUEST, &[]);
+        renewing.ciaddr = Ipv4Addr::new(192, 168, 1, 5);
+        assert!(handle(&renewing, FROM, 67, &cfg(), &store()).reply.is_none());
+    }
+
+    /// Static IP still leased to another MAC → the bound machine gets a pool IP for now (warned), not a duplicate.
+    #[test]
+    fn binding_waits_for_live_lease() {
+        let mut st = store();
+        let bound = Ipv4Addr::new(10, 0, 0, 50);
+        st.bindings.insert(MACS.into(), (bound, Some("PC01".into())));
+        st.leases.insert("aa:aa:aa:aa:aa:aa".into(), (bound, 2000)); // live
+        let out = handle(&req(DISCOVER, &[]), FROM, 67, &cfg(), &st);
+        assert_eq!(out.reply.unwrap().0.yiaddr, Ipv4Addr::new(10, 0, 0, 100));
+        assert!(out.warn && out.log.contains("still leased to aa:aa:aa:aa:aa:aa"));
+        assert!(!allowed(MACS, bound, &cfg(), &st), "no ACK for the held static IP");
+        st.leases.insert("aa:aa:aa:aa:aa:aa".into(), (bound, 500)); // expired
+        assert_eq!(handle(&req(DISCOVER, &[]), FROM, 67, &cfg(), &st).reply.unwrap().0.yiaddr, bound);
+        assert!(!allowed(MACS, Ipv4Addr::new(10, 0, 0, 100), &cfg(), &st), "once free: only the binding");
+    }
+
+    #[test]
+    fn decline_of_static_ip_is_logged_not_parked() {
+        let mut st = store();
+        let bound = Ipv4Addr::new(10, 0, 0, 50);
+        st.bindings.insert(MACS.into(), (bound, Some("PC01".into())));
+        let out = handle(&req(DECLINE, &[(50, &bound.octets())]), FROM, 67, &cfg(), &st);
+        assert!(out.warn && out.log.contains("PC01 declined 10.0.0.50") && matches!(out.lease, LeaseOp::None));
+    }
+
+    #[test]
+    fn relayed_packets_ignored() {
+        let mut r = req(DISCOVER, &[]);
+        r.giaddr = Ipv4Addr::new(10, 9, 0, 1);
+        let out = handle(&r, FROM, 67, &cfg(), &store());
+        assert!(out.reply.is_none() && matches!(out.lease, LeaseOp::None));
     }
 
     #[test]

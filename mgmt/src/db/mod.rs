@@ -19,6 +19,8 @@ pub struct Image {
     pub hash: Option<String>,
     /// Where a Linux golden is served from: "disk" | "zram".
     pub cache_mode: String,
+    /// Windows: first logon waits in BASE MODE (a technician sets up apps, then restarts) instead of committing base.
+    pub base_mode: bool,
 }
 
 pub struct NewImage<'a> {
@@ -101,6 +103,8 @@ pub trait Db: Send + Sync {
     /// Result of a publish: boot script + golden hash.
     fn set_published(&self, id: i64, boot_script: &str, hash: &str) -> DbResult<()>;
     fn set_cache_mode(&self, id: i64, mode: &str) -> DbResult<()>;
+    /// Windows: the first logon on each machine waits in BASE MODE for a technician (true) or commits base at once.
+    fn set_base_mode(&self, id: i64, on: bool) -> DbResult<()>;
     fn set_active_version(&self, id: i64, version: Option<&str>) -> DbResult<()>;
 
     // --- machines ---
@@ -118,6 +122,9 @@ pub trait Db: Send + Sync {
     fn set_license(&self, machine_id: i64, key: Option<&str>) -> DbResult<()>;
     /// Allow one more delivery of the stored key (→ armed, gen + 1).
     fn rearm_license(&self, machine_id: i64) -> DbResult<()>;
+    /// sent → armed WITHOUT a new generation: the base is being rebuilt anyway (new golden, rename, drivers) and needs
+    /// the key once more; the generation is unchanged so this alone causes no extra rebuild. true = changed.
+    fn rearm_quiet(&self, machine_id: i64) -> DbResult<bool>;
     /// armed → sent atomically; returns the key only if it WAS armed (two requests never both get it).
     fn take_license(&self, machine_id: i64) -> DbResult<Option<String>>;
     fn set_license_result(&self, machine_id: i64, result: &str) -> DbResult<()>;

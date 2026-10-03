@@ -3,8 +3,9 @@
 mgmt/$HOME/
 # cargo target dir if cargo is run directly inside the repo (build.sh uses ~/broom-target)
 mgmt/target/
-# iPXE build output (also covered by ipxe-src/src/.gitignore)
-mgmt/ipxe/ipxe-src/src/bin*/
+# iPXE: generated checkout (upstream + mgmt/ipxe/patches, made by mgmt/ipxe/build.sh) and its build output
+mgmt/ipxe/ipxe-src/
+mgmt/ipxe/snponly.efi
 
 # --- local runtime data ---
 # Local DB + images during development
@@ -24,10 +25,6 @@ mgmt/dist/
 *.log
 *.tmp
 .env
-
-# --- vendored iPXE: upstream repo tooling, unused here ---
-mgmt/ipxe/ipxe-src/.github/
-mgmt/ipxe/ipxe-src/.claude/
 
 # --- editors / OS ---
 .vscode/

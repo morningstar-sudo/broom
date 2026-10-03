@@ -57,7 +57,7 @@ function renderMachines(){
        <td>${m.hostname?esc(m.hostname):'<span class="mono">—</span>'} ${m.registered?'':'<span class="pill new">new</span>'}</td>
        <td class="mono">${m.grp?esc(m.grp):'—'}</td>
        <td class="mono">${esc(m.ip)}</td><td class="mono">${esc(m.mac)}</td>
-       <td><span class="led ${m.online?'on':'off'}">${m.online?'ON':'OFF'}</span></td>
+       <td><span class="led ${m.online?'on':'off'}">${m.online?'ON':'OFF'}</span>${m.not_reset?' <span class="pill" style="background:var(--off,#c33);color:#fff" title="Windows started from the SSD without a PXE boot at '+new Date(m.not_reset*1000).toLocaleString()+' — this session was NOT reset (cable out, server down, boot order changed?). Cleared by the next PXE boot.">not reset</span>':''}</td>
        <td class="mono" title="${esc(m.license_result||'')}">${licCell(m)}</td>
        <td class="row">${m.registered
           ? `<button class="ghost" onclick="wake('${esc(m.mac)}')">Wake</button>
@@ -238,6 +238,7 @@ async function loadImages(){
        <td class="row">
          <button class="ghost" onclick="setDefault(${i.id})">Default</button>
          <button class="ghost" onclick="toggleCache(${i.id},'${esc(i.cache_mode||'disk')}','${esc(i.name)}')">${(i.cache_mode==='zram')?'→disk':'→zram'}</button>
+         ${i.os==='windows'?`<button class="ghost" onclick="toggleBase(${i.id},${!i.base_mode})" title="BASE MODE: the first logon on each machine waits for a technician to set up apps, then restart (saved for every boot). Off: base is saved by itself.">${i.base_mode?'Base mode: ON':'Base mode: off'}</button>`:''}
          <button class="ghost" onclick="republish(${i.id},'${esc(i.name)}')">Republish</button>
          <button class="ghost" onclick="showVersions(${i.id},'${esc(i.name)}','${esc(i.os)}')">Versions</button>
          <button class="ghost" onclick="exportImage(${i.id},'${esc(i.name)}',null)" title="download as a VMware VM (.vmx + .vmdk) to edit the golden">Export</button>
@@ -246,12 +247,20 @@ async function loadImages(){
        </td></tr>`).join('') || '<tr><td colspan=8 class="mono">no images yet</td></tr>';
   // srvhost inside the images fragment → set after it is injected.
   try{document.getElementById('srvhost2').textContent=location.host;}catch(_){}
-  try{document.getElementById('srvhost3').textContent=location.host;}catch(_){}
 }
 async function toggleCache(id,cur,name){const mode=cur==='zram'?'disk':'zram';
   if(!confirm('Switch image cache to "'+mode+'"? (republish; zram loads the img into RAM)'))return;
   const el=document.getElementById('img_status');
   try{await j('/api/images/cache-mode',mk({id,mode}));watchJob(name,el);}catch(e){el.textContent=' ✗ '+e.message;}}
+async function toggleBase(id,on){
+  if(on&&!confirm('BASE MODE: every machine that builds its base (first boot, new golden, rename, drivers) will wait on the desktop until someone restarts it — whatever is done before that restart is kept for good. Turn on?'))return;
+  const el=document.getElementById('img_status');
+  try{await j('/api/images/base-mode',mk({id,on}));loadImages();}catch(e){el.textContent=' ✗ '+e.message;}}
+// One-time link for the Windows prep script (it carries the guest password): valid once, for an hour.
+async function prepCmd(){const el=document.getElementById('prep_cmd');
+  try{const r=await j('/api/prep-token',{method:'POST'});
+    el.textContent='irm "http://'+location.host+'/broom-prep-win?t='+r.token+'" | iex';}
+  catch(e){el.textContent='✗ '+e.message;}}
 async function setDefault(id){await j('/api/images/default',mk({id}));loadImages()}
 // Job status by image name, pushed over SSE (/api/events "job") → text of el until ✓/✗.
 // done(): optional, called when the job finishes (e.g. refresh the versions list).
@@ -372,11 +381,12 @@ async function delDriver(id,name){if(!confirm('Delete driver package "'+name+'"?
 // ---- network ----
 async function loadDhcp(){const c=await j('/api/dhcp');
   ['mode','iface','server_ip','subnet','range_start','range_end','gateway','dns'].forEach(k=>{const e=document.getElementById('dhcp_'+k);if(e)e.value=c[k]||'';});
-  const sb=document.getElementById('dhcp_ipxe_signed');if(sb)sb.checked=!!c.ipxe_signed;
+  for(const k of ['ipxe_signed','strict_reset']){const e=document.getElementById('dhcp_'+k);if(e)e.checked=!!c[k];}
+  const ps=document.getElementById('pxe_srv');if(ps&&c.server_ip)ps.textContent=c.server_ip;
   const dm=document.getElementById('dhcp_mode');if(dm)dm.onchange=toggleFull;toggleFull();}
 function toggleFull(){const fo=document.getElementById('full_only'),dm=document.getElementById('dhcp_mode');if(fo&&dm)fo.style.display=dm.value==='full'?'':'none';}
 async function applyDhcp(){const b={};['mode','iface','server_ip','subnet','range_start','range_end','gateway','dns'].forEach(k=>b[k]=document.getElementById('dhcp_'+k).value);
-  const sb=document.getElementById('dhcp_ipxe_signed');if(sb)b.ipxe_signed=sb.checked?'1':'0';
+  for(const k of ['ipxe_signed','strict_reset']){const e=document.getElementById('dhcp_'+k);if(e)b[k]=e.checked?'1':'0';}
   const m=document.getElementById('dhcp_msg');
   try{const r=await j('/api/dhcp',mk(b));m.textContent=' ✓ '+(r.status||'applied');}catch(e){m.textContent=' ✗ '+e.message;}}
 

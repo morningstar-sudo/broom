@@ -1,4 +1,4 @@
-// boot.rs — M5 boot menu.
+// boot.rs — iPXE boot menu.
 // GET /boot.ipxe?mac=&ip=  (URL handed out by the built-in DHCP) → dynamic iPXE menu: images, default
 //   item + countdown; on timeout → the default.
 // GET /boot/start?image=&mac=&ip=  (a menu choice chains here) → logs "client … started" and returns
@@ -15,7 +15,7 @@ use tracing::{info, warn};
 use crate::db::Machine;
 use crate::SharedState;
 
-/// iPXE built by mgmt/ipxe/build.sh from mgmt/ipxe/ipxe-src (upgrading the mgmt binary = upgrading iPXE too).
+/// iPXE built by mgmt/ipxe/build.sh (upstream + mgmt/ipxe/patches) (upgrading the mgmt binary = upgrading iPXE too).
 pub(crate) const SNPONLY_EFI: &[u8] = include_bytes!("../ipxe/snponly.efi");
 /// Official Secure Boot iPXE (mgmt/ipxe/fetch-signed.sh), served under `sb/` when "Secure Boot clients" is on:
 /// the iPXE shim (signed by Microsoft) loads `sb/snponly.efi` (signed by the iPXE CA) by name from the same directory.
@@ -24,13 +24,23 @@ pub(crate) const SB_IPXE_EFI: &[u8] = include_bytes!("../ipxe/signed/snponly.efi
 
 type Q = Query<HashMap<String, String>>;
 
+fn norm_mac(m: &str) -> String {
+    m.to_lowercase().replace('-', ":")
+}
+
+/// mac + ip from the query, validated: these endpoints are open to anyone and both values go into the log, so
+/// anything that is not a MAC / an IPv4 address (e.g. a URL-encoded newline forging a log line) is dropped.
+fn client_ids(q: &HashMap<String, String>) -> (String, String) {
+    let mac = q.get("mac").map(|m| norm_mac(m)).filter(|m| m.len() == 17 && m.chars().all(|c| c.is_ascii_hexdigit() || c == ':'));
+    let ip = q.get("ip").and_then(|i| i.parse::<std::net::Ipv4Addr>().ok()).map(|i| i.to_string());
+    (mac.unwrap_or_default(), ip.unwrap_or_else(|| "?".into()))
+}
+
 /// Client identity from the query (iPXE expands ${net0/mac} = "34:5a:60:7b:2b:1d", ${net0/ip}):
 /// (mac, ip, its row in the Machines table).
 fn client(st: &SharedState, q: &HashMap<String, String>) -> (String, String, Option<Machine>) {
-    let norm = |m: &str| m.to_lowercase().replace('-', ":");
-    let mac = q.get("mac").map(|m| norm(m)).unwrap_or_default();
-    let ip = q.get("ip").cloned().unwrap_or_else(|| "?".into());
-    let m = st.db.machines().unwrap_or_default().into_iter().find(|m| norm(&m.mac) == mac);
+    let (mac, ip) = client_ids(q);
+    let m = if mac.is_empty() { None } else { st.db.machines().unwrap_or_default().into_iter().find(|m| norm_mac(&m.mac) == mac) };
     (mac, ip, m)
 }
 
@@ -49,7 +59,7 @@ pub async fn render(State(st): State<SharedState>, Query(q): Q) -> impl IntoResp
     // Clamp: menu_script does timeout_s * 1000 (would overflow / panic on a huge stored value).
     let timeout_s: u64 = st.db.get_config("boot_timeout", "10").parse().unwrap_or(10).min(3600);
     let images = menu_images(st.db.images().unwrap_or_default(), m.as_ref().and_then(|m| m.image_id));
-    script(menu_script(&images, timeout_s, host.as_deref(), lic, secure_boot(&st)))
+    script(menu_script(&images, timeout_s, host.as_deref(), lic, m.is_some(), secure_boot(&st)))
 }
 
 /// "Secure Boot clients" switch (Network page): clients run the official signed iPXE.
@@ -83,8 +93,14 @@ fn menu_images(images: Vec<crate::db::Image>, own: Option<i64>) -> Vec<MenuImage
 /// A menu choice: log the boot + hand over the image's boot script.
 pub async fn start(State(st): State<SharedState>, Query(q): Q) -> impl IntoResponse {
     let (mac, ip, m) = client(&st, &q);
+    if !mac.is_empty() {
+        // Went through PXE: /api/booted (Windows) and /api/license compare against this.
+        st.pxe_seen.lock().unwrap().insert(mac.clone(), crate::now_secs());
+        st.not_reset.lock().unwrap().remove(&mac);
+    }
     let host = m.and_then(|m| m.hostname);
-    let name = q.get("image").cloned().unwrap_or_default();
+    // Image names are [A-Za-z0-9_-]; keep only those (the value is logged and echoed into the iPXE script).
+    let name: String = q.get("image").map_or("", String::as_str).chars().filter(|c| c.is_ascii_alphanumeric() || matches!(*c, '_' | '-')).take(64).collect();
     let who = host.clone().unwrap_or_else(|| mac.clone());
     let h = host.as_deref().unwrap_or("-");
     let img = st.db.image_by_name(&name).ok().flatten();
@@ -92,7 +108,14 @@ pub async fn start(State(st): State<SharedState>, Query(q): Q) -> impl IntoRespo
     script(match (&img, boot) {
         (Some(i), Some(bs)) => {
             info!("client {who} started - mac {mac} - ip {ip} - hostname {h} - image {name} ({})", i.os);
-            format!("#!ipxe\n{}{bs}\n", shim_line(&st, i).unwrap_or_default())
+            // Per-boot switches the Windows stage reads from its cmdline (broom.base= / broom.strict=).
+            let strict = st.db.get_config("strict_reset", "0") == "1";
+            format!(
+                "#!ipxe\nset broom-base {}\nset broom-strict {}\n{}{bs}\n",
+                i.base_mode as u8,
+                strict as u8,
+                shim_line(&st, i).unwrap_or_default()
+            )
         }
         _ => {
             warn!("client {who} chose image {name:?} - mac {mac} - ip {ip}: not published, back to the menu");
@@ -110,12 +133,12 @@ struct MenuImage {
 }
 
 /// iPXE menu script. ASCII only (the iPXE console font has no accented characters).
-/// Layout (ipxe-src/src/hci/tui/menu_ui.c): title left + `menu-hint` + countdown right, horizontal line,
+/// Layout (menu_ui.c, mgmt/ipxe/patches/0001-*): title left + `menu-hint` + countdown right, horizontal line,
 /// list `[1] NAME`, horizontal line, `menu-footer` "left|center|right". White text on dark, selected black/white.
 /// ESC → shell (technical).
 /// `sb` = clients run the official signed iPXE (Secure Boot): it has no menu-hint/menu-footer, so the same info is
 /// shown as non-selectable `item --gap` lines above the images instead (the cursor still starts on an image).
-fn menu_script(images: &[MenuImage], timeout_s: u64, host: Option<&str>, lic: Option<i64>, sb: bool) -> String {
+fn menu_script(images: &[MenuImage], timeout_s: u64, host: Option<&str>, lic: Option<i64>, reg: bool, sb: bool) -> String {
     let mut items = String::new();
     let mut targets = String::new();
     let mut default = None;
@@ -152,6 +175,10 @@ fn menu_script(images: &[MenuImage], timeout_s: u64, host: Option<&str>, lic: Op
     // broom-lic → stage cmdline (broom.lic=): license key set / re-armed → base rebuilt → broom-done fetches it.
     if let Some(g) = lic {
         set_host.push_str(&format!("set broom-lic {g}\n"));
+    }
+    // broom-reg → broom.reg=: a machine in the Machines table may have its disk partitioned without asking.
+    if reg {
+        set_host.push_str("set broom-reg 1\n");
     }
     let host = if host.is_empty() { "not registered".into() } else { host };
     // One short line per field: the menu box is as wide as its longest line, so this fits any console width.
@@ -203,7 +230,7 @@ mod tests {
 
     #[test]
     fn menu_default_keys_ascii() {
-        let s = menu_script(&[img("win-11", true), img("ubuntu", false)], 5, Some("FPS-43 $x|"), Some(3), false);
+        let s = menu_script(&[img("win-11", true), img("ubuntu", false)], 5, Some("FPS-43 $x|"), Some(3), true, false);
         assert!(s.starts_with("#!ipxe\n"));
         assert!(s.is_ascii(), "the iPXE font is ASCII only");
         assert!(s.contains("item --key 1 img_win_11 [1] win-11\n"));
@@ -214,6 +241,7 @@ mod tests {
         assert!(s.contains("set menu-footer Host: FPS-43x|IP: ${net0/ip}|MAC: ${net0/mac}\n"));
         assert!(s.contains("set broom-host FPS-43x\n"));
         assert!(s.contains("set broom-lic 3\n"), "license generation, never the key");
+        assert!(s.contains("set broom-reg 1\n"), "registered machine → the stage may partition its disk");
         // menu_ui.c draws the countdown in the last 32 columns of the hint row (from col 46 on 80x25).
         let hint = s.lines().find_map(|l| l.strip_prefix("set menu-hint ")).unwrap();
         assert!(2 + hint.len() <= 80 - 2 - 32, "menu-hint would be overwritten by the countdown");
@@ -230,6 +258,7 @@ mod tests {
             boot_script: None,
             hash: None,
             cache_mode: "disk".into(),
+            base_mode: false,
         };
         let defaults = |own| {
             super::menu_images(vec![img(1, "win11", true), img(2, "ubuntu", false)], own)
@@ -243,13 +272,26 @@ mod tests {
         assert_eq!(defaults(Some(9)), ["win11"], "deleted image → global default");
     }
 
+    /// Open endpoints log mac/ip from the query: junk (a forged log line) must never get through.
+    #[test]
+    fn client_ids_validated() {
+        let s = |x: &str| x.to_string();
+        let q = |mac: &str, ip: &str| {
+            super::client_ids(&std::collections::HashMap::from([(s("mac"), s(mac)), (s("ip"), s(ip))]))
+        };
+        assert_eq!(q("34-5A-60-7B-2B-1D", "10.0.0.50"), (s("34:5a:60:7b:2b:1d"), s("10.0.0.50")));
+        assert_eq!(q("aa\nINFO client X started", "1.2.3.4\nfake"), (s(""), s("?")));
+        assert_eq!(q("34:5a:60:7b:2b:1d\n", "999.1.1.1"), (s(""), s("?")));
+        assert_eq!(super::client_ids(&Default::default()), (s(""), s("?")));
+    }
+
     #[test]
     fn menu_no_default_no_timeout() {
-        let s = menu_script(&[img("a", false)], 10, None, None, false);
+        let s = menu_script(&[img("a", false)], 10, None, None, false, false);
         assert!(s.contains("choose  sel || goto shell"));
         assert!(s.contains("Host: not registered|"));
-        assert!(!s.contains("broom-host") && !s.contains("broom-lic"));
-        let s = menu_script(&[], 10, None, None, false);
+        assert!(!s.contains("broom-host") && !s.contains("broom-lic") && !s.contains("broom-reg"), "unknown machine");
+        let s = menu_script(&[], 10, None, None, false, false);
         assert!(s.contains("item --key s shell [S] iPXE shell (no image yet"));
     }
 
@@ -257,11 +299,11 @@ mod tests {
     /// images (so number keys still map to images), still ASCII.
     #[test]
     fn menu_secure_boot_footer_as_gap_lines() {
-        let s = menu_script(&[img("win-11", true)], 5, Some("PC05"), None, true);
+        let s = menu_script(&[img("win-11", true)], 5, Some("PC05"), None, true, true);
         assert!(s.is_ascii());
         let item = s.find("item --key 1 img_win_11").unwrap();
         let head = s.find("item --gap Host : PC05\nitem --gap IP   : ${net0/ip}\nitem --gap MAC  : ${net0/mac}\n").unwrap();
         assert!(head < item && s.contains("item --gap Arrows/number to select, Enter to boot\n"));
-        assert!(!menu_script(&[img("a", false)], 5, None, None, false).contains("item --gap"));
+        assert!(!menu_script(&[img("a", false)], 5, None, None, false, false).contains("item --gap"));
     }
 }

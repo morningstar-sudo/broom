@@ -1,5 +1,5 @@
 // wol.rs — Wake-on-LAN. Sends the magic packet directly over UDP (std), no etherwake needed.
-// ponytail: magic packet = 6×0xFF + 16×MAC. 20 lines, no shell-out.
+// Magic packet = 6×0xFF + 16×MAC. 20 lines, no shell-out.
 use std::net::UdpSocket;
 
 /// Parse "AA:BB:CC:DD:EE:FF" (or '-') → 6 bytes.

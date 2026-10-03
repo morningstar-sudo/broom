@@ -1,4 +1,4 @@
-// images.rs — M6 mgmt-image. CRUD + versions (versions.rs: snapshot / rollback) + set default.
+// images.rs — images: CRUD + versions (versions.rs: snapshot / rollback) + set default.
 use axum::{
     body::Body,
     extract::{DefaultBodyLimit, Query, State},
@@ -21,6 +21,8 @@ pub fn routes() -> Router<SharedState> {
         .route("/api/images/publish", post(publish_now))
         .route("/api/images/boot-script", post(set_boot_script))
         .route("/api/images/cache-mode", post(set_cache_mode))
+        .route("/api/images/base-mode", post(set_base_mode))
+        .route("/api/prep-token", post(prep_token))
         .route("/api/images/job", get(job_status))
         .route("/broom-prep", get(broom_prep))
         .route("/broom-prep-win", get(broom_prep_win))
@@ -40,7 +42,7 @@ pub fn routes() -> Router<SharedState> {
 pub(crate) type ApiError = (StatusCode, String);
 
 fn ise(e: String) -> ApiError {
-    tracing::error!("internal error: {e}"); // keep OS paths/errors in the server log, not the response (L7)
+    tracing::error!("internal error: {e}"); // keep OS paths/errors in the server log, not the response
     (StatusCode::INTERNAL_SERVER_ERROR, "internal error".into())
 }
 
@@ -184,7 +186,7 @@ async fn golden_chunk(State(st): State<SharedState>, Query(q): Query<ChunkReq>) 
     if !valid_name(&q.name) || q.h.len() != 64 || !q.h.chars().all(|c| c.is_ascii_hexdigit()) {
         return Err((StatusCode::BAD_REQUEST, "bad name or hash".into()));
     }
-    // Cap concurrent 4 MB read+hash jobs (M4): a flood of chunk requests can't saturate the blocking pool / disk.
+    // Cap concurrent 4 MB read+hash jobs: a flood of chunk requests can't saturate the blocking pool / disk.
     let _permit = st.chunk_sem.acquire().await.map_err(|e| ise(e.to_string()))?;
     let z = tokio::task::spawn_blocking(move || crate::publish::golden_chunk_zst(&q.name, q.i, &q.h))
         .await
@@ -227,7 +229,7 @@ async fn rollback(State(st): State<SharedState>, Json(b): Json<VersionBody>) -> 
     spawn_job(&st, img.name.clone(), "rollback", move |st, name, steps| {
         // Rollback rewrites the shared golden (image.img). For a disk-cache image that file backs the live target,
         // so a connected client would read half old / half new → refuse while any client is attached. zram is safe:
-        // the running client keeps its own RAM copy, and the republish below makes a fresh device (M9).
+        // the running client keeps its own RAM copy, and the republish below makes a fresh device.
         if img.os == "linux" && img.cache_mode != "zram" && crate::iscsi::any_session() {
             return Err("clients are connected; rolling back rewrites the shared disk golden they are reading. \
                         Reboot/close the clients (do it off-hours), or set this image to zram cache."
@@ -410,7 +412,7 @@ struct ChunkQuery {
 /// PUT /api/images/upload-chunk?name=&file=&offset=&total=  body = up to 16 MB of `file` at `offset`.
 /// Chunks may arrive in any order, in parallel, or twice (retry): each is written at its own offset.
 async fn upload_chunk(State(st): State<SharedState>, Query(q): Query<ChunkQuery>, body: Body) -> Result<Json<serde_json::Value>, ApiError> {
-    // Don't accept new chunks for an image whose publish/rollback job is running (L3): the staging upload it feeds
+    // Don't accept new chunks for an image whose publish/rollback job is running: the staging upload it feeds
     // would be consumed by the wrong job. Cheap in-memory check (no DB hit per chunk).
     if st.jobs.lock().unwrap().get(&q.name).is_some_and(|s| s.starts_with('⏳')) {
         return Err((StatusCode::CONFLICT, "image has a running job — wait for it to finish".into()));
@@ -597,8 +599,66 @@ async fn broom_prep(State(st): State<SharedState>) -> impl IntoResponse {
     )
 }
 
+#[derive(Deserialize)]
+struct BaseModeBody {
+    id: i64,
+    on: bool,
+}
+
+/// POST /api/images/base-mode {id, on} — Windows: BASE MODE on the first logon of each machine (a technician sets up
+/// apps, then restarts) instead of committing base at once. Read by /boot/start → no republish needed.
+async fn set_base_mode(State(st): State<SharedState>, Json(b): Json<BaseModeBody>) -> Result<Json<serde_json::Value>, ApiError> {
+    let name = name_of(&st, b.id)?;
+    st.db.set_base_mode(b.id, b.on).map_err(ise)?;
+    tracing::info!("image {name}: base mode {}", if b.on { "ON (first logon waits for a technician)" } else { "off" });
+    Ok(Json(serde_json::json!({"ok": true})))
+}
+
+/// One-time links for /broom-prep-win: token → expiry. The script carries the guest password, so it is not public.
+static PREP_TOKENS: std::sync::LazyLock<std::sync::Mutex<HashMap<String, u64>>> = std::sync::LazyLock::new(Default::default);
+const PREP_TOKEN_SECS: u64 = 3600;
+
+/// POST /api/prep-token (admin) → {token}: valid once, for an hour. Refused while the guest password is the default.
+async fn prep_token(State(st): State<SharedState>) -> Result<Json<serde_json::Value>, ApiError> {
+    let pw = st.db.get_config("ltsp_password", "");
+    if pw.is_empty() || pw == "123456" {
+        return Err((StatusCode::BAD_REQUEST, "set a guest password first (Settings → Guest user) — it is baked into the golden".into()));
+    }
+    let (tok, now) = (crate::auth::random_token(), crate::now_secs());
+    let mut t = PREP_TOKENS.lock().unwrap();
+    t.retain(|_, exp| *exp > now);
+    t.insert(tok.clone(), now + PREP_TOKEN_SECS);
+    tracing::info!("Windows prep link issued (valid once, {} min)", PREP_TOKEN_SECS / 60);
+    Ok(Json(serde_json::json!({"token": tok})))
+}
+
+/// Consume a prep token: true once per token, while unexpired.
+fn take_prep_token(t: &mut HashMap<String, u64>, tok: &str, now: u64) -> bool {
+    let hit = t.keys().find(|k| crate::auth::same(k.as_str(), tok)).cloned();
+    hit.and_then(|k| t.remove(&k)).is_some_and(|exp| exp > now)
+}
+
 /// Script that prepares a Windows golden (tweaks + EFI + unattend + sysprep), run INSIDE the Windows VM.
-/// GET /broom-prep-win  →  irm http://<server>/broom-prep-win | iex
-async fn broom_prep_win(State(st): State<SharedState>) -> impl IntoResponse {
-    ([(header::CONTENT_TYPE, "text/plain; charset=utf-8")], crate::winstage::prep_script(&*st.db))
+/// GET /broom-prep-win?t=<one-time token from the Images page>  →  irm "http://<server>/broom-prep-win?t=…" | iex
+async fn broom_prep_win(State(st): State<SharedState>, Query(q): Query<HashMap<String, String>>) -> Result<impl IntoResponse, ApiError> {
+    let tok = q.get("t").map_or("", String::as_str);
+    if !take_prep_token(&mut PREP_TOKENS.lock().unwrap(), tok, crate::now_secs()) {
+        tracing::warn!("broom-prep-win refused: missing, used or expired link");
+        return Err((StatusCode::FORBIDDEN, "this link is used or expired — copy a new one from the web admin (Images → Windows prep command)".into()));
+    }
+    tracing::info!("broom-prep-win script handed out (link used)");
+    Ok(([(header::CONTENT_TYPE, "text/plain; charset=utf-8")], crate::winstage::prep_script(&*st.db)))
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn prep_token_once_and_expires() {
+        let mut t = std::collections::HashMap::from([("aaa".to_string(), 2000u64), ("old".to_string(), 500u64)]);
+        assert!(!super::take_prep_token(&mut t, "", 1000), "no token");
+        assert!(!super::take_prep_token(&mut t, "bbb", 1000), "unknown token");
+        assert!(super::take_prep_token(&mut t, "aaa", 1000));
+        assert!(!super::take_prep_token(&mut t, "aaa", 1000), "used once");
+        assert!(!super::take_prep_token(&mut t, "old", 1000), "expired");
+    }
 }

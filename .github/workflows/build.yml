@@ -1,4 +1,4 @@
-# Build iPXE (snponly.efi, from mgmt/ipxe/ipxe-src) + the mgmt binary (static musl, iPXE + web UI embedded),
+# Build iPXE (snponly.efi = upstream at mgmt/ipxe/IPXE_COMMIT + mgmt/ipxe/patches) + the mgmt binary (static musl, iPXE + web UI embedded),
 # run the unit tests, keep both as artifacts. Every push to main also tags the commit
 # v<Cargo.toml version>-<short sha> (e.g. v0.3.0-a1b2c3d) and publishes a release with the files.
 name: build
@@ -49,7 +49,7 @@ jobs:
           v=$(sed -n 's/^version = "\(.*\)"/\1/p' mgmt/Cargo.toml | head -1)
           echo "name=v$v-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
 
-      # --ipxe: always rebuild snponly.efi from source (checkout timestamps can't tell what changed).
+      # --ipxe: always fetch + patch + build snponly.efi from source (it is not in git).
       # `bash`, not ./build.sh: committed from Windows the script has no exec bit (mode 100644).
       - name: Build iPXE + bootrom-mgmt + unit tests
         run: bash build.sh --ipxe

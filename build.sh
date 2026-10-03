@@ -1,11 +1,11 @@
 #!/bin/bash
 # build.sh — build the whole project in one go (Linux / WSL):
-#   1. iPXE snponly.efi   (only when mgmt/ipxe/ipxe-src changed since the last build, or --ipxe)
+#   1. iPXE snponly.efi   (upstream + mgmt/ipxe/patches; only when a patch, IPXE_COMMIT or ipxe-src changed, or --ipxe)
 #   2. mgmt release binary (embeds snponly.efi + web UI) + unit tests (skip with --no-test);
 #      --live also runs the root-only live tests (real LIO / zram / ping / LVM, asks for sudo)
 #   3. copy to mgmt/dist/bootrom-mgmt  → deploy that single file to the server
 # Windows: double-click build.cmd (runs this script in WSL).
-# Needs: Rust stable via rustup (https://rustup.rs), musl-tools, gcc, make, perl, liblzma-dev (iPXE).
+# Needs: Rust stable via rustup (https://rustup.rs), musl-tools, git, gcc, make, perl, liblzma-dev (iPXE).
 # Output: a STATIC binary (musl) → runs on any x86_64 Linux server. Cargo output → ~/broom-target
 # (override with CARGO_TARGET_DIR) — building on /mnt/* is slow and would litter the repo.
 set -euo pipefail
@@ -32,13 +32,14 @@ for a in "$@"; do
 done
 
 missing=""
-for t in cargo gcc make perl; do command -v "$t" >/dev/null || missing="$missing $t"; done
+for t in cargo git gcc make perl; do command -v "$t" >/dev/null || missing="$missing $t"; done
 [ -z "$missing" ] || { echo "missing tools:$missing" >&2; exit 1; }
 
-# 1. iPXE — rebuild only if a source file is newer than the embedded binary.
+# 1. iPXE — rebuild only if the patches, the pinned commit or a source file is newer than the embedded binary.
 efi=mgmt/ipxe/snponly.efi
+# (ipxe-src/ only exists while someone edits the patches — see mgmt/ipxe/build.sh.)
 if [ "$force_ipxe" = 1 ] || [ ! -f "$efi" ] \
-   || [ -n "$(find mgmt/ipxe/ipxe-src/src -newer "$efi" -type f ! -path '*/bin*' -print -quit)" ]; then
+   || [ -n "$(find mgmt/ipxe/IPXE_COMMIT mgmt/ipxe/patches mgmt/ipxe/ipxe-src/src -newer "$efi" -type f ! -path '*/bin*' -print -quit 2>/dev/null)" ]; then
   echo "== [1/3] iPXE"
   bash mgmt/ipxe/build.sh
 else

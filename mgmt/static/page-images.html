@@ -23,6 +23,7 @@
     </div>
     <p class="hint">Power the VM off, then pick its whole folder — no zip needed (only .vmx/.vmdk are sent; memory files are skipped).</p>
     <p class="hint"><b>Linux</b>: <code>curl -fsSL http://<span id="srvhost2">SERVER</span>/broom-prep | sudo bash</code></p>
-    <p class="hint"><b>Windows (Pro)</b>: PowerShell Admin: <code>irm http://<span id="srvhost3">SERVER</span>/broom-prep-win | iex</code></p>
+    <p class="hint"><b>Windows (Pro)</b>: PowerShell Admin, in the VM: <button class="ghost" onclick="prepCmd()">Windows prep command</button>
+      <code id="prep_cmd" style="user-select:all"></code><br>The command works once, for an hour (it carries the guest password) — get a new one for each run.</p>
   </div>
 </section>
