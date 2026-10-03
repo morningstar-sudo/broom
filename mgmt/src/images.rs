@@ -32,6 +32,9 @@ pub fn routes() -> Router<SharedState> {
         .route("/api/images/snapshots", get(snapshots))
         .route("/api/images/rollback", post(rollback))
         .route("/api/images/version-delete", post(version_delete))
+        .route("/api/images/export", post(export))
+        .route("/api/images/from-version", post(from_version))
+        .route("/api/images/export-file", get(export_file))
 }
 
 pub(crate) type ApiError = (StatusCode, String);
@@ -54,6 +57,7 @@ async fn list(State(st): State<SharedState>) -> Result<Json<Vec<serde_json::Valu
         let mut v = serde_json::to_value(&i).unwrap_or_default();
         v["size"] = m.as_ref().map(|m| m.len()).into();
         v["used"] = m.as_ref().map(|m| m.blocks() * 512).into();
+        v["export"] = crate::export::export_info(&i.name);
         v
     });
     Ok(Json(rows.collect()))
@@ -116,6 +120,7 @@ async fn delete(
         let freed = tokio::task::spawn_blocking(move || {
             crate::publish::unpublish(&st2, &n); // target, zram, tftp/ boot files (golden.vhdx)
             let _ = std::fs::remove_dir_all(crate::images_dir().join(&n));
+            let _ = std::fs::remove_dir_all(crate::export::export_dir(&n));
             let _g = st2.versions_lock.lock().unwrap_or_else(|p| p.into_inner());
             crate::versions::delete_all(&n)
         })
@@ -240,12 +245,83 @@ async fn rollback(State(st): State<SharedState>, Json(b): Json<VersionBody>) -> 
     Ok(Json(serde_json::json!({"ok": true, "async": true})))
 }
 
+#[derive(Deserialize)]
+struct FromVersionBody {
+    id: i64,
+    version: String,
+    name: String,
+}
+
+/// A saved version → a NEW image on the list (same OS + cache mode): its manifest becomes the new image's v1 (chunks
+/// shared, nothing copied), restored to its image.img, then published. Background job on the new image.
+async fn from_version(State(st): State<SharedState>, Json(b): Json<FromVersionBody>) -> Result<Json<serde_json::Value>, ApiError> {
+    let src = st.db.image(b.id).map_err(ise)?.ok_or((StatusCode::NOT_FOUND, format!("image {} not found", b.id)))?;
+    if !valid_name(&b.name) {
+        return Err((StatusCode::BAD_REQUEST, "name may only contain letters/digits/_/-".into()));
+    }
+    let id = st
+        .db
+        .add_image(&NewImageRow { name: &b.name, os: &src.os, boot_script: None, cache_mode: &src.cache_mode })
+        .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+    std::fs::create_dir_all(crate::images_dir().join(&b.name)).map_err(|e| ise(e.to_string()))?;
+    tracing::info!("image {} created from {} {}", b.name, src.name, b.version);
+    let version = b.version;
+    spawn_job(&st, b.name, "from-version", move |st, name, steps| {
+        steps.go(&format!("restore {} {version}", src.name));
+        {
+            let _g = st.versions_lock.lock().unwrap_or_else(|p| p.into_inner());
+            crate::versions::clone_to(&src.name, &version, name, &format!("from {} {version}", src.name))?;
+            crate::versions::rehydrate(name, "v1")?;
+        }
+        // Windows: the boot partitions kept at upload go along (Export needs them).
+        let orig = crate::images_dir().join(&src.name).join("orig");
+        if orig.exists() {
+            let dst = crate::images_dir().join(name).join("orig");
+            crate::winstage::run("cp", &["-r", "--sparse=always", &orig.to_string_lossy(), &dst.to_string_lossy()])?;
+        }
+        st.db.set_active_version(id, Some("v1"))?;
+        crate::publish::run_publish(st, name, steps)
+    })?;
+    Ok(Json(serde_json::json!({"ok": true, "async": true, "id": id})))
+}
+
+#[derive(Deserialize)]
+struct ExportBody {
+    id: i64,
+    /// None = the current golden (image.img).
+    version: Option<String>,
+}
+
+/// Export an image (or one of its versions) as a VMware VM → work/export/<name>/ (export.rs). Background job.
+async fn export(State(st): State<SharedState>, Json(b): Json<ExportBody>) -> Result<Json<serde_json::Value>, ApiError> {
+    let img = st.db.image(b.id).map_err(ise)?.ok_or((StatusCode::NOT_FOUND, format!("image {} not found", b.id)))?;
+    spawn_job(&st, img.name, "export", move |st, name, steps| crate::export::run_export(st, name, &img.os, b.version.as_deref(), steps))?;
+    Ok(Json(serde_json::json!({"ok": true, "async": true})))
+}
+
+/// GET /api/images/export-file?id=&f=vmx|vmdk — the exported files; Range supported (a 30 GB download can resume).
+async fn export_file(State(st): State<SharedState>, Query(q): Query<HashMap<String, String>>, req: axum::extract::Request) -> Result<axum::response::Response, ApiError> {
+    let id: i64 = q.get("id").and_then(|s| s.parse().ok()).ok_or((StatusCode::BAD_REQUEST, "missing ?id=".to_string()))?;
+    let f = q.get("f").map(String::as_str).filter(|f| matches!(*f, "vmx" | "vmdk")).ok_or((StatusCode::BAD_REQUEST, "f must be vmx or vmdk".to_string()))?;
+    let name = name_of(&st, id)?;
+    let file = format!("{name}.{f}"); // name is [A-Za-z0-9_-] (valid_name) → safe in the path + header
+    let p = crate::export::export_dir(&name).join(&file);
+    if !p.exists() {
+        return Err((StatusCode::NOT_FOUND, "no export yet — press Export first".into()));
+    }
+    let mut res = tower_http::services::ServeFile::new(p).try_call(req).await.map_err(|e| ise(e.to_string()))?.map(Body::new);
+    if let Ok(v) = header::HeaderValue::from_str(&format!("attachment; filename=\"{file}\"")) {
+        res.headers_mut().insert(header::CONTENT_DISPOSITION, v);
+    }
+    Ok(res)
+}
+
 /// Versions of an image, newest first. GET /api/images/snapshots?id=<id>
 async fn snapshots(State(st): State<SharedState>, Query(q): Query<HashMap<String, String>>) -> Result<Json<serde_json::Value>, ApiError> {
     let id: i64 = q.get("id").and_then(|s| s.parse().ok()).ok_or((StatusCode::BAD_REQUEST, "missing ?id=".to_string()))?;
     let img = st.db.image(id).map_err(ise)?.ok_or((StatusCode::NOT_FOUND, format!("image {id} not found")))?;
     let active = img.active_version.clone();
-    let versions = tokio::task::spawn_blocking(move || crate::versions::list(&img.name, img.active_version.as_deref()))
+    let versions = tokio::task::spawn_blocking(move || crate::versions::list_vs_current(&img.name, img.active_version.as_deref()))
         .await
         .map_err(|e| ise(e.to_string()))?;
     Ok(Json(serde_json::json!({"active": active, "versions": versions})))

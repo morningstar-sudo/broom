@@ -366,7 +366,8 @@ fn vmx_disks(vmx: &str) -> Vec<String> {
         .collect()
 }
 
-/// The first disk the VM uses according to the .vmx (used by tests + the single-disk path).
+/// The first disk the .vmx names (tests; golden_from uses vmx_disks to refuse multi-disk VMs).
+#[cfg(test)]
 fn vmx_disk(vmx: &str) -> Option<String> {
     vmx_disks(vmx).into_iter().next()
 }
@@ -452,8 +453,24 @@ fn run(bin: &str, args: &[&str]) -> Result<(), String> {
 }
 
 /// Publish an image according to its os. Blocking (called from spawn_blocking).
+/// Secure Boot clients (official signed iPXE, Network page) boot the Canonical-signed Ubuntu kernels — the Windows
+/// stage and Linux goldens alike — through Ubuntu's Microsoft-signed shim (package shim-signed): any Ubuntu shim
+/// verifies any Canonical-signed kernel. Copied to tftp/shim/shimx64.efi at every publish (cheap); boot.rs adds the
+/// `shim` line. Missing → only Secure Boot clients are affected (warning).
+pub(crate) fn refresh_shim() {
+    let src = ["/usr/lib/shim/shimx64.efi.signed.latest", "/usr/lib/shim/shimx64.efi.signed"].into_iter().find(|p| Path::new(p).is_file());
+    let Some(src) = src else {
+        return tracing::warn!("no Ubuntu shim (apt install shim-signed): Secure Boot clients cannot boot the kernels");
+    };
+    let dir = crate::tftp_dir().join("shim");
+    if let Err(e) = std::fs::create_dir_all(&dir).and_then(|_| std::fs::copy(src, dir.join("shimx64.efi"))) {
+        tracing::warn!("copy {src} → {}: {e}", dir.display());
+    }
+}
+
 pub fn run_publish(st: &SharedState, name: &str, steps: &mut Steps) -> Result<String, String> {
     let img = st.db.image_by_name(name)?.ok_or(format!("image '{name}' not found in DB"))?;
+    refresh_shim();
     let (id, os) = (img.id, img.os);
     match os.as_str() {
         "linux" => {

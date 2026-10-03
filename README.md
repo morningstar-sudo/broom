@@ -46,6 +46,16 @@ Then open `http://<server-ip>/`:
 
 **Client machines:** UEFI, Secure Boot **off**, **PXE first** in the boot order (required for the reset-on-boot).
 
+**Secure Boot (test):** tick **Secure Boot clients** on the Network page. Clients then get the official iPXE signed
+by the iPXE project (`mgmt/ipxe/signed/`, via its Microsoft-signed shim) instead of broom's own build, and the Ubuntu
+kernels boot through Ubuntu's Microsoft-signed shim (`apt install shim-signed` on the server). The Windows stage runs
+the server's own kernel, which must be ≥ 6.x: shim rejects the 5.15 kernel ("Relocation section is invalid"), so on
+Ubuntu 22.04 install `linux-generic-hwe-22.04`, reboot, then publish again. On the clients: enable
+Secure Boot and the "Microsoft 3rd-party UEFI CA" (often off on Secured-core PCs). The menu footer (Host / IP / MAC)
+then shows as lines under the images. Untick to go back to broom's own iPXE. TPM 2.0, VBS / Memory integrity (HVCI)
+and IOMMU work on the clients too — broom-prep-win turns on VBS + HVCI in the golden (runs where the client has VT-x);
+drivers in the golden must be HVCI-compatible (e.g. the VMware `e1000` NIC driver is blocked — use `e1000e`).
+
 ## Adding a golden
 
 Build the golden in a VM, power it off, then upload the whole VM folder (only `.vmx` / `.vmdk` are
@@ -62,6 +72,15 @@ sent, in parallel 8 MB chunks with retry) — or a single `.vmdk` / `.img` / `.z
   irm http://<server>/broom-prep-win | iex
   ```
   The VM syspreps and powers off by itself → upload (OS = Windows).
+
+## Versions, export
+
+- **Versions** (Images → Versions): snapshot / rollback the golden (deduplicated 4 MB chunks). **→ New image** turns a
+  version into a separate image on the list (only its manifest is copied — no extra disk space) and publishes it.
+- **Export** (per image, or per version): builds a VMware VM (`<name>.vmx` + `<name>.vmdk`) to edit the golden again —
+  download both into one folder, open the `.vmx`, edit, run broom-prep again, upload. Needs free space on the server
+  ≈ the golden size. Windows: works for images uploaded with this version or later (publish trims the boot partitions
+  from the golden; they are now kept aside for the export).
 
 ## Data & configuration
 

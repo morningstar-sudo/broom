@@ -16,6 +16,7 @@ pub fn routes() -> Router<SharedState> {
     Router::new()
         .route("/api/machines", get(list).post(add))
         .route("/api/machines/assign", post(assign))
+        .route("/api/config", get(get_config))
         .route("/api/config/timeout", post(set_timeout))
         .route("/api/config/zram-reserve", post(set_zram_reserve))
         .route("/api/dhcp", get(get_dhcp).post(set_dhcp))
@@ -357,6 +358,14 @@ async fn assign(
     Ok(ok())
 }
 
+/// System page values (same defaults as their readers: boot.rs, publish.rs).
+async fn get_config(State(st): State<SharedState>) -> Json<serde_json::Value> {
+    Json(serde_json::json!({
+        "boot_timeout": st.db.get_config("boot_timeout", "10").parse::<u64>().unwrap_or(10),
+        "zram_reserve_mb": st.db.get_config("zram_reserve_mb", "2048").parse::<u64>().unwrap_or(2048),
+    }))
+}
+
 #[derive(Deserialize)]
 struct Timeout {
     seconds: u64,
@@ -402,6 +411,7 @@ async fn get_dhcp(State(st): State<SharedState>) -> Json<serde_json::Value> {
         "gateway": g("dhcp_gateway", ""),
         "dns": g("dhcp_dns", ""),
         "lease": g("dhcp_lease", "12h"),
+        "ipxe_signed": g("ipxe_signed", "0") == "1",
     }))
 }
 
@@ -417,6 +427,8 @@ struct DhcpBody {
     gateway: Option<String>,
     dns: Option<String>,
     lease: Option<String>,
+    /// "Secure Boot clients": "1" = official signed iPXE for UEFI PXE, "0" = our own build.
+    ipxe_signed: Option<String>,
 }
 
 /// Validate one DHCP field. IPv4 fields must parse; a stored server IP / gateway / DNS flows into scripts + boot
@@ -430,6 +442,7 @@ fn dhcp_field_ok(key: &str, v: &str) -> Result<(), String> {
         "dhcp_server_ip" | "dhcp_subnet" | "dhcp_netmask" | "dhcp_range_start" | "dhcp_range_end" => ipv4(v),
         "dhcp_gateway" | "dhcp_dns" => v.is_empty() || v.split(',').all(|p| ipv4(p.trim())),
         "dhcp_lease" => v.parse::<u32>().is_ok() || matches!(v.chars().last(), Some('h' | 'm' | 's')),
+        "ipxe_signed" => v == "0" || v == "1",
         _ => true,
     };
     if ok { Ok(()) } else { Err(format!("{}: invalid value {v:?}", key.trim_start_matches("dhcp_"))) }
@@ -452,6 +465,7 @@ async fn set_dhcp(
         ("dhcp_gateway", &b.gateway),
         ("dhcp_dns", &b.dns),
         ("dhcp_lease", &b.lease),
+        ("ipxe_signed", &b.ipxe_signed),
     ];
     for (k, v) in &fields {
         if let Some(val) = v {

@@ -1,3 +1,4 @@
 # Line endings: shell scripts must stay LF (bash in WSL/Linux), cmd scripts CRLF.
 *.sh  text eol=lf
 *.cmd text eol=crlf
+*.efi binary

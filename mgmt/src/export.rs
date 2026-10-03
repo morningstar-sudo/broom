@@ -1,0 +1,255 @@
+// export.rs — an image (current golden or a saved version) → a VMware VM: <name>.vmx + <name>.vmdk, to edit the
+// golden again (Windows: boots through the broom unattend, edit, broom-prep-win, upload).
+// Windows publish trims image.img in place (winstage::build_golden: holes outside the Windows partition + a
+// one-partition GPT) → keep_boot_regions first saves what the trim destroys (the partition table, ESP/MSR/Recovery
+// or System Reserved) to images/<name>/orig/, and the export stitches it back around the Windows partition.
+// Linux goldens are never modified → converted as they are.
+use serde::{Deserialize, Serialize};
+use std::path::{Path, PathBuf};
+
+use crate::winstage::run;
+use crate::SharedState;
+
+const ESP: &str = "C12A7328-F81F-11D2-BA4B-00A0C93EC93B";
+
+/// What the upload had outside the Windows partition: head.raw = [0, start), tail.raw = [start+size, total).
+#[derive(Serialize, Deserialize, Debug, PartialEq)]
+struct Orig {
+    start: u64,
+    size: u64,
+    total: u64,
+    firmware: String,
+}
+
+fn orig_dir(name: &str) -> PathBuf {
+    crate::images_dir().join(name).join("orig")
+}
+
+/// work/export/<name>/: <name>.vmx, <name>.vmdk, `version` (what was exported).
+pub(crate) fn export_dir(name: &str) -> PathBuf {
+    crate::work_dir().join("export").join(name)
+}
+
+/// sfdisk -J → (already trimmed by publish = GPT with exactly one partition, firmware the disk boots with).
+fn layout(sfdisk_json: &str) -> Result<(bool, &'static str), String> {
+    let v: serde_json::Value = serde_json::from_str(sfdisk_json).map_err(|e| format!("partition table: {e}"))?;
+    let t = &v["partitiontable"];
+    let parts = t["partitions"].as_array().map(|a| a.as_slice()).unwrap_or(&[]);
+    let gpt = t["label"] == "gpt";
+    // ESP: GPT type GUID, or MBR type ef.
+    let esp = parts.iter().any(|p| p["type"].as_str().is_some_and(|ty| ty.eq_ignore_ascii_case(ESP) || ty == "ef"));
+    Ok((gpt && parts.len() == 1, if esp { "efi" } else { "bios" }))
+}
+
+/// The single partition (start, size) in bytes of a trimmed golden, None if it has not exactly one.
+fn single_part(sfdisk_json: &str) -> Option<(u64, u64)> {
+    let v: serde_json::Value = serde_json::from_str(sfdisk_json).ok()?;
+    let t = &v["partitiontable"];
+    let ss = t["sectorsize"].as_u64().unwrap_or(512);
+    match t["partitions"].as_array()?.as_slice() {
+        [p] => Some((p["start"].as_u64()? * ss, p["size"].as_u64()? * ss)),
+        _ => None,
+    }
+}
+
+/// Copy [off, off+len) of `src` into a new sparse file `dst` (all-zero MB blocks stay holes).
+fn copy_region(src: &Path, off: u64, len: u64, dst: &Path) -> Result<(), String> {
+    use std::os::unix::fs::FileExt;
+    let f = std::fs::File::open(src).map_err(|e| format!("{}: {e}", src.display()))?;
+    let out = std::fs::File::create(dst).map_err(|e| format!("{}: {e}", dst.display()))?;
+    out.set_len(len).map_err(|e| e.to_string())?;
+    let mut buf = vec![0u8; 1 << 20];
+    let mut done = 0;
+    while done < len {
+        let n = (len - done).min(buf.len() as u64) as usize;
+        f.read_exact_at(&mut buf[..n], off + done).map_err(|e| format!("read {}: {e}", src.display()))?;
+        if buf[..n].iter().any(|&b| b != 0) {
+            out.write_all_at(&buf[..n], done).map_err(|e| format!("write {}: {e}", dst.display()))?;
+        }
+        done += n as u64;
+    }
+    Ok(())
+}
+
+/// Called by winstage::build_golden right BEFORE it trims image.img: keep the partition table + every partition
+/// but Windows (start, size). An already-trimmed image.img (published before) keeps the orig/ of its upload.
+pub(crate) fn keep_boot_regions(raw: &Path, name: &str, (start, size): (u64, u64)) -> Result<(), String> {
+    let (trimmed, firmware) = layout(&run("sfdisk", &["-J", &raw.to_string_lossy()])?)?;
+    if trimmed {
+        return Ok(());
+    }
+    let d = orig_dir(name);
+    let _ = std::fs::remove_dir_all(&d);
+    std::fs::create_dir_all(&d).map_err(|e| format!("{}: {e}", d.display()))?;
+    let total = std::fs::metadata(raw).map_err(|e| e.to_string())?.len();
+    copy_region(raw, 0, start, &d.join("head.raw"))?;
+    copy_region(raw, start + size, total.saturating_sub(start + size), &d.join("tail.raw"))?;
+    // orig.json last: its presence = the set is complete.
+    let o = Orig { start, size, total, firmware: firmware.into() };
+    std::fs::write(d.join("orig.json"), serde_json::to_vec(&o).unwrap_or_default()).map_err(|e| e.to_string())
+}
+
+/// Free bytes on the filesystem holding `p`.
+fn free_bytes(p: &Path) -> Option<u64> {
+    use std::os::unix::ffi::OsStrExt;
+    let c = std::ffi::CString::new(p.as_os_str().as_bytes()).ok()?;
+    // SAFETY: valid NUL-terminated path + a zeroed out-struct that statvfs fills.
+    let mut s: libc::statvfs = unsafe { std::mem::zeroed() };
+    (unsafe { libc::statvfs(c.as_ptr(), &mut s) } == 0).then(|| s.f_bavail as u64 * s.f_frsize as u64)
+}
+
+/// Build work/export/<name>/ from the current golden (version None) or a saved version. Blocking (job).
+pub fn run_export(st: &SharedState, name: &str, os: &str, version: Option<&str>, steps: &mut crate::publish::Steps) -> Result<String, String> {
+    let out = export_dir(name);
+    let _ = std::fs::remove_dir_all(&out);
+    std::fs::create_dir_all(&out).map_err(|e| format!("{}: {e}", out.display()))?;
+    let r = build(st, name, os, version, &out, steps);
+    let _ = std::fs::remove_file(out.join("src.raw"));
+    if r.is_err() {
+        let _ = std::fs::remove_dir_all(&out);
+    }
+    r
+}
+
+fn build(st: &SharedState, name: &str, os: &str, version: Option<&str>, out: &Path, steps: &mut crate::publish::Steps) -> Result<String, String> {
+    use std::os::unix::fs::MetadataExt;
+    let img = crate::images_dir().join(name).join("image.img");
+    // The vmdk holds about the data of the golden (+ a restored version needs its own copy first).
+    let used = std::fs::metadata(&img).map_err(|_| format!("image {name} has no golden yet"))?.blocks() * 512;
+    let copies = if version.is_some() { 2 } else { 1 };
+    let need = used * copies + (1 << 30);
+    if let Some(free) = free_bytes(out).filter(|&f| f < need) {
+        return Err(format!("export needs ~{:.0} GB free in {}, only {:.0} GB", need as f64 / 1e9, out.display(), free as f64 / 1e9));
+    }
+    let src = match version {
+        None => img,
+        Some(v) => {
+            steps.go(&format!("restore {v}"));
+            let p = out.join("src.raw");
+            let _g = st.versions_lock.lock().unwrap_or_else(|p| p.into_inner());
+            crate::versions::rehydrate_to(name, v, &p)?;
+            p
+        }
+    };
+    let s = src.to_string_lossy();
+    let json = run("sfdisk", &["-J", &s])?;
+    let vmdk = out.join(format!("{name}.vmdk"));
+    let v = vmdk.to_string_lossy();
+    steps.go("convert → vmdk");
+    let firmware = if os == "windows" {
+        let d = orig_dir(name);
+        let o: Orig = std::fs::read(d.join("orig.json"))
+            .ok()
+            .and_then(|b| serde_json::from_slice(&b).ok())
+            .ok_or("this Windows image was published before export existed (its boot partitions are gone) — upload the VM again, then export")?;
+        let total = std::fs::metadata(&src).map_err(|e| e.to_string())?.len();
+        if single_part(&json) != Some((o.start, o.size)) || total != o.total {
+            return Err("this version comes from another upload (different disk layout) — its boot partitions were not kept".into());
+        }
+        // qemu-img concatenates its sources: head + the Windows partition of the golden + tail, in one pass.
+        fn q(p: &Path) -> String {
+            p.to_string_lossy().replace(',', ",,") // option-string escaping
+        }
+        let mut srcs = vec![
+            format!("driver=raw,file.filename={}", q(&d.join("head.raw"))),
+            format!("driver=raw,offset={},size={},file.filename={}", o.start, o.size, q(&src)),
+        ];
+        if o.total > o.start + o.size {
+            srcs.push(format!("driver=raw,file.filename={}", q(&d.join("tail.raw"))));
+        }
+        let mut args = vec!["convert", "-m", "16", "-O", "vmdk", "-o", "subformat=monolithicSparse", "--image-opts"];
+        args.extend(srcs.iter().map(String::as_str));
+        args.push(&*v);
+        run("qemu-img", &args)?;
+        o.firmware
+    } else {
+        run("qemu-img", &["convert", "-m", "16", "-f", "raw", "-O", "vmdk", "-o", "subformat=monolithicSparse", &s, &v])?;
+        layout(&json)?.1.to_string()
+    };
+    std::fs::write(out.join(format!("{name}.vmx")), vmx(name, os, &firmware)).map_err(|e| e.to_string())?;
+    std::fs::write(out.join("version"), version.unwrap_or("current")).map_err(|e| e.to_string())?;
+    let size = std::fs::metadata(&vmdk).map(|m| m.len()).unwrap_or(0);
+    Ok(format!(
+        "exported {} ({:.1} GB, {firmware}) — download {name}.vmx + {name}.vmdk on the Images page into ONE folder, open the .vmx",
+        version.unwrap_or("current golden"),
+        size as f64 / 1e9
+    ))
+}
+
+/// Export on the Images page: {version, size, created} or null.
+pub(crate) fn export_info(name: &str) -> serde_json::Value {
+    let d = export_dir(name);
+    let (Ok(m), Ok(ver)) = (std::fs::metadata(d.join(format!("{name}.vmdk"))), std::fs::read_to_string(d.join("version"))) else {
+        return serde_json::Value::Null;
+    };
+    let created = m.modified().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_secs());
+    serde_json::json!({"version": ver, "size": m.len(), "created": created})
+}
+
+/// Plain VMware Workstation VM around the exported disk. SATA boots under BIOS and EFI alike (publish enabled
+/// storahci as boot-start); guestOS windows9-64 = "Windows 10 and later" — windows11-64 insists on a TPM.
+fn vmx(name: &str, os: &str, firmware: &str) -> String {
+    let guest = if os == "windows" { "windows9-64" } else { "ubuntu-64" };
+    let fw = if firmware == "efi" { "firmware = \"efi\"\n" } else { "" };
+    let bridges: String = (4..8)
+        .map(|i| format!("pciBridge{i}.present = \"TRUE\"\npciBridge{i}.virtualDev = \"pcieRootPort\"\npciBridge{i}.functions = \"8\"\n"))
+        .collect();
+    format!(
+        ".encoding = \"UTF-8\"\nconfig.version = \"8\"\nvirtualHW.version = \"19\"\ndisplayName = \"{name}\"\nguestOS = \"{guest}\"\n{fw}\
+         memsize = \"8192\"\nnumvcpus = \"4\"\ncpuid.coresPerSocket = \"2\"\npciBridge0.present = \"TRUE\"\n{bridges}\
+         sata0.present = \"TRUE\"\nsata0:0.present = \"TRUE\"\nsata0:0.fileName = \"{name}.vmdk\"\n\
+         ethernet0.present = \"TRUE\"\nethernet0.virtualDev = \"e1000e\"\nethernet0.connectionType = \"nat\"\nethernet0.addressType = \"generated\"\n\
+         usb.present = \"TRUE\"\nehci.present = \"TRUE\"\nusb_xhci.present = \"TRUE\"\nsvga.present = \"TRUE\"\n"
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn layout_and_single_partition() {
+        let gpt = |parts: &str| format!(r#"{{"partitiontable":{{"label":"gpt","sectorsize":512,"partitions":[{parts}]}}}}"#);
+        let esp = r#"{"start":2048,"size":204800,"type":"C12A7328-F81F-11D2-BA4B-00A0C93EC93B"}"#;
+        let win = r#"{"start":239616,"size":1000000,"type":"EBD0A0A2-B9E5-4433-87C0-68B6B72699C7"}"#;
+        // Fresh UEFI upload: several partitions with an ESP → not trimmed, efi.
+        assert_eq!(layout(&gpt(&format!("{esp},{win}"))).unwrap(), (false, "efi"));
+        // After publish: one GPT partition → trimmed.
+        assert_eq!(layout(&gpt(win)).unwrap().0, true);
+        assert_eq!(single_part(&gpt(win)), Some((239616 * 512, 1000000 * 512)));
+        assert_eq!(single_part(&gpt(&format!("{esp},{win}"))), None);
+        // Legacy BIOS (MBR, System Reserved + Windows): not trimmed even with one partition, bios.
+        let dos = r#"{"partitiontable":{"label":"dos","partitions":[{"start":2048,"size":100,"type":"7"}]}}"#;
+        assert_eq!(layout(dos).unwrap(), (false, "bios"));
+    }
+
+    #[test]
+    fn region_copy_keeps_bytes_and_holes() {
+        use std::os::unix::fs::{FileExt, MetadataExt};
+        let d = std::env::temp_dir().join("broom_t_export");
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let src = d.join("src");
+        let f = std::fs::File::create(&src).unwrap();
+        f.set_len(8 << 20).unwrap();
+        f.write_all_at(b"head", 100).unwrap();
+        f.write_all_at(b"tail", (7 << 20) + 5).unwrap();
+        let dst = d.join("dst");
+        copy_region(&src, 50, (8 << 20) - 50, &dst).unwrap();
+        let got = std::fs::read(&dst).unwrap();
+        assert_eq!(got.len(), (8 << 20) - 50);
+        assert_eq!(&got[50..54], b"head");
+        assert_eq!(&got[(7 << 20) + 5 - 50..(7 << 20) + 9 - 50], b"tail");
+        // 2 data MB written, the 6 zero MB between stay holes.
+        assert!(std::fs::metadata(&dst).unwrap().blocks() * 512 <= 3 << 20);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn vmx_firmware_and_disk() {
+        let w = vmx("win", "windows", "efi");
+        assert!(w.contains("firmware = \"efi\"") && w.contains("sata0:0.fileName = \"win.vmdk\"") && w.contains("windows9-64"));
+        let l = vmx("ubnt", "linux", "bios");
+        assert!(!l.contains("firmware") && l.contains("ubuntu-64") && l.contains("ethernet0.virtualDev = \"e1000e\""));
+    }
+}

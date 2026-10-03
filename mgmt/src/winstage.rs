@@ -23,7 +23,7 @@ fn stage_dir() -> String {
     crate::tftp_dir().join("broom-stage").to_string_lossy().into_owned()
 }
 
-fn run(bin: &str, args: &[&str]) -> Result<String, String> {
+pub(crate) fn run(bin: &str, args: &[&str]) -> Result<String, String> {
     tracing::debug!("exec: {bin} {}", args.join(" "));
     let o = Command::new(bin).args(args).output().map_err(|e| format!("{bin}: {e}"))?;
     if o.status.success() {
@@ -70,6 +70,13 @@ restart(){ log "$*"; sleep 2; reboot -f 2>/dev/null || echo b > /proc/sysrq-trig
 # (delta Range requests + driver list need them) and must never be picked instead.
 if [ -x /broom/bin/wget ]; then wget(){ /broom/bin/wget "$@"; }
 else log "WARNING: no GNU wget in the stage (publish again) -> delta updates + drivers fall back / skip"; fi
+# Whole-file download showing ONLY a progress bar (file name, %, bytes, speed, ETA) — no URL / connecting / headers /
+# "saved" text. GNU wget: -q hides everything, --show-progress brings the bar back; bar:force because the initramfs
+# console is not always seen as a tty; noscroll keeps the name still. Busybox wget: already just its own bar.
+getfile(){
+  if [ -x /broom/bin/wget ]; then /broom/bin/wget -q --show-progress --progress=bar:force:noscroll "$@"
+  else wget "$@"; fi
+}
 NAME=""; HASH=""; SRV=""; HOST=""; LIC=""; MAC=""
 for a in $(cat /proc/cmdline); do
   case "$a" in broom.name=*) NAME=${a#*=};; broom.hash=*) HASH=${a#*=};; broom.srv=*) SRV=${a#*=};;
@@ -151,7 +158,14 @@ delta(){
          else if (h in at) print "c", i, h, at[h], nc++
          else print "d", i, h }' $om $nm > $P || return 1
   s=$(grep -c '^s ' $P); c=$(grep -c '^c ' $P); d=$(grep -c '^d ' $P); z=$(grep -c '^z ' $P)
-  avail=$(df -k $W | tail -1 | awk '{print $4}')
+  # Mostly new (a re-installed golden, not an update) → one plain whole-file stream beats thousands of 4 MB requests
+  # (and the server compressing them). Checked before anything is written → the old copy is untouched.
+  all=$((s + c + d + z))
+  if [ $all -gt 0 ] && [ $((d * 2)) -gt $all ]; then
+    log "delta: $((d * 100 / all))% changed -> whole file instead"; rm -f $P; return 1
+  fi
+  # -P: one line per filesystem (busybox df wraps long device names like /dev/mapper/... otherwise).
+  avail=$(df -Pk $W | tail -1 | awk '{print $4}')
   [ "$avail" -gt $((c * 4096 + 65536)) ] 2>/dev/null || { log "delta: not enough space to keep $c moved chunks"; return 1; }
   rm -rf $SP; mkdir -p $SP
   out=$old
@@ -169,6 +183,8 @@ delta(){
       try=$((try + 1))
     done; rm -f $T.z; log "delta: chunk $1 failed 3 times"; return 1; }
   put(){ dd if=$T of=$out bs=4M seek=$1 conv=notrunc 2>/dev/null; }
+  # Chunk $1 already right in place (a run interrupted by a power cut wrote it) → no download (4 MB read < network).
+  have(){ dd if=$out of=$T bs=4M skip=$1 count=1 2>/dev/null && ok $2; }
   zero(){ dd if=/dev/zero of=$out bs=4M seek=$1 count=1 conv=notrunc 2>/dev/null; }
   # One worker: plan lines NR % DW == $1, phase $2. A failure leaves $F (a background job can't return into delta).
   work(){
@@ -183,7 +199,7 @@ delta(){
         case "$a" in
           s) continue;;
           c) if [ -f $SP/$k ]; then T=$SP/$k; else dl $i $h || { touch $F; break; }; fi; put $i;;
-          d) dl $i $h || { touch $F; break; }; put $i;;
+          d) have $i $h || { dl $i $h || { touch $F; break; }; put $i; };;
           z) zero $i;;
         esac
       fi
@@ -248,8 +264,8 @@ if [ "$(cat $B/golden.sha256 2>/dev/null)" != "$HASH" ]; then
   rm -f $B/golden.sha256 $B/base.vhdx $B/base.ok $B/first.pending $B/child.vhdx $B/child-local.vhdx
   mkdir -p $D
   U=http://$SRV/tftp/broom-win/$NAME
-  # Delta: only the chunks the old copy lacks cross the network (see delta()). No old copy / no manifest /
-  # any failure → drop the old golden + partial file and download the whole golden below.
+  # Delta: only the chunks the old copy lacks cross the network (see delta()). No old copy / no manifest / mostly
+  # changed / any failure → drop the old golden + partial file and download the whole golden below.
   if [ ! -f $D/golden.vhdx.ok ]; then
     if wget -q -O $D/golden.chunks $U/golden.chunks && [ -f $B/golden.vhdx ] && [ -f $B/golden.chunks ] \
        && delta $B/golden.vhdx $B/golden.chunks $D/golden.chunks $D/golden.vhdx "http://$SRV/api/golden-chunk?name=$NAME"; then
@@ -261,20 +277,35 @@ if [ "$(cat $B/golden.sha256 2>/dev/null)" != "$HASH" ]; then
   # $f.ok = file fully downloaded (power loss midway → next boot skips finished files, resumes the partial one).
   # Only -c -O: works with both busybox and GNU wget. -c failing (e.g. 416 when the file is complete but not yet .ok)
   # → download again from scratch. NO $((...)) on external data: an ash arithmetic error exits the whole script.
+  n=0
   for f in golden.vhdx base-template.vhdx child-template.vhdx child-template.off efi.tar.gz; do
+    n=$((n + 1))
     [ -f $D/$f.ok ] && continue
-    log "downloading $f"
+    # Size of the golden from the manifest (awk formats it: no shell arithmetic on server data).
+    sz=""
+    [ "$f" = golden.vhdx ] && sz=$(sed -n '1s/^size //p' $D/golden.chunks 2>/dev/null | awk '{ printf ", %.1f GB", $1 / 1073741824 }')
+    log "downloading $f ($n/5$sz)"
     U=http://$SRV/tftp/broom-win/$NAME/$f
-    wget -c -O $D/$f $U || { rm -f $D/$f; wget -O $D/$f $U; } || die "download $f"
+    # Fresh golden: sha256 WHILE downloading (tee) → no re-read of the whole file afterwards. Cut midway → the file
+    # stays; -c below resumes it and the full check runs at the end as before.
+    if [ "$f" = golden.vhdx ] && [ ! -s $D/$f ]; then
+      h=$( (cd $D && getfile -O - $U) | tee $D/$f | sha256sum | cut -c1-64 )
+      [ "$h" = "$HASH" ] && touch $D/golden.hashed
+    fi
+    # cd + relative -O: the bar shows the file name ("golden.vhdx"), not the long dl-<hash> path cut short.
+    if [ "$f" != golden.vhdx ] || [ ! -f $D/golden.hashed ]; then
+      ( cd $D && getfile -c -O $f $U ) || { rm -f $D/$f; ( cd $D && getfile -O $f $U ); } || die "download $f"
+    fi
     touch $D/$f.ok
   done
   [ "$(srv_hash)" = "$HASH" ] || { rm -rf $D; restart "image $NAME changed on the server during the download -> reboot to get the new version"; }
-  # Delta: every chunk was checked against the manifest → no second full read. Full download → whole-file sha256.
-  if [ ! -f $D/golden.delta ]; then
+  # Delta: every chunk was checked against the manifest; fresh download: hashed while downloading → no second full
+  # read. Otherwise (resumed download) → whole-file sha256.
+  if [ ! -f $D/golden.delta ] && [ ! -f $D/golden.hashed ]; then
     log "checking golden sha256 - rereads the whole file, may take a few minutes, DO NOT power off..."
     [ "$(sha256sum $D/golden.vhdx | cut -d' ' -f1)" = "$HASH" ] || { rm -rf $D; die "golden sha256 mismatch"; }
   fi
-  rm -f $D/*.ok $D/golden.delta
+  rm -f $D/*.ok $D/golden.delta $D/golden.hashed
   # golden.chunks (if fetched) moves along → the manifest of the copy we now have = next delta's source.
   mv $D/* $B/ && rmdir $D && sync && echo "$HASH" > $B/golden.sha256 && sync
 fi
@@ -564,7 +595,16 @@ fn with_part<T>(
     let r = run("mount", &["-t", "ntfs-3g", "-o", opt, &dev, mnt])
         .or_else(|_| run("mount", &["-t", "ntfs3", "-o", opt, &dev, mnt]))
         .and_then(|_| {
-            let r = f(mnt);
+            // ntfs-3g silently falls back to read-only when Windows didn't shut down cleanly → say so up front.
+            let probe = format!("{mnt}/.broom-rw");
+            let r = if !ro && std::fs::write(&probe, b"").is_err() {
+                Err("Windows partition mounted read-only: Windows was not shut down cleanly (hibernated, Fast Startup or \
+                     forced power-off) — boot the VM, run broom-prep-win again and let it power off by itself, then upload"
+                    .into())
+            } else {
+                let _ = std::fs::remove_file(&probe);
+                f(mnt)
+            };
             let _ = run("umount", &[mnt]);
             r
         });
@@ -683,6 +723,10 @@ fn build_golden(raw: &str, out: &str, name: &str, steps: &mut crate::publish::St
     //    MSR/Recovery don't go into the golden) + GPT with a single partition (standard native VHD boot), KEEP start →
     //    NTFS "hidden sectors" still match. Re-running gives the same result (re-publishing is safe).
     steps.go("trim disk");
+    // Export (export.rs) rebuilds the VM disk from what the trim below destroys → keep it first. Never blocks publish.
+    if let Err(e) = crate::export::keep_boot_regions(Path::new(raw), name, (start, size)) {
+        tracing::warn!("image {name}: boot partitions not kept, export won't work for this upload: {e}");
+    }
     const MB: u64 = 1024 * 1024;
     let total = std::fs::metadata(raw).map_err(|e| e.to_string())?.len();
     let end = start + size;
@@ -842,12 +886,26 @@ if (-not ([Security.Principal.WindowsPrincipal]$id).IsInRole('Administrators')) 
 # 1. Native VHD boot: do NOT expand the VHDX to full size; no automatic device encryption.
 reg add HKLM\SYSTEM\CurrentControlSet\Services\FsDepends\Parameters /v VirtualDiskExpandOnMount /t REG_DWORD /d 4 /f | Out-Null
 reg add HKLM\SYSTEM\CurrentControlSet\Control\BitLocker /v PreventDeviceEncryption /t REG_DWORD /d 1 /f | Out-Null
+# VBS + Memory integrity (HVCI), needs only Secure Boot: runs on clients with VT-x, ignored elsewhere.
+# Drivers that aren't HVCI-compatible get blocked (e.g. VMware e1000 NIC → use e1000e).
+$dg = 'HKLM\SYSTEM\CurrentControlSet\Control\DeviceGuard'
+reg add $dg /v EnableVirtualizationBasedSecurity /t REG_DWORD /d 1 /f | Out-Null
+reg add $dg /v RequirePlatformSecurityFeatures /t REG_DWORD /d 1 /f | Out-Null
+reg add "$dg\Scenarios\HypervisorEnforcedCodeIntegrity" /v Enabled /t REG_DWORD /d 1 /f | Out-Null
+# The web shows ON/OFF by ICMP ping (monitor.rs) — Windows Firewall drops echo requests by default.
+netsh advfirewall firewall delete rule name="Broom ping" | Out-Null
+netsh advfirewall firewall add rule name="Broom ping" protocol=icmpv4:8,any dir=in action=allow profile=any | Out-Null
 # 2. Reset every boot → turn off pointless writes.
 powercfg /h off
 Disable-ComputerRestore -Drive "$env:SystemDrive\" -ErrorAction SilentlyContinue
 Disable-ScheduledTask -TaskPath '\Microsoft\Windows\Defrag\' -TaskName ScheduledDefrag -ErrorAction SilentlyContinue | Out-Null
 Set-Service WSearch -StartupType Disabled -ErrorAction SilentlyContinue
 reg add HKLM\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU /v NoAutoUpdate /t REG_DWORD /d 1 /f | Out-Null
+# Reserved storage (space kept for updates): a pending update holding it fails sysprep with 0x800F0975.
+dism.exe /Online /Set-ReservedStorageState /State:Disabled /Quiet | Out-Null
+$rm = 'HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\ReserveManager'
+reg add $rm /v ShippedWithReserves /t REG_DWORD /d 0 /f | Out-Null
+reg add $rm /v ActiveScenario /t REG_DWORD /d 0 /f | Out-Null
 $cs = Get-CimInstance Win32_ComputerSystem
 if ($cs.AutomaticManagedPagefile -or (Get-CimInstance Win32_PageFileSetting)) {
   Set-CimInstance $cs -Property @{AutomaticManagedPagefile = $false}
@@ -860,8 +918,12 @@ if (Get-CimInstance Win32_PageFileUsage) {
 
 # 3. EFI bundle: temporary ESP (FAT32 vdisk) → bcdboot → BCD points to vhd=[locate]\broom\child.vhdx.
 $B = "$env:SystemDrive\broom"
+# Rebuilt from scratch, except the admin's base-hook.ps1 (broom-done runs it while base is built).
+$hookf = "$B\base-hook.ps1"
+$hook = if (Test-Path $hookf) { [IO.File]::ReadAllBytes($hookf) }
 Remove-Item $B -Recurse -Force -ErrorAction SilentlyContinue
 New-Item -ItemType Directory "$B\efi" | Out-Null
+if ($hook) { [IO.File]::WriteAllBytes($hookf, $hook); Write-Host '>>> keeping C:\broom\base-hook.ps1' -ForegroundColor Green }
 $vd = "$env:TEMP\broom-esp.vhdx"
 Remove-Item $vd -ErrorAction SilentlyContinue
 $L = (69..90 | ForEach-Object { [char]$_ } | Where-Object { -not (Test-Path "${_}:\") } | Select-Object -Last 1)
@@ -962,12 +1024,21 @@ Write-Host '>>> Sysprep... the VM will POWER OFF. Then upload the .vmdk file on 
 & "$env:SystemRoot\System32\Sysprep\sysprep.exe" /generalize /oobe /shutdown /unattend:"$B\unattend.xml"
 "#;
 
-/// First logon (when base.vhdx is created on each machine): write base.ok to BROOMWIN then reboot → the stage
-/// commits base. BROOMWIN has no drive letter (GPT bit 63, set by the stage) → write directly via the volume path
-/// `\\?\Volume{..}\`; reboot only once written. ASCII only (Set-Content -Encoding ascii).
+/// First logon (when base.vhdx is created on each machine): write base.ok to BROOMWIN, then BASE MODE — a popup tells
+/// the technician to set up apps (FACEIT AC...) and restart; that restart → the stage commits base. BROOMWIN has no
+/// drive letter (GPT bit 63, set by the stage) → write directly via the volume path `\\?\Volume{..}\`. ASCII only
+/// (Set-Content -Encoding ascii).
 const BROOM_DONE: &str = r#"$v = Get-Volume -FileSystemLabel BROOMWIN -ErrorAction SilentlyContinue
 if (-not $v) { exit }
+# Progress: on this console (FirstLogonCommands window) + broom\done.log on BROOMWIN (kept, readable later).
+$lf = $v.Path + 'broom\done.log'
+function step($m) {
+  Write-Host ('[broom {0:HH:mm:ss}] {1}' -f (Get-Date), $m) -ForegroundColor Cyan
+  try { [IO.File]::AppendAllText($lf, ('{0:yyyy-MM-dd HH:mm:ss} {1}' -f (Get-Date), $m) + "`r`n") } catch { }
+}
+step 'building base for this machine (once) - wait for the BASE MODE message'
 # SYSTEM task (stored in base.vhdx -> present every boot): keep Windows AFTER PXE in BootOrder, PXE first.
+step 'boot order task (PXE first)'
 $s = "$env:SystemRoot\Setup\Scripts\broom-bootorder.ps1"
 $a = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument "-NoProfile -ExecutionPolicy Bypass -File $s"
 $t1 = New-ScheduledTaskTrigger -AtStartup
@@ -986,14 +1057,15 @@ if ([IO.Directory]::Exists($dd)) {
     [IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($t)) | Out-Null
     [IO.File]::Copy($f, $t, $true)
   }
+  step 'installing driver packages from the server'
   if (Test-Path $tmp) { & pnputil /add-driver "$tmp\*.inf" /subdirs /install | Out-Null }
   Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue
 }
-# Machine name from the server (stage writes broom\host.txt): rename -> takes effect after the reboot below, stored in base.
+# Machine name from the server (stage writes broom\host.txt): rename -> takes effect after the restart that saves base.
 $h = $v.Path + 'broom\host.txt'
 if ([IO.File]::Exists($h)) {
   $n = [IO.File]::ReadAllText($h).Trim()
-  if ($n -and ($n -ne $env:COMPUTERNAME)) { Rename-Computer -NewName $n -Force -ErrorAction SilentlyContinue }
+  if ($n -and ($n -ne $env:COMPUTERNAME)) { step "machine name -> $n"; Rename-Computer -NewName $n -Force -ErrorAction SilentlyContinue }
 }
 # License key (Machines page): the server picks it by this machine's IP and hands it out once (403 = none).
 # slmgr /cpky afterwards: the key is not left readable in the registry. Never blocks building base.
@@ -1003,6 +1075,7 @@ if ([IO.File]::Exists($sf)) {
   $k = ''
   try { $k = (Invoke-WebRequest -UseBasicParsing -TimeoutSec 15 -Method Post -Uri "http://$srv/api/license").Content.Trim() } catch { }
   if ($k) {
+    step 'activating the license key'
     $slmgr = "$env:SystemRoot\System32\slmgr.vbs"
     $r = (& cscript //nologo $slmgr /ipk $k | Out-String) + (& cscript //nologo $slmgr /ato | Out-String)
     & cscript //nologo $slmgr /cpky | Out-Null
@@ -1010,12 +1083,33 @@ if ([IO.File]::Exists($sf)) {
     try { Invoke-WebRequest -UseBasicParsing -TimeoutSec 15 -Method Post -Body $r -Uri "http://$srv/api/license/result" | Out-Null } catch { }
   }
 }
+# Golden hook C:\broom\base-hook.ps1 (optional, put there by the admin before prep): runs ONCE per machine while base
+# is built, before the reboot that commits base -> what it does is kept every boot (e.g. an anti-cheat's first-run
+# setup that wants one restart). Same console (its output shows), max 10 minutes, its errors never block base.
+$hook = "$env:SystemDrive\broom\base-hook.ps1"
+if ([IO.File]::Exists($hook)) {
+  step 'running C:\broom\base-hook.ps1'
+  try {
+    $p = Start-Process powershell.exe -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$hook`"" -NoNewWindow -PassThru
+    if ($p.WaitForExit(600000)) { step 'hook done' } else { $p.Kill(); step 'hook still running after 10 minutes -> stopped' }
+  } catch { step "hook failed: $_" }
+}
 # Write base.ok DIRECTLY via the volume path (\\?\Volume{..}\broom\base.ok): no drive letter/mountvol needed
 # (the old version picked a letter via Test-Path -> clashed with an empty CD drive -> write failed -> OOBE loop every boot).
 $f = $v.Path + 'broom\base.ok'
 try { [IO.File]::WriteAllText($f, 'ok') } catch { }
-# Reboot only if it WAS written: otherwise stay at the desktop (instead of an endless OOBE loop).
-if ([IO.File]::Exists($f)) { shutdown /r /t 5 }"#;
+# BASE MODE: base.ok is written, nothing restarts by itself. The technician sets up what must survive the reset on
+# THIS machine (e.g. FACEIT AC: open it, it wants one restart through its own RESTART button), then restarts -> that
+# restart commits base. Nobody there -> the next restart / power-off commits it.
+if (-not [IO.File]::Exists($f)) { step 'could not write base.ok on BROOMWIN -> base is rebuilt next boot'; exit }
+step 'BASE MODE: set up apps now (e.g. open FACEIT AC), then RESTART - that restart saves base for every boot'
+$msg = "BASE MODE - this machine is building its base.`n`n" +
+  "Everything done now is KEPT on this machine after every reset.`n`n" +
+  "1. Open FACEIT AC (or other apps) and set them up.`n" +
+  "2. Restart (FACEIT's RESTART button, or Start > Restart).`n`n" +
+  "That restart saves the base. Afterwards every boot resets to it."
+# 0x40 information icon + 0x1000 system modal (stays on top of the desktop).
+try { (New-Object -ComObject WScript.Shell).Popup($msg, 0, 'Broom - BASE MODE', 0x1040) | Out-Null } catch { }"#;
 
 /// BroomBootOrder task (SYSTEM, at startup + every 5 minutes): Windows pulls "Windows Boot Manager"
 /// to the top of BootOrder every boot → the next power-on skips PXE (no reset). Restores the order the stage
@@ -1102,6 +1196,11 @@ fn write_broom_done(mnt: &str) -> Result<bool, String> {
     for (f, body) in [("broom-done.ps1", BROOM_DONE), ("broom-bootorder.ps1", BROOM_BOOTORDER)] {
         std::fs::write(format!("{dir}/{f}"), body.replace('\n', "\r\n")).map_err(|e| format!("write {f}: {e}"))?;
     }
+    // The default hook an earlier prep wrote (open FACEIT, kill it after 120 s) — broom-done handles FACEIT itself now.
+    let hook = format!("{mnt}/broom/base-hook.ps1");
+    if std::fs::read_to_string(&hook).is_ok_and(|s| s.contains("[hook] FACEIT AC")) {
+        let _ = std::fs::remove_file(&hook);
+    }
     Ok(true)
 }
 
@@ -1120,11 +1219,26 @@ mod tests {
         }
     }
 
+    /// Shell functions are global: a helper defined inside another function (e.g. delta's chunk `dl`) silently
+    /// replaces a top-level one of the same name → every `name(){` in the stage must be unique.
+    #[test]
+    fn stage_function_names_unique() {
+        let mut seen = std::collections::HashSet::new();
+        for l in super::STAGE_SCRIPT.lines() {
+            let t = l.trim_start();
+            if let Some(name) = t.split_once("(){").map(|(n, _)| n).filter(|n| !n.is_empty() && n.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')) {
+                assert!(seen.insert(name.to_string()), "stage function {name}() defined twice");
+            }
+        }
+    }
+
     /// The stage script runs inside the initramfs — a syntax error = client stuck in a shell.
     #[test]
     fn stage_syntax() {
         for s in [super::STAGE_SCRIPT, super::STAGE_HOOK] {
-            let ok = stage_sh().args(["-n", "-c", s]).status().unwrap();
+            // Busybox 1.30 (Ubuntu 22.04) ignores -n with -c and RUNS the script (partitions /dev/sda, reboots) →
+            // wrap it in a function that is never called: the whole body is parsed, nothing executes.
+            let ok = stage_sh().args(["-n", "-c", &format!("broom_syntax_check(){{\n{s}\n}}")]).status().unwrap();
             assert!(ok.success());
         }
     }
@@ -1345,6 +1459,11 @@ mod tests {
         let a = file(&[chunk(1), chunk(2), chunk(9), chunk(4), chunk(5), vec![8; 1000]]);
         let (ok, same, dls, log) = run(&a, &a, None, false);
         assert!(ok && same && dls == 2 && log.contains("0 moved"), "{log}");
+        // A2: a delta cut by a power loss already wrote the new chunk 2 (here 0xEE) in place → only the tail is
+        // downloaded; the plan still says "download" for chunk 2 but the bytes on disk already match.
+        let a2 = file(&[chunk(1), chunk(2), vec![0xEE; C], chunk(4), chunk(5), vec![8; 1000]]);
+        let (ok, same, dls, log) = run(&a2, &a2, Some(2), false);
+        assert!(ok && same && dls == 1, "{log}");
         // B: a new chunk early → every later chunk shifts → 5 moved (saved first, then written), 1 download.
         let b = file(&[chunk(1), chunk(7), chunk(2), chunk(3), chunk(4), chunk(5), vec![6; 1000]]);
         let (ok, same, dls, log) = run(&b, &b, None, false);
@@ -1368,6 +1487,11 @@ mod tests {
         // → no delta (the caller downloads everything).
         let (ok, _, dls, log) = run(&b, &b, None, true);
         assert!(!ok && dls == 0 && log.contains("half-patched"), "{log}");
+        // G: a re-installed golden (5 of 6 chunks new) → no delta at all, the caller streams the whole file.
+        let g = file(&[chunk(40), chunk(41), chunk(42), chunk(43), chunk(44), vec![6; 1000]]);
+        let (ok, _, dls, log) = run(&g, &g, None, false);
+        assert!(!ok && dls == 0 && log.contains("83% changed -> whole file instead"), "{log}");
+        assert_eq!(std::fs::read(d.join("o/golden.vhdx")).unwrap(), old, "old copy untouched");
         let _ = std::fs::remove_dir_all(&d);
     }
 
