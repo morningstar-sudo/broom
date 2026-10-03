@@ -397,7 +397,8 @@ mod tests {
     #[test]
     fn hook_syntax() {
         for s in [super::BROOM_ISCSI, super::CACHE_SCRIPT, super::PREP_SCRIPT] {
-            let ok = std::process::Command::new("sh").args(["-n", "-c", s]).status().unwrap();
+            // Wrapped in a never-called function: parsed only, even by a shell that ignores -n (busybox 1.30).
+            let ok = std::process::Command::new("sh").args(["-n", "-c", &format!("broom_syntax_check(){{\n{s}\n}}")]).status().unwrap();
             assert!(ok.success());
         }
     }

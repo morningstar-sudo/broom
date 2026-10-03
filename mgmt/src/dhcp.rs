@@ -127,6 +127,8 @@ pub struct Cfg {
     pub gateway: Option<Ipv4Addr>,
     pub dns: Vec<Ipv4Addr>,
     pub lease_s: u32,
+    /// "Secure Boot clients" (Network page): hand UEFI PXE the official signed iPXE (sb/…) instead of our own build.
+    pub sb: bool,
 }
 
 /// "12h" / "30m" / "1d" / "3600" → seconds (default 12h).
@@ -159,6 +161,7 @@ impl Cfg {
             gateway: ip("dhcp_gateway"),
             dns: g("dhcp_dns", "").split([',', ' ']).filter_map(|s| s.trim().parse().ok()).collect(),
             lease_s: lease_secs(&g("dhcp_lease", "12h")),
+            sb: g("ipxe_signed", "0") == "1",
         })
     }
 }
@@ -259,7 +262,8 @@ fn kind(req: &Packet) -> Kind {
 fn boot_file(k: Kind, cfg: &Cfg) -> Option<String> {
     match k {
         Kind::Ipxe => Some(format!("http://{}/boot.ipxe?mac=${{net0/mac}}&ip=${{net0/ip}}", cfg.server)),
-        Kind::PxeEfi => Some("snponly.efi".into()),
+        // Secure Boot: the iPXE shim (Microsoft-signed) then loads sb/snponly.efi (iPXE-signed) by name itself.
+        Kind::PxeEfi => Some(if cfg.sb { "sb/snponly-shim.efi" } else { "snponly.efi" }.into()),
         _ => None,
     }
 }
@@ -578,6 +582,7 @@ mod tests {
             gateway: Some(Ipv4Addr::new(10, 0, 0, 1)),
             dns: vec![Ipv4Addr::new(1, 1, 1, 1)],
             lease_s: 3600,
+            sb: false,
         }
     }
 
@@ -637,6 +642,16 @@ mod tests {
         assert_eq!(p.opt(3), Some(&[10, 0, 0, 1][..]));
         assert_eq!(p.opt(51), Some(&3600u32.to_be_bytes()[..]));
         assert!(matches!(out.lease, LeaseOp::Set { expires: 1060, source: "full", .. }));
+    }
+
+    #[test]
+    fn secure_boot_switch_picks_signed_ipxe() {
+        let sb = Cfg { sb: true, ..cfg() };
+        let (p, _) = handle(&req(DISCOVER, &[]), FROM, 67, &sb, &store()).reply.unwrap();
+        assert_eq!(p.file, "sb/snponly-shim.efi", "UEFI PXE → Microsoft-signed iPXE shim");
+        // iPXE itself (option 175) still gets the menu URL, whichever iPXE it is.
+        let (p, _) = handle(&req(DISCOVER, &[(175, &[1])]), FROM, 67, &sb, &store()).reply.unwrap();
+        assert!(p.file.starts_with("http://10.0.0.12/boot.ipxe"));
     }
 
     #[test]

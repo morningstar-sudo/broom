@@ -77,7 +77,46 @@ pub fn list(name: &str, active: Option<&str>) -> Vec<Manifest> {
     list_at(&storage(), name, active)
 }
 
-fn list_at(root: &Path, name: &str, active: Option<&str>) -> Vec<Manifest> {
+/// Versions of an image, newest first, each `diff` = bytes that differ from image.img AS IT IS NOW (the golden on
+/// the image list), not from another version. `active` only saves the hashing when image.img is still that version.
+pub fn list_vs_current(name: &str, active: Option<&str>) -> Vec<Manifest> {
+    let root = storage();
+    let cur = current_at(&root, &image_path(name), &crate::images_dir().join(name).join("current.chunks"), name, active);
+    let mut v = manifests(&root, name);
+    for m in &mut v {
+        m.diff = cur.as_ref().map(|c| diff_bytes(c, m));
+        m.chunks.clear();
+    }
+    v
+}
+
+/// Chunk list of image.img now. Free when it is untouched since the active version was saved; otherwise hashed once
+/// (a 30 GB golden ≈ a minute) and cached in `cache`, keyed by size + mtime.
+fn current_at(root: &Path, img: &Path, cache: &Path, name: &str, active: Option<&str>) -> Option<Manifest> {
+    let meta = std::fs::metadata(img).ok()?;
+    let mtime = meta.modified().ok()?.duration_since(std::time::UNIX_EPOCH).ok()?;
+    if let Some(m) = active.and_then(|a| load(root, name, a).ok()).filter(|m| m.size == meta.len() && mtime.as_secs() <= m.created) {
+        return Some(m);
+    }
+    let size = meta.len();
+    let stamp = format!("{size} {}", mtime.as_nanos());
+    let cur = |chunks| Manifest { version: "current".into(), label: String::new(), created: 0, size, chunk_size: CHUNK, chunks, diff: None };
+    if let Some((head, rest)) = std::fs::read_to_string(cache).ok().as_deref().and_then(|s| s.split_once('\n')) {
+        if head == stamp {
+            return Some(cur(rest.lines().map(String::from).collect()));
+        }
+    }
+    let f = File::open(img).ok()?;
+    let (mut chunks, mut buf) = (Vec::new(), Vec::new());
+    for i in 0..size.div_ceil(CHUNK) {
+        chunks.push(read_chunk(&f, i, size, &mut buf).ok()?.unwrap_or_else(|| ZERO.to_string()));
+    }
+    let _ = std::fs::write(cache, format!("{stamp}\n{}", chunks.join("\n")));
+    Some(cur(chunks))
+}
+
+/// Every manifest of an image (with chunks), newest first.
+fn manifests(root: &Path, name: &str) -> Vec<Manifest> {
     let mut v: Vec<Manifest> = std::fs::read_dir(manifest_dir(root, name))
         .into_iter()
         .flatten()
@@ -85,6 +124,11 @@ fn list_at(root: &Path, name: &str, active: Option<&str>) -> Vec<Manifest> {
         .filter_map(|d| serde_json::from_slice::<Manifest>(&std::fs::read(d.path()).ok()?).ok())
         .collect();
     v.sort_by_key(|m| std::cmp::Reverse(m.version[1..].parse::<u64>().unwrap_or(0)));
+    v
+}
+
+fn list_at(root: &Path, name: &str, active: Option<&str>) -> Vec<Manifest> {
+    let mut v = manifests(root, name);
     let base = active.and_then(|a| v.iter().find(|m| m.version == a)).cloned();
     for m in &mut v {
         m.diff = base.as_ref().map(|b| diff_bytes(b, m));
@@ -153,6 +197,28 @@ fn load(root: &Path, name: &str, version: &str) -> Result<Manifest, String> {
 /// The caller must make sure nothing serves the file meanwhile (iSCSI target removed). Returns chunks rewritten.
 pub fn rehydrate(name: &str, version: &str) -> Result<usize, String> {
     rehydrate_at(&storage(), &image_path(name), name, version)
+}
+
+/// `version` of image `from` → v1 of the new image `to`: only the manifest is copied, the chunks are shared (dedup;
+/// gc keeps a chunk while any manifest of any image names it).
+pub fn clone_to(from: &str, version: &str, to: &str, label: &str) -> Result<(), String> {
+    clone_at(&storage(), from, version, to, label)
+}
+
+fn clone_at(root: &Path, from: &str, version: &str, to: &str, label: &str) -> Result<(), String> {
+    let m = load(root, from, version)?;
+    let dir = manifest_dir(root, to);
+    if std::fs::read_dir(&dir).is_ok_and(|mut d| d.next().is_some()) {
+        return Err(format!("image {to} already has versions"));
+    }
+    std::fs::create_dir_all(&dir).map_err(e("mkdir manifests"))?;
+    let m = Manifest { version: "v1".into(), label: label.to_string(), ..m };
+    std::fs::write(dir.join("v1.json"), serde_json::to_vec(&m).unwrap()).map_err(e("write manifest"))
+}
+
+/// `version` → a new file `dst` (export), image.img untouched.
+pub fn rehydrate_to(name: &str, version: &str, dst: &Path) -> Result<usize, String> {
+    rehydrate_at(&storage(), dst, name, version)
 }
 
 fn rehydrate_at(root: &Path, img: &Path, name: &str, version: &str) -> Result<usize, String> {
@@ -272,6 +338,13 @@ mod tests {
         assert_eq!(changed, 2); // chunk 0 (data) + chunk 1 (→ hole); chunk 4 dropped by truncation
         assert_eq!(hash_file(&img), v1_hash);
         assert!(is_hole(&File::open(&img).unwrap(), CHUNK, CHUNK));
+        // Diff vs image.img as it is now (= v1 content, no active version given): hashed once, then cached.
+        let cache = d.join("current.chunks");
+        let cur = current_at(&root, &img, &cache, "img", None).unwrap();
+        assert_eq!(cur.chunks, load(&root, "img", "v1").unwrap().chunks);
+        assert!(cache.exists());
+        assert_eq!(current_at(&root, &img, &cache, "img", None).unwrap().chunks, cur.chunks);
+        assert_eq!(diff_bytes(&cur, &load(&root, "img", "v3").unwrap()), 4 * CHUNK);
         assert_eq!(list_at(&root, "img", None).iter().map(|m| m.version.as_str()).collect::<Vec<_>>(), ["v3", "v2", "v1"]);
         // Diff vs active v1: v2 same content → 0; v3 differs at chunks 0, 1, 3 and the new chunk 4 (size grew).
         let diffs = |active| list_at(&root, "img", active).iter().map(|m| m.diff).collect::<Vec<_>>();
@@ -291,6 +364,19 @@ mod tests {
         assert_eq!(delete_at(&root, "img", "v3").unwrap(), 3);
         assert_eq!(count(&root), 3);
         assert!(load(&root, "img", "../x").is_err());
+
+        // v1 → new image "copy": manifest only (no new chunks), restores to the same bytes in a new file, and its
+        // chunks survive when the source image's versions are all deleted.
+        clone_at(&root, "img", "v1", "copy", "from img v1").unwrap();
+        assert!(clone_at(&root, "img", "v1", "copy", "").is_err(), "target already has versions");
+        assert_eq!(count(&root), 3);
+        let img2 = d.join("copy.img");
+        rehydrate_at(&root, &img2, "copy", "v1").unwrap();
+        assert_eq!(hash_file(&img2), v1_hash);
+        assert_eq!(delete_at(&root, "img", "v1").unwrap(), 0);
+        let _ = std::fs::remove_file(&img2);
+        rehydrate_at(&root, &img2, "copy", "v1").unwrap();
+        assert_eq!(hash_file(&img2), v1_hash);
         let _ = std::fs::remove_dir_all(&d);
     }
 

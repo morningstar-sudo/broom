@@ -6,6 +6,7 @@ mod db;
 mod devices;
 mod dhcp;
 mod drivers;
+mod export;
 mod images;
 mod iscsi;
 mod linuxfs;
@@ -249,6 +250,8 @@ async fn main() {
             Ok(s) => info!("{s}"),
             Err(e) => error!("DHCP/TFTP not started: {e} (fix it on the Network page → Apply)"),
         }
+        // Ubuntu shim for Secure Boot clients (official iPXE) → tftp/shim/, so the switch works without a Publish.
+        publish::refresh_shim();
         // configfs targets + zram are lost on server reboot → re-export / rebuild (background, zram is slow).
         let st = state.clone();
         tokio::task::spawn_blocking(move || publish::restore_targets(&st));

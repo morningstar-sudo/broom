@@ -7,3 +7,6 @@ It bundles iPXE (https://ipxe.org/), in mgmt/ipxe/ipxe-src/, which is licensed u
 the GNU General Public License, version 2 (with the iPXE UBDL exception). iPXE's source
 and license are kept in that directory; the compiled snponly.efi embedded in the binary
 is built from it. iPXE is not covered by the Apache License above.
+
+mgmt/ipxe/signed/ holds unmodified official iPXE release binaries (Secure Boot builds): snponly.efi, signed by the
+iPXE Secure Boot CA (UBDL), and the iPXE shim (https://github.com/ipxe/shim, BSD-2-Clause) signed by Microsoft.

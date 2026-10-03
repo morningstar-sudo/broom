@@ -54,16 +54,17 @@ fn parse_rrq(b: &[u8]) -> Option<(String, Vec<(String, String)>)> {
     Some((name, opts))
 }
 
-/// TFTP serves ONLY the embedded iPXE (`snponly.efi`), from memory. Firmware fetches just that over TFTP; iPXE then
-/// pulls kernel/initrd/golden over HTTP (`/tftp/...` ServeDir). Refusing everything else stops a spoofed UDP packet
-/// from making the server read a multi-GB golden into RAM (no handshake on UDP → an amplification/OOM vector).
+/// TFTP serves ONLY the embedded iPXE binaries, from memory: our own `snponly.efi`, and the official Secure Boot pair
+/// `sb/snponly-shim.efi` + `sb/snponly.efi`. Firmware fetches just those over TFTP; iPXE then pulls kernel/initrd/golden
+/// over HTTP (`/tftp/...` ServeDir). Refusing everything else stops a spoofed UDP packet from making the server read a
+/// multi-GB golden into RAM (no handshake on UDP → an amplification/OOM vector).
 fn load(name: &str) -> Result<&'static [u8], String> {
     let name = name.replace('\\', "/");
-    let name = name.trim_start_matches('/');
-    if name == "snponly.efi" {
-        Ok(crate::boot::SNPONLY_EFI)
-    } else {
-        Err(format!("TFTP serves only snponly.efi (asked {name:?}); other files go over HTTP"))
+    match name.trim_start_matches('/') {
+        "snponly.efi" => Ok(crate::boot::SNPONLY_EFI),
+        "sb/snponly-shim.efi" => Ok(crate::boot::SB_SHIM_EFI),
+        "sb/snponly.efi" => Ok(crate::boot::SB_IPXE_EFI),
+        other => Err(format!("TFTP serves only the iPXE binaries (asked {other:?}); other files go over HTTP")),
     }
 }
 
@@ -231,8 +232,15 @@ mod tests {
         let (oack, tid) = recv(&c).await;
         assert_eq!(oack, format!("\0\x06tsize\0{}\0", crate::boot::SNPONLY_EFI.len()).into_bytes());
         c.send_to(b"\0\x05\0\x08abort\0", tid).await.unwrap();
-        // Anything but snponly.efi (including a traversal attempt) → "file not found" ERROR, never a disk read.
-        for req in [rrq("../etc/passwd", &[]), rrq("broom-win/x/golden.vhdx", &[]), rrq("nope.bin", &[])] {
+        // The official Secure Boot pair under sb/ (shim → loads sb/snponly.efi by name).
+        for (name, want) in [("sb/snponly-shim.efi", crate::boot::SB_SHIM_EFI), ("sb/snponly.efi", crate::boot::SB_IPXE_EFI)] {
+            c.send_to(&rrq(name, &[("tsize", "0")]), srv).await.unwrap();
+            let (oack, tid) = recv(&c).await;
+            assert_eq!(oack, format!("\0\x06tsize\0{}\0", want.len()).into_bytes(), "{name}");
+            c.send_to(b"\0\x05\0\x08abort\0", tid).await.unwrap();
+        }
+        // Anything else (including a traversal attempt) → "file not found" ERROR, never a disk read.
+        for req in [rrq("../etc/passwd", &[]), rrq("broom-win/x/golden.vhdx", &[]), rrq("nope.bin", &[]), rrq("sb/../x", &[])] {
             c.send_to(&req, srv).await.unwrap();
             assert_eq!(op(&recv(&c).await.0), ERROR);
         }

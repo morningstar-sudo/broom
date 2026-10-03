@@ -13,6 +13,8 @@
       <div class="field"><label>Range end</label><input id="dhcp_range_end" size="12" placeholder=".200"></div>
       <div class="field"><label>Gateway</label><input id="dhcp_gateway" size="12"></div>
       <div class="field"><label>DNS</label><input id="dhcp_dns" size="12"></div>
+      <div class="field"><label title="Clients get the official, signed iPXE (works with Secure Boot on). Menu footer shows as lines under the images.">Secure Boot clients</label>
+        <label style="display:flex;gap:6px;align-items:center"><input id="dhcp_ipxe_signed" type="checkbox"> Official signed iPXE (test)</label></div>
     </div>
     <div class="row" style="margin-top:14px"><button class="primary" onclick="applyDhcp()">Apply (restart DHCP/TFTP)</button> <span id="dhcp_msg" class="msg"></span></div>
     <p class="hint">DHCP + TFTP are built into bootrom-mgmt. <b>On</b>: this server hands out IPs + PXE boot info (turn off any other DHCP server on the LAN). <b>Off</b>: another DHCP server owns the LAN — broom serves no DHCP/TFTP.</p>

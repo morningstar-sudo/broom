@@ -17,6 +17,10 @@ use crate::SharedState;
 
 /// iPXE built by mgmt/ipxe/build.sh from mgmt/ipxe/ipxe-src (upgrading the mgmt binary = upgrading iPXE too).
 pub(crate) const SNPONLY_EFI: &[u8] = include_bytes!("../ipxe/snponly.efi");
+/// Official Secure Boot iPXE (mgmt/ipxe/fetch-signed.sh), served under `sb/` when "Secure Boot clients" is on:
+/// the iPXE shim (signed by Microsoft) loads `sb/snponly.efi` (signed by the iPXE CA) by name from the same directory.
+pub(crate) const SB_SHIM_EFI: &[u8] = include_bytes!("../ipxe/signed/snponly-shim.efi");
+pub(crate) const SB_IPXE_EFI: &[u8] = include_bytes!("../ipxe/signed/snponly.efi");
 
 type Q = Query<HashMap<String, String>>;
 
@@ -45,7 +49,26 @@ pub async fn render(State(st): State<SharedState>, Query(q): Q) -> impl IntoResp
     // Clamp: menu_script does timeout_s * 1000 (would overflow / panic on a huge stored value).
     let timeout_s: u64 = st.db.get_config("boot_timeout", "10").parse().unwrap_or(10).min(3600);
     let images = menu_images(st.db.images().unwrap_or_default(), m.as_ref().and_then(|m| m.image_id));
-    script(menu_script(&images, timeout_s, host.as_deref(), lic))
+    script(menu_script(&images, timeout_s, host.as_deref(), lic, secure_boot(&st)))
+}
+
+/// "Secure Boot clients" switch (Network page): clients run the official signed iPXE.
+fn secure_boot(st: &SharedState) -> bool {
+    st.db.get_config("ipxe_signed", "0") == "1"
+}
+
+/// Under Secure Boot, iPXE boots the Canonical-signed Ubuntu kernel (Windows stage or Linux golden) through Ubuntu's
+/// Microsoft-signed shim (publish::refresh_shim → tftp/shim/). None when the switch is off or no shim was collected
+/// yet (Publish once with shim-signed installed).
+fn shim_line(st: &SharedState, img: &crate::db::Image) -> Option<String> {
+    if !secure_boot(st) {
+        return None;
+    }
+    if !crate::tftp_dir().join("shim/shimx64.efi").is_file() {
+        warn!("image {}: no shim/shimx64.efi — install shim-signed and Publish again so Secure Boot clients can boot", img.name);
+        return None;
+    }
+    Some(format!("shim http://{}/tftp/shim/shimx64.efi\n", st.db.get_config("dhcp_server_ip", "")))
 }
 
 /// Menu entries; the machine's own image (Devices page) is its default when it still exists, else the global one.
@@ -69,7 +92,7 @@ pub async fn start(State(st): State<SharedState>, Query(q): Q) -> impl IntoRespo
     script(match (&img, boot) {
         (Some(i), Some(bs)) => {
             info!("client {who} started - mac {mac} - ip {ip} - hostname {h} - image {name} ({})", i.os);
-            format!("#!ipxe\n{bs}\n")
+            format!("#!ipxe\n{}{bs}\n", shim_line(&st, i).unwrap_or_default())
         }
         _ => {
             warn!("client {who} chose image {name:?} - mac {mac} - ip {ip}: not published, back to the menu");
@@ -90,7 +113,9 @@ struct MenuImage {
 /// Layout (ipxe-src/src/hci/tui/menu_ui.c): title left + `menu-hint` + countdown right, horizontal line,
 /// list `[1] NAME`, horizontal line, `menu-footer` "left|center|right". White text on dark, selected black/white.
 /// ESC → shell (technical).
-fn menu_script(images: &[MenuImage], timeout_s: u64, host: Option<&str>, lic: Option<i64>) -> String {
+/// `sb` = clients run the official signed iPXE (Secure Boot): it has no menu-hint/menu-footer, so the same info is
+/// shown as non-selectable `item --gap` lines above the images instead (the cursor still starts on an image).
+fn menu_script(images: &[MenuImage], timeout_s: u64, host: Option<&str>, lic: Option<i64>, sb: bool) -> String {
     let mut items = String::new();
     let mut targets = String::new();
     let mut default = None;
@@ -129,6 +154,15 @@ fn menu_script(images: &[MenuImage], timeout_s: u64, host: Option<&str>, lic: Op
         set_host.push_str(&format!("set broom-lic {g}\n"));
     }
     let host = if host.is_empty() { "not registered".into() } else { host };
+    // One short line per field: the menu box is as wide as its longest line, so this fits any console width.
+    let header = if sb {
+        format!(
+            "item --gap Host : {host}\nitem --gap IP   : ${{net0/ip}}\nitem --gap MAC  : ${{net0/mac}}\n\
+             item --gap\nitem --gap Arrows/number to select, Enter to boot\nitem --gap\n"
+        )
+    } else {
+        String::new()
+    };
 
     format!(
         "#!ipxe\n\
@@ -141,7 +175,7 @@ fn menu_script(images: &[MenuImage], timeout_s: u64, host: Option<&str>, lic: Op
          {set_host}\
          :start\n\
          menu Select operating system to boot\n\
-         {items}\
+         {header}{items}\
          choose {choose} sel || goto shell\n\
          goto ${{sel}}\n\n\
          {targets}\
@@ -169,7 +203,7 @@ mod tests {
 
     #[test]
     fn menu_default_keys_ascii() {
-        let s = menu_script(&[img("win-11", true), img("ubuntu", false)], 5, Some("FPS-43 $x|"), Some(3));
+        let s = menu_script(&[img("win-11", true), img("ubuntu", false)], 5, Some("FPS-43 $x|"), Some(3), false);
         assert!(s.starts_with("#!ipxe\n"));
         assert!(s.is_ascii(), "the iPXE font is ASCII only");
         assert!(s.contains("item --key 1 img_win_11 [1] win-11\n"));
@@ -211,11 +245,23 @@ mod tests {
 
     #[test]
     fn menu_no_default_no_timeout() {
-        let s = menu_script(&[img("a", false)], 10, None, None);
+        let s = menu_script(&[img("a", false)], 10, None, None, false);
         assert!(s.contains("choose  sel || goto shell"));
         assert!(s.contains("Host: not registered|"));
         assert!(!s.contains("broom-host") && !s.contains("broom-lic"));
-        let s = menu_script(&[], 10, None, None);
+        let s = menu_script(&[], 10, None, None, false);
         assert!(s.contains("item --key s shell [S] iPXE shell (no image yet"));
+    }
+
+    /// Official signed iPXE (Secure Boot) has no menu-hint/footer → the same info as `item --gap` lines, after the
+    /// images (so number keys still map to images), still ASCII.
+    #[test]
+    fn menu_secure_boot_footer_as_gap_lines() {
+        let s = menu_script(&[img("win-11", true)], 5, Some("PC05"), None, true);
+        assert!(s.is_ascii());
+        let item = s.find("item --key 1 img_win_11").unwrap();
+        let head = s.find("item --gap Host : PC05\nitem --gap IP   : ${net0/ip}\nitem --gap MAC  : ${net0/mac}\n").unwrap();
+        assert!(head < item && s.contains("item --gap Arrows/number to select, Enter to boot\n"));
+        assert!(!menu_script(&[img("a", false)], 5, None, None, false).contains("item --gap"));
     }
 }
