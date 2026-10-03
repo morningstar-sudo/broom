@@ -1,0 +1,52 @@
+From d32fde53699167a049a50c01c54483d99c1d1fb9 Mon Sep 17 00:00:00 2001
+From: broom <broom@localhost>
+Date: Sat, 3 Oct 2026 20:47:41 +0700
+Subject: [PATCH 2/3] [ui] Short one-line banner
+
+Replace the multi-line iPXE banner (product name, URL, feature list) with one line, and say 'Diskless System' while devices initialise.
+---
+ src/core/main.c    |  2 +-
+ src/usr/autoboot.c | 10 +++-------
+ 2 files changed, 4 insertions(+), 8 deletions(-)
+
+diff --git a/src/core/main.c b/src/core/main.c
+index 95e1613..9072442 100644
+--- a/src/core/main.c
++++ b/src/core/main.c
+@@ -33,7 +33,7 @@ __asmcall int main ( void ) {
+ 	initialise();
+ 
+ 	/* Some devices take an unreasonably long time to initialise */
+-	printf ( "%s initialising devices...\n", product_short_name );
++	printf ( "Diskless System: initializing network devices...\n" );
+ 	startup();
+ 
+ 	/* Attempt to boot */
+diff --git a/src/usr/autoboot.c b/src/usr/autoboot.c
+index 3d76090..dd061f9 100644
+--- a/src/usr/autoboot.c
++++ b/src/usr/autoboot.c
+@@ -584,7 +584,6 @@ static int shell_banner ( void ) {
+  * @ret rc		Return status code
+  */
+ int ipxe ( struct net_device *netdev ) {
+-	struct feature *feature;
+ 	struct image *image;
+ 	char *scriptlet;
+ 	int rc;
+@@ -601,12 +600,9 @@ int ipxe ( struct net_device *netdev ) {
+ 	 * to do so.
+ 	 *
+ 	 */
+-	printf ( NORMAL "\n\n" PRODUCT_NAME "\n" BOLD PRODUCT_SHORT_NAME " %s"
+-		 NORMAL " -- " PRODUCT_TAG_LINE " -- "
+-		 CYAN PRODUCT_URI NORMAL "\nFeatures:", product_version );
+-	for_each_table_entry ( feature, FEATURES )
+-		printf ( " %s", feature->name );
+-	printf ( "\n" );
++	/* Broom: one-line banner */
++	printf ( NORMAL "\n" BOLD "Diskless System" NORMAL " ("
++		 PRODUCT_SHORT_NAME " %s)\n\n", product_version );
+ 
+ 	/* Boot system */
+ 	if ( ( image = first_image() ) != NULL ) {
