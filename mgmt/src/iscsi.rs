@@ -101,6 +101,16 @@ impl Lio {
         self.root.join("iscsi").join(iqn).join("tpgt_1").is_dir()
     }
 
+    /// A client is logged in to this target right now: LIO lists the sessions of a TPG (dynamic ACLs, which
+    /// generate_node_acls gives every initiator) in tpgt_1/dynamic_sessions, one initiator name per line. No such
+    /// target → false; unreadable for another reason → true (never cut a client off blindly).
+    pub fn has_sessions(&self, iqn: &str) -> bool {
+        match std::fs::read(self.root.join("iscsi").join(iqn).join("tpgt_1/dynamic_sessions")) {
+            Ok(b) => b.iter().any(|c| !c.is_ascii_whitespace() && *c != 0),
+            Err(e) => e.kind() != std::io::ErrorKind::NotFound,
+        }
+    }
+
     /// Remove the target `iqn` and any backstore called `name` (any HBA — also ones targetcli made).
     /// Missing objects are fine.
     pub fn remove(&self, name: &str, iqn: &str) {
@@ -138,17 +148,6 @@ impl Lio {
     }
 }
 
-/// Any iSCSI initiator currently connected to the portal (all targets share :3260, so this is portal-wide, not
-/// per-target). Used to decide when it is safe to tear down a superseded target or republish a disk image.
-pub fn any_session() -> bool {
-    match std::process::Command::new("ss")
-        .args(["-H", "-tn", "state", "established", "( sport = :3260 )"])
-        .output()
-    {
-        Ok(o) => o.stdout.iter().filter(|&&b| b == b'\n').count() > 0,
-        Err(_) => true, // can't tell (no ss) → assume connected, never tear down blindly
-    }
-}
 
 #[cfg(test)]
 mod tests {
@@ -171,6 +170,12 @@ mod tests {
         assert_eq!(rd(&format!("{tpg}/attrib/demo_mode_write_protect")), "1");
         assert_eq!(rd(&format!("{tpg}/attrib/generate_node_acls")), "1");
         assert_eq!(rd(&format!("{tpg}/enable")), "1");
+        assert!(!lio.has_sessions(iqn) && !lio.has_sessions("iqn.none"), "no dynamic_sessions file / no target");
+        std::fs::write(root.join(format!("{tpg}/dynamic_sessions")), "").unwrap();
+        assert!(!lio.has_sessions(iqn), "empty list");
+        std::fs::write(root.join(format!("{tpg}/dynamic_sessions")), "iqn.1991-05.com.microsoft:pc01\n").unwrap();
+        assert!(lio.has_sessions(iqn));
+        let _ = std::fs::remove_file(root.join(format!("{tpg}/dynamic_sessions")));
 
         // Re-export as zram: old fileio backstore + target replaced.
         lio.export("ubuntu", Backing::Block { dev: "/dev/zram0" }, iqn).unwrap();

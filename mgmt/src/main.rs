@@ -1,11 +1,10 @@
 // main.rs — bootrom mgmt app (Rust/axum). One binary, runs on the Linux server.
-// Modules: boot (iPXE menu), dhcp/tftp/iscsi (network boot), images + golden/chunks/versions/export (images), publish
+// Modules: boot (iPXE menu), dhcp/tftp/iscsi (network boot), images + golden/hash/versions/export (images), publish
 // (Linux) + winstage (Windows), machines/devices/license/settings (web API), auth, disk/archive/vmdk/vhdx (formats).
 mod api;
 mod archive;
 mod auth;
 mod boot;
-mod chunks;
 mod db;
 mod devices;
 mod dhcp;
@@ -13,6 +12,7 @@ mod disk;
 mod drivers;
 mod export;
 mod golden;
+mod hash;
 mod images;
 mod iscsi;
 mod license;
@@ -181,9 +181,6 @@ pub struct AppState {
     pub versions_lock: Mutex<()>,
     /// Running network boot listeners (DHCP/TFTP) — dhcp::start() replaces them on config change.
     pub net: Mutex<Vec<tokio::task::JoinHandle<()>>>,
-    /// Bounds concurrent golden-chunk reads (each reads+hashes 4 MB on a blocking thread). Caps the blocking-pool
-    /// / disk cost of a flood of chunk requests from the (public) /api/golden-chunk endpoint.
-    pub chunk_sem: tokio::sync::Semaphore,
     /// mac → unix time of its last PXE boot (menu choice /boot/start, or the Windows stage's driver query): see saw_pxe.
     pub pxe_seen: Mutex<std::collections::HashMap<String, u64>>,
     /// mac → unix time Windows reported a boot WITHOUT a PXE boot just before (session not reset). Cleared by the
@@ -275,8 +272,6 @@ async fn main() {
         job_tx: tokio::sync::broadcast::channel(64).0,
         versions_lock: Mutex::new(()),
         net: Mutex::new(Vec::new()),
-        // Fixed 8 concurrent chunk reads; make it num_cpus if a fast SSD ever wants more parallelism.
-        chunk_sem: tokio::sync::Semaphore::new(8),
         pxe_seen: Mutex::new(std::collections::HashMap::new()),
         not_reset: Mutex::new(std::collections::HashMap::new()),
     });

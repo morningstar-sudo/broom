@@ -132,6 +132,13 @@ pub fn publish(st: &SharedState, id: i64, name: &str, steps: &mut crate::publish
     let out = crate::tftp_dir().join("broom-win").join(name).to_string_lossy().into_owned();
     std::fs::create_dir_all(&out).map_err(|e| e.to_string())?;
     let golden = format!("{out}/golden.vhdx");
+    // Whatever can refuse the publish runs before anything is written: a failure here leaves the served golden as is.
+    let ip = st.db.get_config("dhcp_server_ip", "");
+    if ip.is_empty() {
+        return Err("dhcp_server_ip is empty — run `setup` first".into());
+    }
+    steps.go("initrd stage");
+    let stage = ensure_stage()?;
 
     // golden.vhdx gets a new GUID on every convert → new hash → every client re-downloads. Golden still newer than
     // image.img → keep it, only refresh the stage + boot_script (Publish with a new binary = cheap).
@@ -143,33 +150,31 @@ pub fn publish(st: &SharedState, id: i64, name: &str, steps: &mut crate::publish
         build_golden(&raw, &out, name, steps)?
     };
 
-    // Hash (clients compare it to know whether to re-download) + golden.chunks (the stage fetches only the chunks it
-    // lacks), one read pass. Golden kept + both present → reuse (13 GB takes ~2 minutes on a slow disk).
-    // golden.sha256 is written LAST: the stage treats its absence as "publish running".
-    let sum_file = format!("{out}/golden.sha256");
+    // Hash (clients compare it to know whether to re-download, and check the whole download against it) + size (the
+    // stage checks its free space and the downloaded length). Golden kept + both present → reuse (13 GB takes ~2
+    // minutes on a slow disk). golden.sha256 is written LAST: the stage treats its absence as "publish running".
+    let (sum_file, size_file) = (format!("{out}/golden.sha256"), format!("{out}/golden.size"));
+    let _ = std::fs::remove_file(format!("{out}/golden.chunks")); // delta manifest of older versions
     let cached = std::fs::read_to_string(&sum_file).ok().map(|s| s.trim().to_string()).filter(|s| s.len() == 64);
     let hash = match cached {
-        Some(h) if fresh && Path::new(&format!("{out}/golden.chunks")).exists() => h,
+        Some(h) if fresh && Path::new(&size_file).exists() => h,
         _ => {
-            steps.go("sha256 + chunk manifest golden");
-            let h = crate::chunks::write_manifest(Path::new(&golden), Path::new(&out))?;
-            std::fs::write(&sum_file, &h).map_err(|e| e.to_string())?;
+            let _ = std::fs::remove_file(&sum_file);
+            steps.go("sha256 golden");
+            let h = crate::hash::file_hash(&golden).ok_or_else(|| format!("sha256 of {golden} failed"))?;
+            let size = std::fs::metadata(&golden).map_err(|e| e.to_string())?.len();
+            std::fs::write(&size_file, size.to_string()).map_err(|e| format!("golden.size: {e}"))?;
             h
         }
     };
     // The stage checks these small files against this list on every boot (a guest could swap them on the SSD).
     let mut sums = String::new();
     for f in ["efi.tar.gz", "child-template.vhdx", "child-template.off", "base-template.vhdx"] {
-        let h = crate::chunks::file_hash(&format!("{out}/{f}")).ok_or(format!("sha256 of {f} failed"))?;
+        let h = crate::hash::file_hash(&format!("{out}/{f}")).ok_or(format!("sha256 of {f} failed"))?;
         sums.push_str(&format!("{h}  {f}\n"));
     }
     std::fs::write(format!("{out}/files.sha256"), sums).map_err(|e| format!("files.sha256: {e}"))?;
-    steps.go("initrd stage");
-    let stage = ensure_stage()?;
-    let ip = st.db.get_config("dhcp_server_ip", "");
-    if ip.is_empty() {
-        return Err("dhcp_server_ip is empty — run `setup` first".into());
-    }
+    std::fs::write(&sum_file, &hash).map_err(|e| format!("golden.sha256: {e}"))?;
     let bs = format!(
         "kernel http://{ip}/tftp/broom-stage/vmlinuz initrd=stage.img ip=dhcp BOOTIF=01-${{mac:hexhyp}} broom.name={name} broom.hash={hash} broom.srv={ip} broom.host=${{broom-host}} broom.lic=${{broom-lic}} broom.reg=${{broom-reg}} broom.base=${{broom-base}} broom.strict=${{broom-strict}}\n\
          initrd http://{ip}/tftp/broom-stage/stage.img\n\
@@ -231,12 +236,6 @@ fn build_golden(raw: &str, out: &str, name: &str, steps: &mut crate::publish::St
     steps.go("find Windows partition");
     let (start, size) = find_windows(raw, &mnt)?;
 
-    // No golden.sha256 while the files below change: a client downloading now sees "publish running" (the stage
-    // compares it to its own hash before + after downloading) instead of mixing files of two versions.
-    let _ = std::fs::remove_file(format!("{out}/golden.sha256"));
-    // Compressed delta chunks of older goldens are useless now (content-addressed: only space is at stake).
-    let _ = std::fs::remove_dir_all(crate::chunks::chunk_cache_dir());
-
     // 2. Edit image.img IN PLACE (no temporary full-disk copy): punch holes outside the Windows partition (ESP/
     //    MSR/Recovery don't go into the golden) + GPT with a single partition (standard native VHD boot), KEEP start →
     //    NTFS "hidden sectors" still match. Re-running gives the same result (re-publishing is safe).
@@ -279,8 +278,18 @@ fn build_golden(raw: &str, out: &str, name: &str, steps: &mut crate::publish::St
     //    child-template (parent base.vhdx — base's GUID is only known on the client → the stage patches it at an offset).
     steps.go("convert raw→vhdx");
     let golden = format!("{out}/golden.vhdx");
-    crate::vhdx::write_dynamic(&crate::disk::Source::file(Path::new(raw))?, &format!("{golden}.tmp"))?;
-    std::fs::rename(format!("{golden}.tmp"), &golden).map_err(|e| e.to_string())?;
+    let tmp = format!("{golden}.tmp");
+    if let Err(e) = crate::disk::Source::file(Path::new(raw)).and_then(|src| crate::vhdx::write_dynamic(&src, &tmp)) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
+    // Until here the served files (old golden + templates + golden.sha256) still belong together, so a failure above
+    // never disturbs a client. From now on they change: no golden.sha256 → a client downloading sees "publish running"
+    // instead of mixing two versions; no golden.key → a failure below makes the next publish rebuild everything.
+    for f in ["golden.sha256", "golden.size", "golden.key"] {
+        let _ = std::fs::remove_file(format!("{out}/{f}"));
+    }
+    std::fs::rename(&tmp, &golden).map_err(|e| e.to_string())?;
     let gi = crate::vhdx::read_info(&golden)?;
     crate::vhdx::write_empty(&format!("{out}/base-template.vhdx"), &gi, Some(".\\golden.vhdx"))?;
     let placeholder = crate::vhdx::Info { data_write_guid: [0; 16], ..gi };

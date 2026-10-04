@@ -98,10 +98,19 @@ pub(crate) fn ip_free(m: &Machine, leases: &[crate::db::Lease], now: i64) -> Res
     }
 }
 
-/// Renaming a machine rebuilds its Windows base (the stage compares the name) → its license key is needed once more.
-fn rearm_on_rename(st: &SharedState, old: Option<&str>, m: &Machine) {
-    if old != m.hostname.as_deref() && st.db.rearm_quiet(m.id).unwrap_or(false) {
-        tracing::info!("license of {} armed again (renamed → base rebuilt)", who(m));
+/// Renaming a machine or giving it another image rebuilds its Windows base (the stage compares the name / downloads
+/// the other golden) → its license key is needed once more. `old` = the row before the change (None = new row).
+fn rearm_on_change(st: &SharedState, old: Option<&Machine>, m: &Machine) {
+    let Some(old) = old else { return }; // a new row has no key handed out
+    let why = if old.hostname != m.hostname {
+        "renamed"
+    } else if old.image_id != m.image_id {
+        "other image"
+    } else {
+        return;
+    };
+    if st.db.rearm_quiet(m.id).unwrap_or(false) {
+        tracing::info!("license of {} armed again ({why} → base rebuilt)", who(m));
     }
 }
 
@@ -124,7 +133,7 @@ struct UpdateBody {
 async fn update(State(st): State<SharedState>, Json(b): Json<UpdateBody>) -> Result<Json<serde_json::Value>, ApiError> {
     let all = st.db.machines().map_err(ise)?;
     let mut m = by_id(&all, b.id)?;
-    let old_host = m.hostname.clone();
+    let old = m.clone();
     (m.mac, m.ip, m.hostname, m.grp, m.notes) = (b.mac, b.ip, b.hostname, b.grp, b.notes);
     m.image_id = b.image_id;
     validate(&mut m, &all).map_err(bad)?;
@@ -132,9 +141,11 @@ async fn update(State(st): State<SharedState>, Json(b): Json<UpdateBody>) -> Res
     if let Some(i) = m.image_id {
         st.db.image(i).map_err(ise)?.ok_or_else(|| bad(format!("image {i} does not exist")))?;
     }
+    let before = crate::drivers::key_sets(&st);
     st.db.update_machine(&m).map_err(bad)?;
     tracing::info!("machine {} updated - mac {} - ip {} - group {}", who(&m), m.mac, m.ip.as_deref().unwrap_or("-"), m.grp.as_deref().unwrap_or("-"));
-    rearm_on_rename(&st, old_host.as_deref(), &m);
+    rearm_on_change(&st, Some(&old), &m);
+    crate::drivers::rearm_changed(&st, before); // another group → maybe other driver packages
     Ok(ok_json(serde_json::json!({"ok": true})))
 }
 
@@ -175,9 +186,11 @@ async fn bulk(State(st): State<SharedState>, Json(b): Json<BulkBody>) -> Result<
             if !v.is_empty() && !crate::drivers::group_ok(v) {
                 return Err(bad("group: letters/digits/_/-, max 32"));
             }
+            let before = crate::drivers::key_sets(&st);
             for m in &targets {
                 st.db.set_machine_group(m.id, (!v.is_empty()).then_some(v)).map_err(ise)?;
             }
+            crate::drivers::rearm_changed(&st, before);
         }
         "image" => {
             let img = if v.is_empty() { None } else { Some(v.parse::<i64>().map_err(|_| bad("image: an image id"))?) };
@@ -186,6 +199,7 @@ async fn bulk(State(st): State<SharedState>, Json(b): Json<BulkBody>) -> Result<
             }
             for m in &targets {
                 st.db.set_machine_image(m.id, img).map_err(ise)?;
+                rearm_on_change(&st, Some(m), &Machine { image_id: img, ..m.clone() });
             }
         }
         "wake" => {
@@ -394,8 +408,9 @@ async fn import_csv(State(st): State<SharedState>, body: Body) -> Result<Json<se
         return Err(bad(held.join("\n")));
     }
     let (mut added, mut updated) = (0, 0);
+    let before = crate::drivers::key_sets(&st);
     for mut m in writes {
-        let old_host = existing.iter().find(|x| x.id == m.id).and_then(|x| x.hostname.clone());
+        let old = existing.iter().find(|x| x.id == m.id).cloned();
         if m.id < 0 {
             m.id = st.db.add_machine(&m.mac, None, None).map_err(ise)?;
             added += 1;
@@ -403,8 +418,9 @@ async fn import_csv(State(st): State<SharedState>, body: Body) -> Result<Json<se
             updated += 1;
         }
         st.db.update_machine(&m).map_err(ise)?;
-        rearm_on_rename(&st, old_host.as_deref(), &m); // a new row has no key handed out → no-op
+        rearm_on_change(&st, old.as_ref(), &m);
     }
+    crate::drivers::rearm_changed(&st, before);
     for (mac, key) in &keys {
         if let Some(m) = st.db.machines().map_err(ise)?.into_iter().find(|m| &m.mac == mac) {
             st.db.set_license(m.id, Some(key)).map_err(ise)?;

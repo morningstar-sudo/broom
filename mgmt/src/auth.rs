@@ -188,7 +188,6 @@ fn is_public(method: &axum::http::Method, path: &str) -> bool {
     const OPEN: &[&str] = &[
         "/boot.ipxe",
         "/boot/start",
-        "/api/golden-chunk",
         "/api/drivers/for",
         "/api/license",
         "/api/license/result",
@@ -203,23 +202,30 @@ fn is_public(method: &axum::http::Method, path: &str) -> bool {
     method == Method::GET && path == "/login"
 }
 
-/// Server names the request may use (anti DNS-rebinding): the DHCP server IP + localhost. Empty config → allow all
-/// (not set up yet). Port is ignored.
-fn host_ok(st: &SharedState, req: &Request<Body>) -> bool {
-    let ip = st.db.get_config("dhcp_server_ip", "");
-    if ip.is_empty() {
-        return true;
-    }
+/// Host header check against DNS rebinding (a page on some domain re-pointing that domain at this server). A rebinding
+/// request always carries the attacker's domain name, so any IP literal is fine (the server IP, a second NIC, after
+/// an IP change), plus localhost and this machine's own hostname. Port is ignored.
+fn host_ok(req: &Request<Body>) -> bool {
     let Some(host) = req.headers().get(header::HOST).and_then(|h| h.to_str().ok()) else {
         return true; // HTTP/1.0 / no Host: leave it, path guard still applies
     };
-    let host = host.rsplit_once(':').map_or(host, |(h, _)| h);
-    host == ip || host == "localhost" || host == "127.0.0.1"
+    let own = std::fs::read_to_string("/proc/sys/kernel/hostname").unwrap_or_default();
+    host_allowed(host, own.trim())
+}
+
+fn host_allowed(host: &str, own: &str) -> bool {
+    let name = match host.strip_prefix('[') {
+        Some(v6) => v6.split(']').next().unwrap_or(""),
+        None => host.rsplit_once(':').map_or(host, |(h, _)| h),
+    };
+    name.parse::<std::net::IpAddr>().is_ok()
+        || name.eq_ignore_ascii_case("localhost")
+        || (!own.is_empty() && (name.eq_ignore_ascii_case(own) || name.eq_ignore_ascii_case(&format!("{own}.local"))))
 }
 
 /// Guard middleware on the whole router: Host check, then a session for everything that is not public.
 pub async fn guard(State(st): State<SharedState>, req: Request<Body>, next: Next) -> Response {
-    if !host_ok(&st, &req) {
+    if !host_ok(&req) {
         return (StatusCode::MISDIRECTED_REQUEST, "bad Host").into_response();
     }
     if is_public(req.method(), req.uri().path()) || logged_in(&st, &req) {
@@ -349,6 +355,17 @@ mod tests {
     use axum::http::Method;
 
     #[test]
+    fn host_header() {
+        for ok in ["10.0.0.12", "10.0.0.12:80", "192.168.1.5", "[::1]:80", "[fe80::1]", "localhost:8080", "broom", "BROOM.local"] {
+            assert!(host_allowed(ok, "broom"), "{ok}");
+        }
+        for bad in ["evil.example.com", "evil.example.com:80", "10.0.0.12.nip.io", "broomx"] {
+            assert!(!host_allowed(bad, "broom"), "{bad}");
+        }
+        assert!(!host_allowed("anything", ""), "no hostname known → only IPs / localhost");
+    }
+
+    #[test]
     fn hash_and_verify() {
         let h = hash_pw("correct horse").unwrap();
         assert!(h.starts_with("$argon2"));
@@ -375,7 +392,8 @@ mod tests {
         let pub_post = |p| is_public(&Method::POST, p);
         assert!(pub_get("/login"), "the standalone sign-in page is public");
         assert!(pub_get("/boot.ipxe") && pub_get("/tftp/broom/x/vmlinuz"));
-        assert!(pub_post("/api/license") && pub_post("/api/auth/login") && pub_get("/api/golden-chunk") && pub_post("/api/booted"));
+        assert!(pub_post("/api/license") && pub_post("/api/auth/login") && pub_post("/api/booted"));
+        assert!(!pub_get("/api/golden-chunk"), "delta chunks are gone");
         assert!(!pub_post("/api/prep-token") && !pub_post("/api/images/base-mode"), "admin only");
         // guarded now: the app shell + its fragments (login is a separate page)
         assert!(!pub_get("/") && !pub_get("/machines") && !pub_get("/ui/images"));

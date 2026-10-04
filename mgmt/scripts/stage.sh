@@ -9,10 +9,10 @@ log(){ echo "broom: $*"; echo "$*" >> /run/broom-stage.log; }
 # panic = shell (initramfs); fix by hand then `exit` → the script CONTINUES from the failed step (on-site debug).
 die(){ panic "broom stage ERROR: $*"; }
 restart(){ log "$*"; sleep 2; reboot -f 2>/dev/null || echo b > /proc/sysrq-trigger; sleep 30; }
-# GNU wget copied by the hook, called by path: the initramfs busybox wget has no --header / --post-file / -T
-# (delta Range requests + driver list need them) and must never be picked instead.
+# GNU wget copied by the hook, called by path: the initramfs busybox wget has no --post-file / -T (the driver list
+# needs them) and must never be picked instead.
 if [ -x /broom/bin/wget ]; then wget(){ /broom/bin/wget "$@"; }
-else log "WARNING: no GNU wget in the stage (publish again) -> delta updates + drivers fall back / skip"; fi
+else log "WARNING: no GNU wget in the stage (publish again) -> drivers skipped"; fi
 # Whole-file download showing ONLY a progress bar (file name, %, bytes, speed, ETA) — no URL / connecting / headers /
 # "saved" text. GNU wget: -q hides everything, --show-progress brings the bar back; bar:force because the initramfs
 # console is not always seen as a tty; noscroll keeps the name still. Busybox wget: already just its own bar.
@@ -96,124 +96,9 @@ elif mnt rw || mnt force; then log "BROOMWIN: plain mount (the disk takes no TRI
 else die "mount ntfs3 $(part $disk 2)"; fi
 mkdir -p $B
 
-# Delta golden update: turn $1 (old golden, $2 = its manifest) into the new golden ($3 = its manifest) IN PLACE,
-# then rename it to $4. Only the 4 MB chunks the old copy lacks come from $5 (the server's /api/golden-chunk?name=X,
-# zstd-compressed). Manifest = "size N" + one line per chunk (sha256 | zero). A new VHDX block early in the disk
-# shifts later ones → those chunks exist in the old copy at another offset ("moved"): phase 1 saves every moved chunk
-# (sha256-checked) to a spare dir BEFORE anything is overwritten; phase 2 writes moved chunks from there, downloads
-# the missing ones, zeroes zero ones.
-# Unchanged chunks are only read + checked → disk IO ≈ size + 2×moved + downloaded instead of a whole download.
-# A moved chunk that fails its check is downloaded instead; interrupted → the next run re-plans from the manifests
-# and the checks catch overwritten sources. Returns 1 → the caller does a full download.
-# DW workers in parallel (every DW-th chunk each, own temp file, disjoint regions): keeps the link busy while
-# others hash/write, and sha256 runs on several cores.
-DW=4
-delta(){
-  old=$1; om=$2; nm=$3; new=$4; url=$5; P=/run/broom-plan; F=/run/broom-delta-fail; SP=$1.spare
-  size=$(sed -n '1s/^size //p' $nm)
-  case "$size" in ''|*[!0-9]*) log "delta: bad manifest"; return 1;; esac
-  # $1.patching = the new manifest a previous (interrupted) run was patching towards. Same target → the same plan,
-  # safe to redo. Another target → unchanged chunks can't be trusted any more → full download.
-  id=$(sha256sum $nm | cut -c1-64)
-  if [ -f $1.patching ] && [ "$(cat $1.patching)" != "$id" ]; then
-    log "delta: old golden half-patched towards another version -> full download"; return 1
-  fi
-  # s = same position, c = moved (at old index, spare slot), d = download, z = zero
-  awk 'NR==FNR { if (FNR>1) { o[FNR-2]=$1; if (!($1 in at)) at[$1]=FNR-2 } next }
-       FNR>1 { i=FNR-2; h=$1
-         if (h=="zero") print "z", i, h
-         else if (o[i]==h) print "s", i, h
-         else if (h in at) print "c", i, h, at[h], nc++
-         else print "d", i, h }' $om $nm > $P || return 1
-  s=$(grep -c '^s ' $P); c=$(grep -c '^c ' $P); d=$(grep -c '^d ' $P); z=$(grep -c '^z ' $P)
-  # Mostly new (a re-installed golden, not an update) → one plain whole-file stream beats thousands of 4 MB requests
-  # (and the server compressing them). Checked before anything is written → the old copy is untouched.
-  all=$((s + c + d + z))
-  if [ $all -gt 0 ] && [ $((d * 2)) -gt $all ]; then
-    log "delta: $((d * 100 / all))% changed -> whole file instead"; rm -f $P; return 1
-  fi
-  # -P: one line per filesystem (busybox df wraps long device names like /dev/mapper/... otherwise).
-  avail=$(df -Pk $W | tail -1 | awk '{print $4}')
-  [ "$avail" -gt $((c * 4096 + 65536)) ] 2>/dev/null || { log "delta: not enough space to keep $c moved chunks"; return 1; }
-  rm -rf $SP; mkdir -p $SP
-  out=$old
-  log "delta: $s unchanged, $c moved, $d downloaded ($((d * 4)) MB), $z zero, $DW workers"
-  ok(){ [ "$(sha256sum $T | cut -c1-64)" = "$1" ]; }
-  # Progress: every finished step appends a line to $P.done, every download one to $P.dl (O_APPEND: safe from
-  # several workers); a reporter redraws one console line every 2 s.
-  # Chunk i comes zstd-compressed from /api/golden-chunk (Windows data ≈ 55 % → less on the wire); the sha256 check
-  # is on the decompressed bytes. Compressed sizes go to $P.dlz (the final log shows what really crossed the network).
-  dl(){ try=0
-    while [ $try -lt 3 ]; do
-      if wget -q -O $T.z "$url&i=$1&h=$2" 2>/dev/null && zstd -dqf $T.z -o $T 2>/dev/null && ok $2; then
-        wc -c < $T.z >> $P.dlz; rm -f $T.z; echo >> $P.dl; return 0
-      fi
-      try=$((try + 1))
-    done; rm -f $T.z; log "delta: chunk $1 failed 3 times"; return 1; }
-  put(){ dd if=$T of=$out bs=4M seek=$1 conv=notrunc 2>/dev/null; }
-  # Chunk $1 already right in place (a run interrupted by a power cut wrote it) → no download (4 MB read < network).
-  have(){ dd if=$out of=$T bs=4M skip=$1 count=1 2>/dev/null && ok $2; }
-  zero(){ dd if=/dev/zero of=$out bs=4M seek=$1 count=1 conv=notrunc 2>/dev/null; }
-  # One worker: plan lines NR % DW == $1, phase $2. A failure leaves $F (a background job can't return into delta).
-  work(){
-    awk -v n=$DW -v w=$1 'NR % n == w' $P | while read a i h j k; do
-      [ -f $F ] && break   # another worker failed → stop early
-      if [ "$2" = 1 ]; then
-        # phase 1: save moved chunks (exact bytes; a bad one is dropped → downloaded in phase 2)
-        [ "$a" = c ] || continue
-        T=$SP/$k; dd if=$old of=$T bs=4M skip=$j count=1 2>/dev/null; ok $h || rm -f $T
-      else
-        T=/run/broom-chunk.$1
-        case "$a" in
-          # Same position: still verified (a 4 MB read) — a chunk gone bad on the SSD would otherwise survive every
-          # update, since the plan only compares manifests.
-          s) have $i $h || { dl $i $h || { touch $F; break; }; put $i; };;
-          c) if [ -f $SP/$k ]; then T=$SP/$k; else dl $i $h || { touch $F; break; }; fi; put $i;;
-          d) have $i $h || { dl $i $h || { touch $F; break; }; put $i; };;
-          z) zero $i;;
-        esac
-      fi
-      echo >> $P.done
-    done
-    rm -f /run/broom-chunk.$1 /run/broom-chunk.$1.z; }
-  tot=$((2 * c + s + d + z))
-  rm -f $F; : > $P.done; : > $P.dl; : > $P.dlz
-  t0=$(date +%s); rp=""
-  if [ $tot -gt 0 ]; then
-    ( while :; do
-        sleep 2; n=$(wc -l < $P.done); m=$(wc -l < $P.dl); t=$(( $(date +%s) - t0 )); [ $t -gt 0 ] || t=1
-        eta=0; [ $n -gt 0 ] && eta=$(( (tot - n) * t / n ))
-        # MB/s = chunks done (copied + downloaded) per second — the real pace, not only the network part.
-        printf '\rbroom: delta %3d%%  %d/%d chunks  %d/%d MB downloaded  %d MB/s  %dm%02ds left   ' \
-          $((n * 100 / tot)) $n $tot $((m * 4)) $((d * 4)) $((n * 4 / t)) $((eta / 60)) $((eta % 60))
-      done ) &
-    rp=$!
-  fi
-  # Phase 1 (every moved chunk saved) completes before phase 2 overwrites anything.
-  for phase in 1 2; do
-    [ $phase = 2 ] && { echo "$id" > $1.patching; sync; }
-    ts=$(date +%s)
-    pids=""; w=0; while [ $w -lt $DW ]; do work $w $phase & pids="$pids $!"; w=$((w + 1)); done
-    wait $pids
-    # Per-phase time in stage.log: 1 = reading the moved chunks (local disk), 2 = downloads + writes.
-    # (a newline first: the progress line is redrawn with \r and has none)
-    [ -n "$rp" ] && echo
-    log "delta phase $phase done in $(( $(date +%s) - ts ))s"
-  done
-  [ -n "$rp" ] && { kill $rp 2>/dev/null; echo; }
-  t=$(( $(date +%s) - t0 )); m=$(wc -l < $P.dl); mz=$(awk '{ s += $1 } END { print int(s / 1048576) }' $P.dlz)
-  rm -rf $P.done $P.dl $P.dlz $SP
-  [ -f $F ] && { rm -f $F $P; return 1; }
-  [ $t -gt 0 ] || t=1
-  log "delta done in ${t}s: $((tot * 4)) MB of disk work ($((tot * 4 / t)) MB/s), $((m * 4)) MB downloaded as $mz MB compressed"
-  dd if=/dev/null of=$out bs=1 seek=$size 2>/dev/null   # exact size (the last chunk may be partial)
-  mv $old $new && rm -f $1.patching
-  rm -f $P
-  return 0
-}
-# end delta
-
-# 1. Golden hash mismatch → re-download (delete old base/child: they point to the old golden).
+# 1. Golden hash mismatch → download the whole golden again. No delta: one sequential write into free space (nothing
+#    to compare, the file stays unfragmented). The old golden + base/child go first: they belong to the old version
+#    and their space is needed.
 if [ "$(cat $B/golden.sha256 2>/dev/null)" != "$HASH" ]; then
   log "new golden ($HASH) -> downloading from $SRV"
   configure_networking
@@ -230,53 +115,53 @@ if [ "$(cat $B/golden.sha256 2>/dev/null)" != "$HASH" ]; then
   done
   D=$B/dl-$HASH
   for x in $B/dl-*; do [ "$x" = "$D" ] || rm -rf "$x"; done
-  # The old golden + its manifest stay as the delta source; base/child point to the old golden → gone.
-  rm -f $B/golden.sha256 $B/base.vhdx $B/base.ok $B/first.pending $B/child.vhdx $B/child-local.vhdx
+  # (golden.chunks / .patching / .spare: leftovers of the delta update of older versions.)
+  rm -f $B/golden.sha256 $B/golden.vhdx $B/golden.chunks $B/golden.vhdx.patching $B/base.vhdx $B/base.ok $B/first.pending \
+    $B/child.vhdx $B/child-local.vhdx
+  rm -rf $B/golden.vhdx.spare
   mkdir -p $D
-  U=http://$SRV/tftp/broom-win/$NAME
-  # Delta: only the chunks the old copy lacks cross the network (see delta()). No old copy / no manifest / mostly
-  # changed / any failure → drop the old golden + partial file and download the whole golden below.
-  if [ ! -f $D/golden.vhdx.ok ]; then
-    if wget -q -O $D/golden.chunks $U/golden.chunks && [ -f $B/golden.vhdx ] && [ -f $B/golden.chunks ] \
-       && delta $B/golden.vhdx $B/golden.chunks $D/golden.chunks $D/golden.vhdx "http://$SRV/api/golden-chunk?name=$NAME"; then
-      touch $D/golden.vhdx.ok $D/golden.delta
-    else
-      rm -rf $D/golden.vhdx $B/golden.vhdx $B/golden.chunks $B/golden.vhdx.patching $B/golden.vhdx.spare
-    fi
-  fi
+  # Golden size from the server. NO $((...)) on external data (an ash arithmetic error exits the whole script) → awk.
+  # Free space: the golden (minus the part a cut download already holds) + 1 GB for base/child to start with.
+  size=$(wget -q -O - http://$SRV/tftp/broom-win/$NAME/golden.size 2>/dev/null)
+  case "$size" in ''|*[!0-9]*) die "server has no golden.size for $NAME (published by an older version) -> Publish again, then reboot";; esac
+  gb(){ echo "$1" | awk '{ printf "%.1f GB", $1 / 1073741824 }'; }
+  fsize(){ ls -ln "$1" 2>/dev/null | awk '{ print $5 }'; }
+  have=$(fsize $D/golden.vhdx); avail=$(df -Pk $W | tail -1 | awk '{ print $4 }')
+  awk -v a="$avail" -v h="${have:-0}" -v s="$size" 'BEGIN { exit !(a * 1024 + h >= s + 1073741824) }' \
+    || die "not enough space on BROOMWIN: the golden needs $(gb $size) + 1 GB -> a bigger disk or a smaller image"
   # $f.ok = file fully downloaded (power loss midway → next boot skips finished files, resumes the partial one).
   # Only -c -O: works with both busybox and GNU wget. -c failing (e.g. 416 when the file is complete but not yet .ok)
-  # → download again from scratch. NO $((...)) on external data: an ash arithmetic error exits the whole script.
+  # → download again from scratch.
   n=0
   for f in golden.vhdx base-template.vhdx child-template.vhdx child-template.off efi.tar.gz; do
     n=$((n + 1))
     [ -f $D/$f.ok ] && continue
-    # Size of the golden from the manifest (awk formats it: no shell arithmetic on server data).
-    sz=""
-    [ "$f" = golden.vhdx ] && sz=$(sed -n '1s/^size //p' $D/golden.chunks 2>/dev/null | awk '{ printf ", %.1f GB", $1 / 1073741824 }')
+    sz=""; [ "$f" = golden.vhdx ] && sz=", $(gb $size)"
     log "downloading $f ($n/5$sz)"
     U=http://$SRV/tftp/broom-win/$NAME/$f
-    # Fresh golden: sha256 WHILE downloading (tee) → no re-read of the whole file afterwards. Cut midway → the file
-    # stays; -c below resumes it and the full check runs at the end as before.
+    # Fresh golden: sha256 WHILE downloading (tee) → no re-read of the whole file afterwards; counted only with the
+    # right length too (tee goes on after a write error, e.g. disk full). Cut midway → the file stays; -c below
+    # resumes it and the whole-file check runs at the end.
     if [ "$f" = golden.vhdx ] && [ ! -s $D/$f ]; then
       h=$( (cd $D && getfile -O - $U) | tee $D/$f | sha256sum | cut -c1-64 )
-      [ "$h" = "$HASH" ] && touch $D/golden.hashed
+      [ "$h" = "$HASH" ] && [ "$(fsize $D/$f)" = "$size" ] && touch $D/golden.hashed
     fi
     # cd + relative -O: the bar shows the file name ("golden.vhdx"), not the long dl-<hash> path cut short.
     if [ "$f" != golden.vhdx ] || [ ! -f $D/golden.hashed ]; then
       ( cd $D && getfile -c -O $f $U ) || { rm -f $D/$f; ( cd $D && getfile -O $f $U ); } || die "download $f"
     fi
+    if [ "$f" = golden.vhdx ] && [ "$(fsize $D/$f)" != "$size" ]; then
+      rm -f $D/$f $D/golden.hashed; die "golden.vhdx is not complete (disk full?) -> fix, then exit to retry"
+    fi
     touch $D/$f.ok
   done
   [ "$(srv_hash)" = "$HASH" ] || { rm -rf $D; restart "image $NAME changed on the server during the download -> reboot to get the new version"; }
-  # Delta: every chunk was checked against the manifest; fresh download: hashed while downloading → no second full
-  # read. Otherwise (resumed download) → whole-file sha256.
-  if [ ! -f $D/golden.delta ] && [ ! -f $D/golden.hashed ]; then
+  # Hashed while downloading → no second full read. Otherwise (resumed download) → whole-file sha256.
+  if [ ! -f $D/golden.hashed ]; then
     log "checking golden sha256 - rereads the whole file, may take a few minutes, DO NOT power off..."
     [ "$(sha256sum $D/golden.vhdx | cut -d' ' -f1)" = "$HASH" ] || { rm -rf $D; die "golden sha256 mismatch"; }
   fi
-  rm -f $D/*.ok $D/golden.delta $D/golden.hashed
-  # golden.chunks (if fetched) moves along → the manifest of the copy we now have = next delta's source.
+  rm -f $D/*.ok $D/golden.hashed
   mv $D/* $B/ && rmdir $D && sync && echo "$HASH" > $B/golden.sha256 && sync
 fi
 
@@ -325,6 +210,12 @@ patch16(){
 
 # 2. base/child state machine.
 cd $B
+# first.pending + base.ok while a base already exists = not written by a base build (the guest is a local admin and
+# can write BROOMWIN): committing would make the reset child (parent .\base.vhdx) the base → base points at itself
+# and Windows never boots again. Ignore them.
+if [ -f first.pending ] && [ -f base.vhdx ]; then
+  log "first.pending found next to an existing base -> ignored (not a base build)"; rm -f first.pending base.ok
+fi
 if [ -f first.pending ]; then
   if [ -f base.ok ]; then
     g=$(vhdx_guid child.vhdx)
@@ -386,7 +277,7 @@ if [ -n "$MAC" ] && wget -q -T 10 -O /run/broom-drv.txt --post-file=/run/broom-h
   mkdir -p drivers; : > /run/broom-drv-have.txt
   while read -r n h; do
     [ -n "$n" ] || continue
-    if [ "$(cat drivers/$n.sha256 2>/dev/null)" != "$h" ]; then
+    if [ "$(cat drivers/$n.sha256 2>/dev/null)" != "$h" ] || [ ! -f drivers/$n.tar.gz ]; then
       log "driver $n: downloading"
       rm -rf drivers/$n drivers/$n.sha256 drivers/$n.tmp drivers/$n.tar.gz; mkdir -p drivers/$n.tmp
       # Checked against the server's sha256 BEFORE extracting: broom-done pnputil-installs these into base.
@@ -394,15 +285,14 @@ if [ -n "$MAC" ] && wget -q -T 10 -O /run/broom-drv.txt --post-file=/run/broom-h
          && [ "$(sha256sum drivers/$n.tar.gz | cut -c1-64)" = "$h" ] && tar -xzf drivers/$n.tar.gz -C drivers/$n.tmp; then
         mv drivers/$n.tmp drivers/$n && echo "$h" > drivers/$n.sha256
       else
-        rm -rf drivers/$n.tmp; log "driver $n: download failed or sha256 mismatch (retried next boot)"
+        rm -rf drivers/$n.tmp drivers/$n.tar.gz; log "driver $n: download failed or sha256 mismatch (retried next boot)"
       fi
-      rm -f drivers/$n.tar.gz
     fi
     [ -f drivers/$n.sha256 ] && echo "$n $h" >> /run/broom-drv-have.txt
   done < /run/broom-drv.txt
   for f in drivers/*.sha256; do
     [ -f "$f" ] || continue; n=${f##*/}; n=${n%.sha256}
-    grep -q "^$n " /run/broom-drv.txt || { rm -rf drivers/$n "$f"; log "driver $n: removed"; }
+    grep -q "^$n " /run/broom-drv.txt || { rm -rf drivers/$n "$f" drivers/$n.tar.gz; log "driver $n: removed"; }
   done
   log "drivers: $(grep -c . /run/broom-drv.txt) package(s) for this machine, $(grep -c . /run/broom-drv-have.txt) ready"
   # Signature of the packages actually here; none → empty (a base built without drivers stays valid).
@@ -427,7 +317,18 @@ if [ -n "$g" ]; then
   cp child-template.vhdx child.vhdx && patch16 child.vhdx "$g" "$(cat child-template.off)" || die "build child.vhdx"
   MODE=reset
 else
-  cp base-template.vhdx child.vhdx; touch first.pending; MODE="first boot (specialize, a few minutes)"
+  # The extracted driver folders broom-done installs into base are on BROOMWIN, writable by the guest → extract them
+  # again from the checked archives (server's list when it answered, else the stored sha256) before base is built.
+  for x in drivers/*; do [ -d "$x" ] && rm -rf "$x"; done
+  for t in drivers/*.tar.gz; do
+    [ -f "$t" ] || continue; n=${t##*/}; n=${n%.tar.gz}
+    h=$(sed -n "s/^$n //p" /run/broom-drv.txt 2>/dev/null); [ -n "$h" ] || h=$(cat drivers/$n.sha256 2>/dev/null)
+    rm -rf drivers/$n; mkdir -p drivers/$n
+    if [ -n "$h" ] && [ "$(sha256sum $t | cut -c1-64)" = "$h" ] && tar -xzf $t -C drivers/$n; then :
+    else rm -rf drivers/$n drivers/$n.sha256 $t; log "driver $n: archive does not match -> left out of this base"; fi
+  done
+  cp base-template.vhdx child.vhdx || die "build child.vhdx"
+  touch first.pending; MODE="first boot (specialize, a few minutes)"
 fi
 cd /
 

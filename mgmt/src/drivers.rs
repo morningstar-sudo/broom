@@ -123,7 +123,7 @@ fn process(name: &str) -> Result<(String, u64, Vec<String>, usize), String> {
             return Err(format!("packing the driver: {e}"));
         }
         std::fs::rename(&tmp, &tar).map_err(|e| e.to_string())?;
-        let sha = crate::chunks::file_hash(&tar.to_string_lossy()).ok_or("sha256 of the package failed")?;
+        let sha = crate::hash::file_hash(&tar.to_string_lossy()).ok_or("sha256 of the package failed")?;
         let size = std::fs::metadata(&tar).map_err(|e| e.to_string())?.len();
         Ok((sha, size, ids.into_iter().collect(), infs.len()))
     })();
@@ -200,7 +200,9 @@ async fn upload_done(State(st): State<SharedState>, Json(b): Json<NameBody>) -> 
     }
     let name = b.name.clone();
     let (sha, size, ids, infs) = tokio::task::spawn_blocking(move || process(&name)).await.map_err(ise)?.map_err(bad)?;
+    let before = key_sets(&st);
     st.db.put_driver(&b.name, &sha, size, &ids, crate::now_secs() as i64).map_err(ise)?;
+    rearm_changed(&st, before);
     tracing::info!(
         "driver package {}: {infs} .inf, {} hardware IDs, {:.1} MB",
         b.name,
@@ -225,7 +227,9 @@ async fn set_targets(State(st): State<SharedState>, Json(b): Json<TargetsBody>) 
         return Err(bad(format!("group {g:?}: letters/digits/_/-, max 32")));
     }
     let d = st.db.drivers().map_err(ise)?.into_iter().find(|d| d.id == b.id).ok_or((StatusCode::NOT_FOUND, "no such package".to_string()))?;
+    let before = key_sets(&st);
     st.db.set_driver_targets(d.id, b.all_machines, &groups).map_err(ise)?;
+    rearm_changed(&st, before);
     tracing::info!("driver package {}: all machines {}, groups [{}]", d.name, b.all_machines, groups.join(", "));
     Ok(Json(serde_json::json!({"ok": true})))
 }
@@ -238,14 +242,40 @@ struct IdBody {
 /// POST /api/drivers/delete {id} — machines that had it drop it on their next boot (base rebuilt).
 async fn delete(State(st): State<SharedState>, Json(b): Json<IdBody>) -> Result<Json<serde_json::Value>, ApiError> {
     let d = st.db.drivers().map_err(ise)?.into_iter().find(|d| d.id == b.id).ok_or((StatusCode::NOT_FOUND, "no such package".to_string()))?;
+    let before = key_sets(&st);
     st.db.delete_driver(d.id).map_err(ise)?;
+    rearm_changed(&st, before);
     let _ = std::fs::remove_file(tar_path(&d.name));
     tracing::info!("driver package {} deleted", d.name);
     Ok(Json(serde_json::json!({"ok": true})))
 }
 
-/// mac → the "name sha256" package list last answered (see for_machine).
-static DRV_SETS: std::sync::LazyLock<std::sync::Mutex<std::collections::HashMap<String, Vec<String>>>> = std::sync::LazyLock::new(Default::default);
+/// Machine id → the "name sha256" packages its stage gets, for every machine with a license key (from the hardware
+/// IDs its stage last reported). Taken before a driver / group change, compared after by rearm_changed.
+pub(crate) fn key_sets(st: &SharedState) -> std::collections::HashMap<i64, Vec<String>> {
+    let (Ok(machines), Ok(hw), Ok(drivers)) = (st.db.machines(), st.db.machine_hw(), st.db.drivers()) else {
+        return Default::default();
+    };
+    machines
+        .into_iter()
+        .filter(|m| m.license_key.is_some())
+        .map(|m| {
+            let ids: BTreeSet<String> =
+                hw.iter().find(|(mac, _)| mac.eq_ignore_ascii_case(&m.mac)).map(|(_, h)| h.iter().cloned().collect()).unwrap_or_default();
+            let set = pick(&drivers, &ids, m.grp.as_deref()).iter().map(|d| format!("{} {}", d.name, d.sha256)).collect();
+            (m.id, set)
+        })
+        .collect()
+}
+
+/// Another package set than `before` → that machine's stage rebuilds base, which needs the license key once more.
+pub(crate) fn rearm_changed(st: &SharedState, before: std::collections::HashMap<i64, Vec<String>>) {
+    for (id, set) in key_sets(st) {
+        if before.get(&id).is_some_and(|old| *old != set) && st.db.rearm_quiet(id).unwrap_or(false) {
+            tracing::info!("license of machine {id} armed again (driver set changed → base rebuilt)");
+        }
+    }
+}
 
 #[derive(Deserialize)]
 struct ForQuery {
@@ -270,18 +300,10 @@ async fn for_machine(State(st): State<SharedState>, Query(q): Query<ForQuery>, b
     let drivers = st.db.drivers().map_err(ise)?;
     let got = pick(&drivers, &hw, m.as_ref().and_then(|m| m.grp.as_deref()));
     // The stage asks this on every boot, near its end → the machine IS going through PXE (license window,
-    // "not reset" check in license.rs).
+    // "not reset" check in license.rs). Refreshed here because a golden download can outlast the window opened at
+    // /boot/start; it grants nothing /boot/start doesn't (both are open to any client). It never re-arms a key:
+    // that is decided on the server (rearm_changed), never by what a client sends.
     st.saw_pxe(&mac);
-    // Another package set than last time → the stage rebuilds base → it needs the license key once more.
-    // (Baseline in RAM: the first query after a server restart only records it.) Registered machines only — license
-    // keys exist only for them, and an unknown MAC (anyone can send one) must not grow the map.
-    if let Some(m) = m.as_ref() {
-        let set: Vec<String> = got.iter().map(|d| format!("{} {}", d.name, d.sha256)).collect();
-        let changed = DRV_SETS.lock().unwrap().insert(mac.clone(), set.clone()).is_some_and(|old| old != set);
-        if changed && st.db.rearm_quiet(m.id).map_err(ise)? {
-            tracing::info!("license of {} armed again (driver set changed → base rebuilt)", m.hostname.as_deref().unwrap_or(&m.mac));
-        }
-    }
     let who = m.and_then(|m| m.hostname).unwrap_or_else(|| mac.clone());
     tracing::info!(
         "client {who} drivers: {}",

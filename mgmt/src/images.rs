@@ -1,6 +1,6 @@
 // images.rs — images API: create / delete / default, chunked golden upload → convert + publish jobs, versions
-// (versions.rs: snapshot / rollback / new image from a version), export as a VMware VM, golden-chunk serving for the
-// Windows delta update, and the golden prep scripts (Linux /broom-prep, Windows one-time link).
+// (versions.rs: snapshot / rollback / new image from a version), export as a VMware VM, and the golden
+// prep scripts (Linux /broom-prep, Windows one-time link).
 use axum::{
     body::Body,
     extract::{DefaultBodyLimit, Query, State},
@@ -32,7 +32,6 @@ pub fn routes() -> Router<SharedState> {
         .route("/api/images/upload-start", post(upload_start))
         .route("/api/images/upload-chunk", put(upload_chunk).layer(DefaultBodyLimit::max(CHUNK_MAX)))
         .route("/api/images/upload-done", post(upload_done))
-        .route("/api/golden-chunk", get(golden_chunk))
         .route("/api/images/snapshot", post(snapshot))
         .route("/api/images/snapshots", get(snapshots))
         .route("/api/images/rollback", post(rollback))
@@ -109,24 +108,38 @@ async fn delete(
     Json(b): Json<IdBody>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let name = name_of(&st, b.id)?;
-    if st.jobs.lock().unwrap().get(&name).is_some_and(|s| s.starts_with('⏳')) {
-        return Err((StatusCode::CONFLICT, format!("image '{name}' has a running job — wait for it to finish")));
+    {
+        // Check + claim under one lock (as spawn_job): no publish can start while the files go away.
+        let mut jobs = st.jobs.lock().unwrap();
+        if jobs.get(&name).is_some_and(|s| s.starts_with('⏳')) {
+            return Err((StatusCode::CONFLICT, format!("image '{name}' has a running job — wait for it to finish")));
+        }
+        jobs.insert(name.clone(), "⏳ deleting...".into());
     }
-    st.db.delete_image(b.id).map_err(ise)?;
-    if valid_name(&name) {
-        let (n, st2) = (name.clone(), st.clone());
-        let freed = tokio::task::spawn_blocking(move || {
+    let (n, st2, id) = (name.clone(), st.clone(), b.id);
+    let res = tokio::task::spawn_blocking(move || {
+        // A Linux client booted from it reads its root disk from this target → never pull it from under it.
+        if valid_name(&n) && crate::publish::image_in_use(&st2, &n) {
+            return Err((StatusCode::CONFLICT, format!("clients are booted from image '{n}' — shut them down first")));
+        }
+        // Files first, row last: a crash midway leaves the image listed (delete it again), never orphan files.
+        let mut freed = 0;
+        if valid_name(&n) {
             crate::publish::unpublish(&st2, &n); // target, zram, tftp/ boot files (golden.vhdx)
             let _ = std::fs::remove_dir_all(crate::images_dir().join(&n));
             let _ = std::fs::remove_dir_all(crate::export::export_dir(&n));
             let _g = st2.versions_lock.lock().unwrap_or_else(|p| p.into_inner());
-            crate::versions::delete_all(&n)
-        })
-        .await
-        .map_err(|e| ise(e.to_string()))?
-        .unwrap_or(0);
-        tracing::info!("image {name} deleted ({freed} version chunks freed)");
-    }
+            freed = crate::versions::delete_all(&n).unwrap_or(0);
+        }
+        st2.db.delete_image(id).map_err(ise)?;
+        Ok(freed)
+    })
+    .await
+    .map_err(|e| ise(e.to_string()))
+    .and_then(|r| r);
+    st.jobs.lock().unwrap().remove(&name);
+    let freed = res?;
+    tracing::info!("image {name} deleted ({freed} version chunks freed)");
     Ok(Json(serde_json::json!({"ok": true})))
 }
 
@@ -169,29 +182,6 @@ async fn set_default(
 }
 
 #[derive(Deserialize)]
-struct ChunkReq {
-    name: String,
-    i: u64,
-    h: String,
-}
-
-/// GET /api/golden-chunk?name=&i=&h= — chunk i (4 MB) of a Windows golden.vhdx, zstd-compressed, for the stage's
-/// delta update (Windows data ≈ 55 % → less to send). h = its sha256 from golden.chunks: checked before serving
-/// (409 when the golden was republished meanwhile) and the cache key (compressed once for the whole room).
-async fn golden_chunk(State(st): State<SharedState>, Query(q): Query<ChunkReq>) -> Result<impl IntoResponse, ApiError> {
-    if !valid_name(&q.name) || q.h.len() != 64 || !q.h.chars().all(|c| c.is_ascii_hexdigit()) {
-        return Err((StatusCode::BAD_REQUEST, "bad name or hash".into()));
-    }
-    // Cap concurrent 4 MB read+hash jobs: a flood of chunk requests can't saturate the blocking pool / disk.
-    let _permit = st.chunk_sem.acquire().await.map_err(|e| ise(e.to_string()))?;
-    let z = tokio::task::spawn_blocking(move || crate::chunks::golden_chunk_zst(&q.name, q.i, &q.h))
-        .await
-        .map_err(|e| ise(e.to_string()))?
-        .map_err(|(changed, e)| (if changed { StatusCode::CONFLICT } else { StatusCode::INTERNAL_SERVER_ERROR }, e))?;
-    Ok(([(header::CONTENT_TYPE, "application/zstd")], z))
-}
-
-#[derive(Deserialize)]
 struct SnapBody {
     id: i64,
     #[serde(default)]
@@ -226,10 +216,15 @@ async fn rollback(State(st): State<SharedState>, Json(b): Json<VersionBody>) -> 
         // Rollback rewrites the shared golden (image.img). For a disk-cache image that file backs the live target,
         // so a connected client would read half old / half new → refuse while any client is attached. zram is safe:
         // the running client keeps its own RAM copy, and the republish below makes a fresh device.
-        if img.os == "linux" && img.cache_mode != "zram" && crate::iscsi::any_session() {
-            return Err("clients are connected; rolling back rewrites the shared disk golden they are reading. \
-                        Reboot/close the clients (do it off-hours), or set this image to zram cache."
-                .into());
+        if img.os == "linux" && img.cache_mode != "zram" {
+            if crate::publish::image_in_use(st, name) {
+                return Err("clients are connected; rolling back rewrites the shared disk golden they are reading. \
+                            Reboot/close the clients (do it off-hours), or set this image to zram cache."
+                    .into());
+            }
+            // Nobody is attached now, but one could attach during the rewrite and read half old / half new → no
+            // target until the republish below makes a fresh one (a client booting meanwhile stops at its shell).
+            crate::publish::drop_all_targets(st, name);
         }
         steps.go(&format!("restore {version}"));
         let n = {

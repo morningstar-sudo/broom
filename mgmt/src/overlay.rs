@@ -14,10 +14,10 @@
 // (SSD cache hit and miss) before releasing.
 use std::path::Path;
 
-/// Extract vmlinuz + initrd.img from the golden → <home>/tftp/broom/<name>/, inject the broom hook into the
-/// initrd. Returns the root UUID. Blocking.
-pub fn build_boot(img: &Path, name: &str) -> Result<String, String> {
-    let dst = crate::tftp_dir().join("broom").join(name).to_string_lossy().into_owned();
+/// Extract vmlinuz + initrd.img from the golden → `dst` (publish.rs stages it, then swaps it in as tftp/broom/<name>/),
+/// inject the broom hook into the initrd. Returns the root UUID. Blocking.
+pub fn build_boot(img: &Path, name: &str, dst: &Path) -> Result<String, String> {
+    let dst = dst.to_string_lossy().into_owned();
     let b = crate::linuxfs::extract_boot(&img.to_string_lossy(), &dst)?;
     tracing::info!("image {name}: kernel {} + initrd copied, root UUID {}", b.kver, b.root_uuid);
 
@@ -87,46 +87,37 @@ mod tests {
         }
     }
 
-    /// Cache delta (cut from CACHE_SCRIPT): the old SSD copy is patched in place from the "iSCSI" golden — only the
-    /// chunks whose hash changed; the result equals the new golden. Golden not matching the manifest → no .sha256.
+    /// Cache copy (cut from CACHE_SCRIPT): the old copy goes, the golden is copied whole and hashed on the way; valid
+    /// (.sha256 written) only when hash and size match.
     #[test]
-    fn cache_delta_patch() {
-        const C: usize = crate::chunks::MANIFEST_CHUNK;
+    fn cache_whole_copy() {
         let s = super::CACHE_SCRIPT;
-        let part = &s[s.find("M=/run/broom-golden.chunks").unwrap()..s.find("rm -f $C/*.img $C/*.sha256 $C/*.chunks").unwrap()];
-        let d = std::env::temp_dir().join("broom_t_cache_delta");
-        let old = [vec![1u8; C], vec![2u8; C], vec![3u8; C], vec![4u8; 500]].concat();
-        let run = |new: &[u8], iscsi: &[u8]| {
+        let part = &s[s.find("# Whole-file copy (no delta)").unwrap()..];
+        let d = std::env::temp_dir().join("broom_t_cache_copy");
+        let golden: Vec<u8> = (0..5_000_000u32).map(|i| (i % 253) as u8).collect();
+        let run = |hash: &str| {
             let _ = std::fs::remove_dir_all(&d);
-            for p in ["c", "run", "srv"] {
-                std::fs::create_dir_all(d.join(p)).unwrap();
+            std::fs::create_dir_all(d.join("c")).unwrap();
+            for f in ["old.img", "old.sha256", "old.chunks"] {
+                std::fs::write(d.join("c").join(f), "x").unwrap();
             }
-            std::fs::write(d.join("c/ubuntu.img"), &old).unwrap();
-            crate::chunks::write_manifest(&d.join("c/ubuntu.img"), &d.join("c")).unwrap();
-            std::fs::rename(d.join("c/golden.chunks"), d.join("c/ubuntu.chunks")).unwrap();
-            std::fs::write(d.join("srv/golden.img"), new).unwrap();
-            crate::chunks::write_manifest(&d.join("srv/golden.img"), &d.join("srv")).unwrap();
-            std::fs::write(d.join("iscsi.dev"), iscsi).unwrap();
-            let body = part.replace("/run/", &format!("{}/run/", d.display()));
+            std::fs::write(d.join("iscsi.dev"), &golden).unwrap();
             let sh = format!(
-                "C={d}/c; NAME=ubuntu; HASH=h1; SIZE={size}; GOLDEN={d}/iscsi.dev; SRV=x\n\
-                 log(){{ echo \"$*\" >> {d}/log; }}\n\
-                 wget(){{ cp {d}/srv/golden.chunks \"$3\"; }}\n{body}",
+                "C={d}/c; NAME=ubuntu; HASH={hash}; SIZE={size}; GOLDEN={d}/iscsi.dev\nlog(){{ echo \"$*\" >> {d}/log; }}\n{part}",
                 d = d.display(),
-                size = new.len()
+                size = golden.len()
             );
             std::process::Command::new("sh").args(["-c", &sh]).status().unwrap();
-            let img_ok = std::fs::read(d.join("c/ubuntu.img")).unwrap() == new;
-            let valid = std::fs::read_to_string(d.join("c/ubuntu.sha256")).unwrap_or_default().trim() == "h1";
-            (img_ok, valid, std::fs::read_to_string(d.join("log")).unwrap_or_default())
+            let img_ok = std::fs::read(d.join("c/ubuntu.img")).is_ok_and(|b| b == golden);
+            let valid = std::fs::read_to_string(d.join("c/ubuntu.sha256")).unwrap_or_default().trim() == hash;
+            let old_gone = !d.join("c/old.img").exists() && !d.join("c/old.chunks").exists();
+            (img_ok, valid, old_gone)
         };
-        // Chunk 1 changed, chunk 2 now zero, the tail grew: 3 chunks patched, the rest untouched.
-        let new = [vec![1u8; C], vec![9u8; C], vec![0u8; C], vec![4u8; 3000]].concat();
-        let (img_ok, valid, log) = run(&new, &new);
-        assert!(img_ok && valid && log.contains("3 chunks"), "{log}");
-        // The attached golden is not the manifest's → the cache stays invalid (the script then does a full copy).
-        let (_, valid, log) = run(&new, &old);
-        assert!(!valid && log.contains("does not match"), "{log}");
+        std::fs::write(d.with_extension("src"), &golden).unwrap();
+        let h = crate::hash::file_hash(&d.with_extension("src").to_string_lossy()).unwrap();
+        let _ = std::fs::remove_file(d.with_extension("src"));
+        assert_eq!(run(&h), (true, true, true));
+        assert_eq!(run("0000"), (false, false, true), "hash mismatch → discarded");
         let _ = std::fs::remove_dir_all(&d);
     }
 }

@@ -170,26 +170,64 @@ fn publish_iscsi(st: &SharedState, id: i64, name: &str) -> Result<String, String
     let img = images_dir().join(name).join("image.img");
     let img_abs = std::fs::canonicalize(&img)
         .map_err(|e| format!("no golden raw yet ({}): {e}", img.display()))?;
-
-    // 1. Extract kernel + initrd from the golden → <home>/tftp/broom/<name>/, read the root UUID.
-    let root_uuid = crate::overlay::build_boot(&img_abs, name)?;
-
-    // 2. cache_mode (images column): disk → serve the file directly; zram → load the img into /dev/zramN.
-    // zram fails (RAM overflow / error) → fall back to disk BY ITSELF (DB updated) so the image always boots.
+    // Every refusal BEFORE anything is written: a refused publish leaves the served image exactly as it was.
     let want = st.db.image(id)?.map_or_else(|| "disk".into(), |i| i.cache_mode);
     // Disk cache serves ONE shared golden file → it can't be swapped under a live client. Refuse to (re)publish it
-    // while any client is connected (they would read changed bytes mid-session → FS corruption). zram is fine: each
-    // publish makes a fresh device + target, and the old one is kept for already-connected clients.
-    if want != "zram" && crate::iscsi::any_session() {
+    // while a client of this image is connected (they would read changed bytes mid-session → FS corruption). zram is
+    // fine: each publish makes a fresh device + target, and the old one is kept for already-connected clients.
+    if want != "zram" && image_in_use(st, name) {
         return Err("clients are connected; a disk-cache image shares one golden file and can't be swapped live. \
                     Reboot/close the clients (publish off-hours), or set this image to zram cache."
             .into());
     }
+    let ip = st.db.get_config("dhcp_server_ip", "");
+    if ip.is_empty() {
+        return Err("dhcp_server_ip is empty — run `setup` first".into());
+    }
+    // Kernel and initrd are built in tftp/broom/<name>.new/ and swapped in only right before the new
+    // boot script is saved: until then a booting client gets the old files that match the old cmdline.
+    let live = crate::tftp_dir().join("broom").join(name);
+    let staged = crate::tftp_dir().join("broom").join(format!("{name}.new"));
+    let _ = std::fs::remove_dir_all(&staged);
+    let out = publish_iscsi_staged(st, id, name, &img_abs, &want, &ip, &staged);
+    match out {
+        Ok((bs, hash, cache_mode)) => {
+            let old = crate::tftp_dir().join("broom").join(format!("{name}.old"));
+            let _ = std::fs::remove_dir_all(&old);
+            let _ = std::fs::rename(&live, &old);
+            std::fs::rename(&staged, &live).map_err(|e| format!("swap in {}: {e}", live.display()))?;
+            let _ = std::fs::remove_dir_all(&old);
+            st.db.set_published(id, &bs, &hash)?;
+            gc_superseded(st, name);
+            Ok(format!("Publish OK — golden '{name}' iSCSI RO ({cache_mode}) + kernel/initrd + boot_script overlay"))
+        }
+        Err(e) => {
+            let _ = std::fs::remove_dir_all(&staged);
+            Err(e)
+        }
+    }
+}
+
+/// publish_iscsi's work into `staged`: kernel/initrd, the iSCSI target. → (boot script, hash, cache mode).
+fn publish_iscsi_staged(
+    st: &SharedState,
+    id: i64,
+    name: &str,
+    img_abs: &Path,
+    want: &str,
+    ip: &str,
+    staged: &Path,
+) -> Result<(String, String, String), String> {
+    // 1. Extract kernel + initrd from the golden, read the root UUID.
+    let root_uuid = crate::overlay::build_boot(img_abs, name, staged)?;
+
+    // 2. cache_mode (images column): disk → serve the file directly; zram → load the img into /dev/zramN.
+    // zram fails (RAM overflow / error) → fall back to disk BY ITSELF (DB updated) so the image always boots.
     // New generation: new IQN + backstore (+ new zram device), leaving the previous target for connected clients.
     let _ = bump_gen(st, name);
     let g = gen_of(st, name);
     let (cache_mode, backing) = if want == "zram" {
-        match ensure_zram(st, name, g, &img_abs) {
+        match ensure_zram(st, name, g, img_abs) {
             Ok(dev) => ("zram".to_string(), dev),
             Err(e) => {
                 tracing::warn!("image {name}: zram failed ({e}) → falling back to cache_mode=disk");
@@ -201,15 +239,11 @@ fn publish_iscsi(st: &SharedState, id: i64, name: &str) -> Result<String, String
         ("disk".to_string(), img_abs.to_string_lossy().to_string())
     };
 
-    // 3. Shared RO iSCSI target (zram = block backstore, disk = fileio), then drop any now-superseded target.
+    // 3. Shared RO iSCSI target (zram = block backstore, disk = fileio). Superseded ones are dropped by the caller
+    //    once the new boot script is saved (a client may still boot the old one until then).
     let iqn = export_target(st, name, &cache_mode, &backing)?;
-    gc_superseded(st, name, &iqn);
 
-    // 4. iPXE boot_script. The initrd hook reads broom.name/hash/size/srv/reg from the cmdline.
-    let ip = st.db.get_config("dhcp_server_ip", "");
-    if ip.is_empty() {
-        return Err("dhcp_server_ip is empty — run `setup` first".into());
-    }
+    // 4. iPXE boot_script. The initrd hook reads broom.name/hash/size/reg from the cmdline.
     // sanhook = iPXE attaches iSCSI via iBFT (does not boot the LUN); initrd open-iscsi reads the iBFT →
     // /dev/sda golden RO → root=UUID mounted RO; overlayroot (baked into the golden) overlays it onto the
     // SSD writeback (reset every boot). ip=dhcp gives the initrd a network.
@@ -217,19 +251,15 @@ fn publish_iscsi(st: &SharedState, id: i64, name: &str) -> Result<String, String
     // `quiet` left out so overlayroot/broom logs show on the client console (easier to debug a boot).
     // broom.name/hash/size: the initrd hook compares the hash with the SSD cache copy (match → boot from the SSD,
     // skip iSCSI; mismatch → iSCSI + background copy). Hash computed FIRST to embed it in the cmdline.
-    // Same pass writes golden.chunks (broom.srv: where the cache script fetches it → patches only changed chunks).
-    let hash = crate::chunks::write_manifest(&img_abs, &crate::tftp_dir().join("broom").join(name))?;
-    let size = std::fs::metadata(&img_abs).map_err(|e| e.to_string())?.len();
+    let hash = crate::hash::file_hash(&img_abs.to_string_lossy()).ok_or_else(|| format!("sha256 of {} failed", img_abs.display()))?;
+    let size = std::fs::metadata(img_abs).map_err(|e| e.to_string())?.len();
     let bs = format!(
         "sanhook iscsi:{ip}::::{iqn} || shell\n\
-         kernel http://{ip}/tftp/broom/{name}/vmlinuz initrd=initrd.img ip=dhcp root=UUID={root_uuid} ro fsck.mode=skip overlayroot=device:dev=/dev/disk/by-label/broomwb,recurse=0 broom.name={name} broom.hash={hash} broom.size={size} broom.srv={ip} broom.reg=${{broom-reg}}\n\
+         kernel http://{ip}/tftp/broom/{name}/vmlinuz initrd=initrd.img ip=dhcp root=UUID={root_uuid} ro fsck.mode=skip overlayroot=device:dev=/dev/disk/by-label/broomwb,recurse=0 broom.name={name} broom.hash={hash} broom.size={size} broom.reg=${{broom-reg}}\n\
          initrd http://{ip}/tftp/broom/{name}/initrd.img\n\
          boot"
     );
-    st.db.set_published(id, &bs, &hash)?;
-    Ok(format!(
-        "Publish OK — golden '{name}' iSCSI RO ({cache_mode}) + kernel/initrd + boot_script overlay"
-    ))
+    Ok((bs, hash, cache_mode))
 }
 
 /// Undo everything publish made for an image (image deleted): iSCSI target, zram device, boot files
@@ -237,20 +267,7 @@ fn publish_iscsi(st: &SharedState, id: i64, name: &str) -> Result<String, String
 pub fn unpublish(st: &SharedState, name: &str) {
     if let Ok(lio) = crate::iscsi::Lio::system() {
         // Every generation of this image's target + its zram device (the image is going away).
-        let prefix = format!("{}:{name}.g", st.db.get_config("iqn_base", "iqn.2026-01.local.broom"));
-        for iqn in lio.list_iqns() {
-            if !iqn.starts_with(&prefix) {
-                continue;
-            }
-            if let Some(g) = iqn.rsplit_once(".g").and_then(|(_, s)| s.parse::<u64>().ok()) {
-                lio.remove(&store_of(name, g), &iqn);
-                let dev = st.db.get_config(&zram_key(name, g), "");
-                if !dev.is_empty() {
-                    zram_remove(&dev);
-                    let _ = st.db.set_config(&zram_key(name, g), "");
-                }
-            }
-        }
+        drop_targets(st, &lio, name, None, false);
         lio.remove(name, &format!("iqn.2026-08.net.tiem:{name}")); // legacy fixed IQN (see restore above), drop later
     }
     // Legacy single-device key (pre-versioning).
@@ -261,6 +278,9 @@ pub fn unpublish(st: &SharedState, name: &str) {
     }
     for d in ["broom", "broom-win"] {
         let _ = std::fs::remove_dir_all(crate::tftp_dir().join(d).join(name));
+    }
+    for s in ["new", "old"] {
+        let _ = std::fs::remove_dir_all(crate::tftp_dir().join("broom").join(format!("{name}.{s}")));
     }
 }
 
@@ -362,16 +382,12 @@ fn zram_key(name: &str, g: u64) -> String {
     format!("zram_dev:{name}:g{g}")
 }
 
-/// Remove every superseded target of this image (all generations except `keep_iqn`) and free their zram devices —
-/// but only when no client is connected, so a running client is never cut off. Runs after a new publish.
-fn gc_superseded(st: &SharedState, name: &str, keep_iqn: &str) {
-    if crate::iscsi::any_session() {
-        return; // someone is attached (portal-wide) → keep the old targets, GC on a later publish when idle
-    }
-    let Ok(lio) = crate::iscsi::Lio::system() else { return };
+/// Remove this image's iSCSI targets (every generation except `keep`) and free their zram devices. `idle_only`: skip
+/// a target a client is logged in to (it keeps reading its own generation; a later pass drops it).
+fn drop_targets(st: &SharedState, lio: &crate::iscsi::Lio, name: &str, keep: Option<&str>, idle_only: bool) {
     let prefix = format!("{}:{name}.g", st.db.get_config("iqn_base", "iqn.2026-01.local.broom"));
     for iqn in lio.list_iqns() {
-        if !iqn.starts_with(&prefix) || iqn == keep_iqn {
+        if !iqn.starts_with(&prefix) || keep == Some(iqn.as_str()) || (idle_only && lio.has_sessions(&iqn)) {
             continue;
         }
         if let Some(g) = iqn.rsplit_once(".g").and_then(|(_, s)| s.parse::<u64>().ok()) {
@@ -381,9 +397,31 @@ fn gc_superseded(st: &SharedState, name: &str, keep_iqn: &str) {
                 zram_remove(&dev);
                 let _ = st.db.set_config(&zram_key(name, g), "");
             }
-            tracing::info!("iSCSI: removed superseded target {iqn}");
+            tracing::info!("iSCSI: removed target {iqn}");
         }
     }
+}
+
+/// Drop every superseded generation of this image's target that no client uses any more. After each publish and
+/// periodically (monitor.rs): a busy lab never has a moment with no client at all.
+pub(crate) fn gc_superseded(st: &SharedState, name: &str) {
+    if let Ok(lio) = crate::iscsi::Lio::system() {
+        drop_targets(st, &lio, name, Some(&iqn_of(st, name)), true);
+    }
+}
+
+/// Every target of this image, in use or not (rollback rewrites the file a disk-cache target serves).
+pub(crate) fn drop_all_targets(st: &SharedState, name: &str) {
+    if let Ok(lio) = crate::iscsi::Lio::system() {
+        drop_targets(st, &lio, name, None, false);
+    }
+}
+
+/// A client is logged in to some generation of this image's target. No LIO at all → nobody can be.
+pub(crate) fn image_in_use(st: &SharedState, name: &str) -> bool {
+    let Ok(lio) = crate::iscsi::Lio::system() else { return false };
+    let prefix = format!("{}:{name}.g", st.db.get_config("iqn_base", "iqn.2026-01.local.broom"));
+    lio.list_iqns().iter().any(|iqn| iqn.starts_with(&prefix) && lio.has_sessions(iqn))
 }
 
 #[cfg(test)]

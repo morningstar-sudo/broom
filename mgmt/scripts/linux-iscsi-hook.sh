@@ -5,10 +5,10 @@ log(){ echo "broom: $*"; echo "$*" >> /run/broom-wb.log; }
 WB_GB=30   # writeback size of p1; the rest = cache + /games. Change = wipefs the disk to repartition.
 modprobe iscsi_tcp 2>/dev/null
 modprobe iscsi_ibft 2>/dev/null
-NAME=""; HASH=""; SIZE=""; NOCACHE=""; SRV=""; REG=""
+NAME=""; HASH=""; SIZE=""; NOCACHE=""; REG=""
 for a in $(cat /proc/cmdline); do
   case "$a" in
-    broom.name=*) NAME=${a#*=};; broom.hash=*) HASH=${a#*=};; broom.size=*) SIZE=${a#*=};; broom.srv=*) SRV=${a#*=};;
+    broom.name=*) NAME=${a#*=};; broom.hash=*) HASH=${a#*=};; broom.size=*) SIZE=${a#*=};;
     broom.nocache) NOCACHE=1;;
     broom.reg=*) REG=${a#*=};;
   esac
@@ -114,7 +114,7 @@ if command -v lvm >/dev/null 2>&1; then
 fi
 # Parameters for broom-cache.service (golden) after boot: mount /games + background copy on MISS.
 if [ "$MODE" != none ]; then
-  printf 'MODE=%s\nNAME=%s\nHASH=%s\nSIZE=%s\nGOLDEN=%s\nSRV=%s\n' "$MODE" "$NAME" "$HASH" "$SIZE" "$GOLDEN" "$SRV" > /run/broom-cache.env
+  printf 'MODE=%s\nNAME=%s\nHASH=%s\nSIZE=%s\nGOLDEN=%s\n' "$MODE" "$NAME" "$HASH" "$SIZE" "$GOLDEN" > /run/broom-cache.env
   cp /scripts/broom-cache.sh /run/broom-cache.sh
 fi
 

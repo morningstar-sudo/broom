@@ -16,7 +16,7 @@ fn write_exec(path: &str, body: &str) -> Result<(), String> {
 const STAGE_HOOK: &str = include_str!("../../scripts/stage-hook.sh");
 
 /// Tools of the machine building the bundle that the hook copies into the stage (/broom/bin, ahead of busybox).
-const STAGE_TOOLS: &str = "sfdisk blkid mkfs.fat mkntfs ntfsfix efibootmgr wget sha256sum tar gzip od dd awk zstd";
+const STAGE_TOOLS: &str = "sfdisk blkid mkfs.fat mkntfs ntfsfix efibootmgr wget sha256sum tar gzip od dd awk";
 
 /// Stage init-premount script — runs on the client, does NOT mount root; reboots into Windows when done.
 const STAGE_SCRIPT: &str = include_str!("../../scripts/stage.sh");
@@ -57,14 +57,13 @@ fn build_stage(kernel: Option<&str>, sd: &str) -> Result<bool, String> {
     // Tools WITHOUT a busybox replacement must really be in the initrd — report missing ones now
     // at build time, not when a client gets stuck in a shell.
     let list = run("lsinitramfs", &[&tmp])?;
-    // wget: busybox's (initramfs build) lacks --header / --post-file → delta updates + drivers need GNU wget.
-    // zstd: delta chunks arrive compressed.
-    let missing: Vec<&str> = ["sfdisk", "mkfs.fat", "mkntfs", "ntfsfix", "efibootmgr", "awk", "wget", "zstd"]
+    // wget: busybox's (initramfs build) lacks --post-file / -T → the driver list needs GNU wget.
+    let missing: Vec<&str> = ["sfdisk", "mkfs.fat", "mkntfs", "ntfsfix", "efibootmgr", "awk", "wget"]
         .into_iter()
         .filter(|b| !list.lines().any(|l| l.ends_with(&format!("broom/bin/{b}"))))
         .collect();
     if !missing.is_empty() {
-        return Err(format!("stage initrd is missing {} — install fdisk ntfs-3g dosfstools efibootmgr wget mawk zstd on the machine that builds the bundle", missing.join(", ")));
+        return Err(format!("stage initrd is missing {} — install fdisk ntfs-3g dosfstools efibootmgr wget mawk on the machine that builds the bundle", missing.join(", ")));
     }
     std::fs::rename(&tmp, format!("{sd}/stage.img")).map_err(|e| e.to_string())?;
     std::fs::copy(format!("/boot/vmlinuz-{kv}"), format!("{sd}/vmlinuz"))
@@ -104,7 +103,7 @@ pub fn ensure_stage() -> Result<String, String> {
     let Some(want) = stage_pinned() else {
         // Locally built binary: the bundle its builder made with `build-stage` (it matches their stage script).
         if local.is_file() {
-            let sha = crate::chunks::file_hash(&local.to_string_lossy()).ok_or_else(|| format!("{}: unreadable", local.display()))?;
+            let sha = crate::hash::file_hash(&local.to_string_lossy()).ok_or_else(|| format!("{}: unreadable", local.display()))?;
             install_bundle(&local, &sha, &sd)?;
             let _ = std::fs::remove_file(&local);
             return Ok("installed from broom-stage.tar.gz next to the binary".into());
@@ -142,7 +141,7 @@ pub fn ensure_stage() -> Result<String, String> {
 
 /// Check `file` against sha256 `want`, unpack it into `sd` (swapped in whole, never half-written), mark it.
 fn install_bundle(file: &Path, want: &str, sd: &str) -> Result<(), String> {
-    let got = crate::chunks::file_hash(&file.to_string_lossy()).ok_or_else(|| format!("{}: unreadable", file.display()))?;
+    let got = crate::hash::file_hash(&file.to_string_lossy()).ok_or_else(|| format!("{}: unreadable", file.display()))?;
     if got != want {
         return Err(format!("{}: sha256 {got}, this binary expects its own build's stage {want}", file.display()));
     }
@@ -189,7 +188,7 @@ pub fn build_bundle(args: &[String]) -> ! {
         std::fs::copy(shim, format!("{dir}/shimx64.efi")).map_err(|e| format!("{shim}: {e}"))?;
         let tgz = format!("{out}/broom-stage.tar.gz");
         crate::archive::tar_gz(Path::new(&dir), Path::new(&tgz))?;
-        crate::chunks::file_hash(&tgz).ok_or_else(|| "sha256 of the bundle failed".into())
+        crate::hash::file_hash(&tgz).ok_or_else(|| "sha256 of the bundle failed".into())
     })();
     match r {
         Ok(h) => {
@@ -218,7 +217,7 @@ mod tests {
         }
     }
 
-    /// Shell functions are global: a helper defined inside another function (e.g. delta's chunk `dl`) silently
+    /// Shell functions are global: a helper defined inside another function silently
     /// replaces a top-level one of the same name → every `name(){` in the stage must be unique.
     #[test]
     fn stage_function_names_unique() {
@@ -355,6 +354,53 @@ mod tests {
         assert_eq!(run("", "1"), (true, false, "10.0.0.12\n".into()));
     }
 
+    /// A guest (local admin) writes first.pending + base.ok next to the existing base → ignored, never committed
+    /// (the reset child's parent is base itself).
+    #[test]
+    fn stage_forged_first_pending_ignored() {
+        let s = super::STAGE_SCRIPT;
+        let part = &s[s.find("# 2. base/child state machine").unwrap()..s.find("# Machine name (Machines table").unwrap()];
+        let d = std::env::temp_dir().join("broom_t_forged");
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        for (f, v) in [("base.vhdx", "BASE"), ("child.vhdx", "CHILD"), ("first.pending", ""), ("base.ok", "ok")] {
+            std::fs::write(d.join(f), v).unwrap();
+        }
+        let sh = format!("B={}\nlog(){{ :; }}; vhdx_guid(){{ echo '{{g}}'; }}\n{part}", d.display());
+        assert!(stage_sh().args(["-c", &sh]).status().unwrap().success());
+        assert_eq!(std::fs::read_to_string(d.join("base.vhdx")).unwrap(), "BASE", "base untouched");
+        assert!(!d.join("first.pending").exists() && !d.join("base.ok").exists());
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// Base build: the driver folders are extracted again from the checked archives (a guest's planted or edited
+    /// folder is gone), an archive that doesn't match its sha256 is left out.
+    #[test]
+    fn stage_drivers_reextracted_for_base() {
+        let s = super::STAGE_SCRIPT;
+        let part = &s[s.find("  for x in drivers/*; do").unwrap()..s.find("  cp base-template.vhdx child.vhdx || die").unwrap()];
+        let d = std::env::temp_dir().join("broom_t_drvx");
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("src")).unwrap();
+        std::fs::create_dir_all(d.join("drivers/planted")).unwrap();
+        std::fs::create_dir_all(d.join("drivers/nv")).unwrap();
+        std::fs::write(d.join("src/nv.inf"), "good").unwrap();
+        std::fs::write(d.join("drivers/nv/nv.inf"), "edited by the guest").unwrap();
+        std::fs::write(d.join("drivers/nv/evil.inf"), "planted").unwrap();
+        let tar = |n: &str| assert!(std::process::Command::new("tar").args(["-czf", &format!("../drivers/{n}.tar.gz"), "nv.inf"]).current_dir(d.join("src")).status().unwrap().success());
+        tar("nv");
+        tar("bad");
+        let nv = crate::hash::file_hash(&d.join("drivers/nv.tar.gz").to_string_lossy()).unwrap();
+        std::fs::write(d.join("drivers/nv.sha256"), format!("{nv}\n")).unwrap();
+        std::fs::write(d.join("drivers/bad.sha256"), "0000\n").unwrap();
+        let sh = format!("cd {}\nlog(){{ :; }}\n{part}", d.display());
+        assert!(stage_sh().args(["-c", &sh]).status().unwrap().success());
+        assert_eq!(std::fs::read_to_string(d.join("drivers/nv/nv.inf")).unwrap(), "good");
+        assert!(!d.join("drivers/nv/evil.inf").exists() && !d.join("drivers/planted").exists());
+        assert!(!d.join("drivers/bad").exists() && !d.join("drivers/bad.tar.gz").exists(), "mismatch → left out");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
     /// Stage drivers part (cut from STAGE_SCRIPT, wget mocked, real tar.gz): download + extract, base rebuilt only
     /// when the set present changes, removal, no answer → keep, failed download → not counted (retried).
     #[test]
@@ -370,7 +416,7 @@ mod tests {
         assert!(std::process::Command::new("tar").args(["-czf", "../nv.tar.gz", "-C", ".", "nv.inf"]).current_dir(d.join("pkgs/src")).status().unwrap().success());
         let part = s[s.find("# Drivers (Drivers page)").unwrap()..s.find("# Last session's writes").unwrap()]
             .replace("/run/", &format!("{}/", run.display()));
-        let nv = crate::chunks::file_hash(&d.join("pkgs/nv.tar.gz").to_string_lossy()).unwrap();
+        let nv = crate::hash::file_hash(&d.join("pkgs/nv.tar.gz").to_string_lossy()).unwrap();
         // wget mock: POST → answer.txt (missing = server down); GET → pkgs/<file> into -O.
         let mock = format!(
             "cd {}; SRV=x; MAC=aa:bb:cc:dd:ee:01\nlog(){{ echo \"$*\" >> {}/log; }}; configure_networking(){{ :; }}\n\
@@ -402,7 +448,7 @@ mod tests {
         let ans = format!("nv {nv}\n");
         assert_eq!(step(Some("")), (false, false), "no packages: an old base stays");
         assert_eq!(step(Some(&ans)), (true, true), "new package → downloaded + base rebuilt");
-        assert!(!b.join("drivers/nv.tar.gz").exists(), "archive removed after extracting");
+        assert!(b.join("drivers/nv.tar.gz").exists(), "archive kept: each base build extracts it again");
         assert_eq!(step(Some(&ans)), (false, true), "unchanged → nothing to do");
         assert_eq!(step(None), (false, true), "server down → keep");
         assert_eq!(step(Some("")), (true, false), "package gone → removed + rebuilt");
@@ -455,92 +501,49 @@ mod tests {
         assert_eq!((set.as_str(), file.as_str(), strict.as_str()), ("0003,0004,0005,0001", "0003,0004,0005,0001", "0007,0000"));
     }
 
-    /// Stage delta() (cut from STAGE_SCRIPT, real files + manifests from crate::chunks::write_manifest, wget mocked with
-    /// HTTP Range): the result is byte-identical to the new golden and only the missing chunks are downloaded.
+    /// Stage golden download (cut from STAGE_SCRIPT, wget/getfile mocked): the old golden + base go, the golden is
+    /// downloaded whole and hashed on the way; a short file (disk full / cut stream) is never accepted.
     #[test]
-    fn stage_delta_golden() {
-        const C: usize = crate::chunks::MANIFEST_CHUNK;
+    fn stage_whole_golden_download() {
         let s = super::STAGE_SCRIPT;
-        let func = &s[s.find("DW=4").unwrap()..s.find("# end delta").unwrap()];
-        let d = std::env::temp_dir().join("broom_t_delta");
-        let chunk = |b: u8| vec![b; C];
-        let file = |parts: &[Vec<u8>]| parts.concat();
-        // old: chunks 1..5 + a partial tail
-        let old = file(&[chunk(1), chunk(2), chunk(3), chunk(4), chunk(5), vec![6; 1000]]);
-        let run = |new: &[u8], server: &[u8], corrupt_old_chunk: Option<usize>, stale_patch: bool| {
+        let part = &s[s.find("  D=$B/dl-$HASH").unwrap()..s.find("# 1b. ").unwrap()];
+        let golden: Vec<u8> = (0..3_000_000u32).map(|i| (i % 251) as u8).collect();
+        let run = |short: bool| {
+            let d = std::env::temp_dir().join(format!("broom_t_dl_{short}"));
             let _ = std::fs::remove_dir_all(&d);
-            for p in ["o", "n", "run"] {
+            for p in ["b", "srv"] {
                 std::fs::create_dir_all(d.join(p)).unwrap();
             }
-            std::fs::write(d.join("o/golden.vhdx"), &old).unwrap();
-            crate::chunks::write_manifest(&d.join("o/golden.vhdx"), &d.join("o")).unwrap();
-            std::fs::write(d.join("n/golden.vhdx"), new).unwrap();
-            crate::chunks::write_manifest(&d.join("n/golden.vhdx"), &d.join("n")).unwrap();
-            std::fs::write(d.join("server.bin"), server).unwrap();
-            if let Some(k) = corrupt_old_chunk {
-                let mut o = old.clone();
-                o[k * C..(k + 1) * C].fill(0xEE);
-                std::fs::write(d.join("o/golden.vhdx"), o).unwrap();
+            std::fs::write(d.join("srv/golden.vhdx"), &golden).unwrap();
+            std::fs::write(d.join("srv/golden.size"), golden.len().to_string()).unwrap();
+            for f in ["base-template.vhdx", "child-template.vhdx", "child-template.off", "efi.tar.gz"] {
+                std::fs::write(d.join("srv").join(f), f).unwrap();
             }
-            if stale_patch {
-                std::fs::write(d.join("o/golden.vhdx.patching"), "another-version\n").unwrap();
+            for f in ["golden.vhdx", "golden.chunks", "base.vhdx", "child.vhdx"] {
+                std::fs::write(d.join("b").join(f), "old").unwrap();
             }
-            let body = func.replace("/run/", &format!("{}/run/", d.display()));
+            let hash = crate::hash::file_hash(&d.join("srv/golden.vhdx").to_string_lossy()).unwrap();
+            // A short download = only the first 1 MB of the golden arrives.
+            let cut = if short { "| head -c 1048576" } else { "" };
             let sh = format!(
-                "cd {d}; W={d}\nlog(){{ echo \"$*\" >> {d}/log; }}\n\
-                 wget(){{ o=\"\"; u=\"\"; while [ $# -gt 0 ]; do case \"$1\" in -O) o=$2; shift;; -q) ;; *) u=$1;; esac; shift; done\n\
-                   case \"$u\" in *golden-chunk\\?name=w\\&i=*\\&h=*) ;; *) return 1;; esac\n\
-                   i=${{u#*&i=}}; i=${{i%%&*}}; echo \"$i\" >> {d}/dl\n\
-                   tail -c +$((i * 4194304 + 1)) {d}/server.bin | head -c 4194304 | zstd -q -c > \"$o\"; }}\n\
-                 {body}\ndelta {d}/o/golden.vhdx {d}/o/golden.chunks {d}/n/golden.chunks {d}/out.vhdx 'http://x/api/golden-chunk?name=w'",
+                "B={d}/b; W={d}; SRV=x; NAME=w; HASH={hash}\nlog(){{ :; }}; die(){{ echo DIE; exit; }}; restart(){{ echo RESTART; exit; }}\n\
+                 srv_hash(){{ echo {hash}; }}\n\
+                 wget(){{ for u; do :; done; cat {d}/srv/${{u##*/}}; }}\n\
+                 getfile(){{ if [ \"$1\" = -c ]; then shift; fi; o=$2; u=$3; if [ \"$o\" = - ]; then cat {d}/srv/${{u##*/}} {cut}; else cat {d}/srv/${{u##*/}} {cut} > \"$o\"; fi; }}\n\
+                 if :; then\n{part}echo OK", // the cut ends with the `fi` of step 1's `if`
                 d = d.display()
             );
-            let ok = stage_sh().args(["-c", &sh]).status().unwrap().success();
-            let rd = |f: &str| std::fs::read_to_string(d.join(f)).unwrap_or_default();
-            let same = std::fs::read(d.join("out.vhdx")).map(|o| o == new).unwrap_or(false);
-            (ok, same, rd("dl").lines().count(), rd("log"))
+            let o = stage_sh().args(["-c", &sh]).output().unwrap();
+            let out = String::from_utf8_lossy(&o.stdout).trim().to_string();
+            let got = std::fs::read(d.join("b/golden.vhdx")).ok();
+            let sum = std::fs::read_to_string(d.join("b/golden.sha256")).ok();
+            let old_gone = !d.join("b/base.vhdx").exists() && !d.join("b/golden.chunks").exists();
+            let _ = std::fs::remove_dir_all(&d);
+            (out, got.is_some_and(|g| g == golden), sum.is_some_and(|s| s.trim() == hash), old_gone)
         };
-        // A: chunk 2 + the tail changed in place → nothing moved, 2 downloads.
-        let a = file(&[chunk(1), chunk(2), chunk(9), chunk(4), chunk(5), vec![8; 1000]]);
-        let (ok, same, dls, log) = run(&a, &a, None, false);
-        assert!(ok && same && dls == 2 && log.contains("0 moved"), "{log}");
-        // Resume case: a delta cut by a power loss already wrote the new chunk 2 (here 0xEE) in place → only the tail is
-        // downloaded; the plan still says "download" for chunk 2 but the bytes on disk already match.
-        let a2 = file(&[chunk(1), chunk(2), vec![0xEE; C], chunk(4), chunk(5), vec![8; 1000]]);
-        let (ok, same, dls, log) = run(&a2, &a2, Some(2), false);
-        assert!(ok && same && dls == 1, "{log}");
-        // A3: an UNCHANGED chunk (0) went bad on the SSD → caught by the check and downloaded too.
-        let (ok, same, dls, log) = run(&a, &a, Some(0), false);
-        assert!(ok && same && dls == 3, "{log}");
-        // B: a new chunk early → every later chunk shifts → 5 moved (saved first, then written), 1 download.
-        let b = file(&[chunk(1), chunk(7), chunk(2), chunk(3), chunk(4), chunk(5), vec![6; 1000]]);
-        let (ok, same, dls, log) = run(&b, &b, None, false);
-        assert!(ok && same && dls == 1 && log.contains("5 moved") && log.contains("delta done"), "{log}");
-        // C: the old copy is damaged where a chunk is copied from → that chunk is downloaded instead.
-        let (ok, same, dls, _) = run(&b, &b, Some(3), false);
-        assert!(ok && same && dls == 2);
-        // D: the server sends wrong data → fails after 3 tries → the caller falls back to a full download.
-        let (ok, _, dls, log) = run(&b, &a, None, false);
-        assert!(!ok && dls == 3 && log.contains("failed 3 times"), "{log}");
-        // E: 4 workers over a longer file: reversed order + 3 new chunks, all workers busy → still byte-identical.
-        let mut parts: Vec<Vec<u8>> = vec![chunk(30), chunk(31)];
-        parts.extend([5u8, 4, 3, 2, 1].iter().map(|&b| chunk(b)));
-        parts.push(chunk(32));
-        parts.push(vec![6; 1000]);
-        let e = file(&parts);
-        let (ok, same, dls, log) = run(&e, &e, None, false);
-        assert!(ok && same && dls == 3 && log.contains("4 workers"), "{log}");
-        assert!(!d.join("o/golden.vhdx.spare").exists() && !d.join("o/golden.vhdx.patching").exists(), "cleaned up");
-        // F: a previous run was interrupted while patching towards ANOTHER version → unchanged chunks can't be trusted
-        // → no delta (the caller downloads everything).
-        let (ok, _, dls, log) = run(&b, &b, None, true);
-        assert!(!ok && dls == 0 && log.contains("half-patched"), "{log}");
-        // G: a re-installed golden (5 of 6 chunks new) → no delta at all, the caller streams the whole file.
-        let g = file(&[chunk(40), chunk(41), chunk(42), chunk(43), chunk(44), vec![6; 1000]]);
-        let (ok, _, dls, log) = run(&g, &g, None, false);
-        assert!(!ok && dls == 0 && log.contains("83% changed -> whole file instead"), "{log}");
-        assert_eq!(std::fs::read(d.join("o/golden.vhdx")).unwrap(), old, "old copy untouched");
-        let _ = std::fs::remove_dir_all(&d);
+        assert_eq!(run(false), ("OK".into(), true, true, true));
+        let (out, _, sum_ok, old_gone) = run(true);
+        assert_eq!((out.as_str(), sum_ok, old_gone), ("DIE", false, true), "short golden never accepted");
     }
 
     /// Real HTTPS download (GitHub release → redirect to its CDN): cargo test download_https -- --ignored
@@ -549,7 +552,7 @@ mod tests {
     fn download_https() {
         let p = std::env::temp_dir().join("broom_t_download");
         super::download("https://github.com/ipxe/ipxe/releases/download/v2.0.0/ipxeboot.tar.gz", &p).unwrap();
-        let sha = crate::chunks::file_hash(&p.to_string_lossy()).unwrap();
+        let sha = crate::hash::file_hash(&p.to_string_lossy()).unwrap();
         assert_eq!(sha, "01a526d4cc791fc30362259c609d6c506cc64a7bdff51b9a5eb788354e17eee1", "pinned in fetch-signed.sh");
         let _ = std::fs::remove_file(p);
     }
@@ -576,7 +579,7 @@ mod tests {
         }
         let tgz = d.join("broom-stage.tar.gz");
         crate::archive::tar_gz(&src, &tgz).unwrap();
-        let sha = crate::chunks::file_hash(&tgz.to_string_lossy()).unwrap();
+        let sha = crate::hash::file_hash(&tgz.to_string_lossy()).unwrap();
         let sd = d.join("tftp/broom-stage");
         std::fs::create_dir_all(&sd).unwrap();
         std::fs::write(sd.join("stage.img"), "old").unwrap();

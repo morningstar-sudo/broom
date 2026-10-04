@@ -59,7 +59,7 @@ Then open `http://<server-ip>/`:
     - **Send hostname** (on) — option 12 = the machine's name on the Machines page.
     - **Rapid Commit** (off) — RFC 4039: a client that asks for it gets the address in 2 packets instead of 4.
       UEFI PXE and iPXE never ask, so it rarely changes boot time.
-- Client/boot endpoints (`/boot*`, `/tftp`, license and driver/chunk fetch) stay open — a PXE client can't log in.
+- Client/boot endpoints (`/boot*`, `/tftp`, license and driver fetch) stay open — a PXE client can't log in.
 
 **Client machines:** UEFI, Secure Boot **off**, **PXE first** in the boot order (required for the reset-on-boot).
 **Register them** (Machines page) before their first Windows boot: the stage partitions the SSD by itself only on a

@@ -165,16 +165,22 @@ impl DhcpOpts {
     }
 }
 
-/// "12h" / "30m" / "1d" / "3600" → seconds (default 12h).
-fn lease_secs(s: &str) -> u32 {
+/// "12h" / "30m" / "1d" / "90s" / "3600" → seconds; None = not a lease time (settings.rs refuses it).
+pub(crate) fn parse_lease(s: &str) -> Option<u32> {
     let s = s.trim();
     let (n, mul) = match s.chars().last() {
         Some('h') => (&s[..s.len() - 1], 3600),
         Some('m') => (&s[..s.len() - 1], 60),
         Some('d') => (&s[..s.len() - 1], 86400),
+        Some('s') => (&s[..s.len() - 1], 1),
         _ => (s, 1),
     };
-    n.parse::<u32>().ok().filter(|&v| v > 0).map_or(43200, |v| v.saturating_mul(mul))
+    n.parse::<u32>().ok().filter(|&v| v > 0).map(|v| v.saturating_mul(mul))
+}
+
+/// The lease time in seconds, 12h when unset / invalid.
+fn lease_secs(s: &str) -> u32 {
+    parse_lease(s).unwrap_or(43200)
 }
 
 impl Cfg {
@@ -886,6 +892,6 @@ mod tests {
     #[test]
     fn lease_parse() {
         assert_eq!((lease_secs("12h"), lease_secs("30m"), lease_secs("1d"), lease_secs("600")), (43200, 1800, 86400, 600));
-        assert_eq!(lease_secs("junk"), 43200);
+        assert_eq!((lease_secs("junk"), lease_secs("90s"), parse_lease("0"), parse_lease("5x")), (43200, 90, None, None));
     }
 }

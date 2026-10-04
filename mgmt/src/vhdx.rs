@@ -282,8 +282,7 @@ const PAYLOAD_FULLY_PRESENT: u64 = 6;
 
 /// `src` (a raw disk) → dynamic VHDX at `path` (replaces `qemu-img convert -O vhdx`). Blocks that are all zero
 /// are left out (BAT "not present" reads as zeros); the others are stored in VIRTUAL order, so the same golden
-/// always lays out the same way (the clients' delta updates compare 4 MB chunks of this file). Zero 1MB pieces
-/// inside a stored block stay holes in the server's file.
+/// always lays out the same way. Zero 1MB pieces inside a stored block stay holes in the server's file.
 pub fn write_dynamic(src: &crate::disk::Source, path: &str) -> Result<(), String> {
     use std::os::unix::fs::FileExt;
     if src.len % 512 != 0 || src.len == 0 {

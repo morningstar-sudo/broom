@@ -176,14 +176,31 @@ fn dhcp_field_ok(key: &str, v: &str) -> Result<(), String> {
     let ok = match key {
         "dhcp_mode" => v == "full" || v == "off",
         "dhcp_iface" => v.is_empty() || (v.len() <= 15 && v.chars().all(|c| c.is_ascii_alphanumeric() || ".-_@".contains(c))),
-        "dhcp_server_ip" | "dhcp_subnet" | "dhcp_netmask" | "dhcp_range_start" | "dhcp_range_end" => ipv4(v),
-        "dhcp_gateway" | "dhcp_dns" => v.is_empty() || v.split(',').all(|p| ipv4(p.trim())),
-        "dhcp_lease" => v.parse::<u32>().is_ok() || matches!(v.chars().last(), Some('h' | 'm' | 's')),
+        "dhcp_server_ip" => ipv4(v),
+        // Only the DHCP server uses these (full mode checks them in set_dhcp) → blank is fine while it is off.
+        "dhcp_subnet" | "dhcp_netmask" | "dhcp_range_start" | "dhcp_range_end" | "dhcp_gateway" => v.is_empty() || ipv4(v),
+        "dhcp_dns" => v.is_empty() || v.split(',').all(|p| ipv4(p.trim())),
+        "dhcp_lease" => dhcp::parse_lease(v).is_some(),
         "ipxe_signed" | "strict_reset" | "dhcp_rapid_commit" | "dhcp_ipxe_fast" | "dhcp_authoritative"
         | "dhcp_send_hostname" => v == "0" || v == "1",
         _ => true,
     };
     if ok { Ok(()) } else { Err(format!("{}: invalid value {v:?}", key.trim_start_matches("dhcp_"))) }
+}
+
+/// The DHCP range: both ends set, start ≤ end, both in the server's subnet (server IP + netmask).
+fn range_ok(start: &str, end: &str, server: &str, mask: &str) -> Result<(), String> {
+    use std::net::Ipv4Addr;
+    let ip = |s: &str, what: &str| s.trim().parse::<Ipv4Addr>().map(u32::from).map_err(|_| format!("the DHCP server needs a valid {what}"));
+    let (s, e, srv) = (ip(start, "range start")?, ip(end, "range end")?, ip(server, "server IP")?);
+    let m = ip(if mask.trim().is_empty() { "255.255.255.0" } else { mask }, "netmask")?;
+    if s > e {
+        return Err(format!("range start {start} is after range end {end}"));
+    }
+    if s & m != srv & m || e & m != srv & m {
+        return Err(format!("range {start}-{end} is not in the server's subnet ({server} / {mask})"));
+    }
+    Ok(())
 }
 
 /// Save the DHCP config + restart the built-in DHCP/TFTP listeners (dhcp.rs). Every field is validated FIRST; if any
@@ -228,6 +245,17 @@ async fn set_dhcp(
     if mode == "full" && (cur(&b.gateway, "dhcp_gateway").trim().is_empty() || cur(&dns, "dhcp_dns").trim().is_empty()) {
         return Err((StatusCode::BAD_REQUEST, "the DHCP server needs a gateway and DNS (clients would get no internet)".into()));
     }
+    let server = cur(&b.server_ip, "dhcp_server_ip");
+    if mode == "full" {
+        let mask = cur(&b.netmask, "dhcp_netmask");
+        range_ok(&cur(&b.range_start, "dhcp_range_start"), &cur(&b.range_end, "dhcp_range_end"), &server, &mask)
+            .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+    }
+    // Boot scripts, the Host check (auth.rs) and DHCP option 54 all use it: an address this machine doesn't have
+    // breaks every boot. Binding to it only works when it is ours.
+    if b.server_ip.is_some() && std::net::UdpSocket::bind((server.trim(), 0)).is_err() {
+        return Err((StatusCode::BAD_REQUEST, format!("server IP {server} is not an address of this server")));
+    }
     for (k, v) in &fields {
         if let Some(val) = v {
             st.db.set_config(k, val.trim()).map_err(ise)?;
@@ -263,6 +291,22 @@ fn dhcp_field_validation() {
     assert!(dhcp_field_ok("dhcp_dns", "8.8.8.8,notip").is_err());
     assert!(dhcp_field_ok("dhcp_iface", "eth0").is_ok() && dhcp_field_ok("dhcp_iface", "eth 0;rm").is_err());
     assert!(dhcp_field_ok("dhcp_lease", "12h").is_ok() && dhcp_field_ok("dhcp_lease", "3600").is_ok());
+    assert!(dhcp_field_ok("dhcp_lease", "1d").is_ok() && dhcp_field_ok("dhcp_lease", "h").is_err());
+    // DHCP server off (fresh install): the range fields are blank and must not block Apply.
+    assert!(dhcp_field_ok("dhcp_range_start", "").is_ok() && dhcp_field_ok("dhcp_subnet", "").is_ok());
+    assert!(dhcp_field_ok("dhcp_range_end", "10.0.0.x").is_err());
+    // Option 3 carries one router; a list would be silently dropped.
+    assert!(dhcp_field_ok("dhcp_gateway", "10.0.0.1").is_ok() && dhcp_field_ok("dhcp_gateway", "10.0.0.1,10.0.0.2").is_err());
+}
+
+#[cfg(test)]
+#[test]
+fn dhcp_range_checked() {
+    assert!(range_ok("10.0.0.100", "10.0.0.200", "10.0.0.12", "255.255.255.0").is_ok());
+    assert!(range_ok("10.0.1.100", "10.0.1.200", "10.0.0.12", "255.255.254.0").is_ok(), "/23");
+    assert!(range_ok("10.0.0.200", "10.0.0.100", "10.0.0.12", "").is_err(), "start after end");
+    assert!(range_ok("10.0.1.100", "10.0.1.200", "10.0.0.12", "").is_err(), "outside the /24");
+    assert!(range_ok("", "10.0.0.200", "10.0.0.12", "").is_err(), "blank start in full mode");
 }
 
 #[cfg(test)]

@@ -78,7 +78,7 @@ const SCHEMA: &str = r#"
     );
     INSERT OR IGNORE INTO config(key,value) VALUES('boot_timeout','10');
     INSERT OR IGNORE INTO config(key,value) VALUES('zram_reserve_mb','2048');
-    INSERT OR IGNORE INTO config(key,value) VALUES('dhcp_mode','proxy');
+    INSERT OR IGNORE INTO config(key,value) VALUES('dhcp_mode','off');
     INSERT OR IGNORE INTO config(key,value) VALUES('dhcp_iface','');
     INSERT OR IGNORE INTO config(key,value) VALUES('dhcp_server_ip','');
     INSERT OR IGNORE INTO config(key,value) VALUES('dhcp_subnet','');
@@ -144,6 +144,8 @@ impl Sqlite {
         let _ = c.execute("ALTER TABLE machines ADD COLUMN license_result TEXT", []);
         let _ = c.execute("ALTER TABLE machines ADD COLUMN grp TEXT", []);
         let _ = c.execute("ALTER TABLE machines ADD COLUMN notes TEXT", []);
+        // ProxyDHCP mode removed: off is the same for broom (the LAN's DHCP points clients at it).
+        let _ = c.execute("UPDATE config SET value='off' WHERE key='dhcp_mode' AND value='proxy'", []);
         // iSCSI IQN base, random per server, generated once (first open without it) and kept.
         c.execute("INSERT OR IGNORE INTO config(key,value) VALUES('iqn_base',?1)", [random_iqn_base()]).map_err(e)?;
         Ok(Sqlite { c: Mutex::new(c) })
@@ -204,7 +206,18 @@ impl Db for Sqlite {
     }
 
     fn delete_image(&self, id: i64) -> DbResult<()> {
-        self.c().execute("DELETE FROM images WHERE id=?1", [id]).map(|_| ()).map_err(e)
+        // No foreign keys, and SQLite reuses the highest rowid → machines still pointing at this id would boot whatever
+        // image gets it next. Drop the link; the default (if it was this one) moves to the oldest image left.
+        let mut c = self.c();
+        let t = c.transaction().map_err(e)?;
+        t.execute("UPDATE machines SET image_id=NULL WHERE image_id=?1", [id]).map_err(e)?;
+        t.execute("DELETE FROM images WHERE id=?1", [id]).map_err(e)?;
+        t.execute(
+            "UPDATE images SET is_default=1 WHERE id=(SELECT MIN(id) FROM images) AND NOT EXISTS(SELECT 1 FROM images WHERE is_default=1)",
+            [],
+        )
+        .map_err(e)?;
+        t.commit().map_err(e)
     }
 
     fn set_default_image(&self, id: i64) -> DbResult<()> {
@@ -482,6 +495,29 @@ mod tests {
         assert_eq!(Sqlite::open(&p).unwrap().get_config("iqn_base", ""), a, "kept on reopen");
         assert_ne!(Sqlite::open(":memory:").unwrap().get_config("iqn_base", ""), a, "new DB → new base");
         tmp("broom_test_iqn.db");
+    }
+
+    #[test]
+    fn delete_image_unlinks_machines_and_moves_default() {
+        let db = Sqlite::open(":memory:").unwrap();
+        let new = |name| NewImage { name, os: "linux", boot_script: None, cache_mode: "disk" };
+        let (a, b) = (db.add_image(&new("a")).unwrap(), db.add_image(&new("b")).unwrap());
+        db.set_default_image(b).unwrap();
+        let m = db.add_machine("aa:bb:cc:dd:ee:01", None, None).unwrap();
+        db.set_machine_image(m, Some(b)).unwrap();
+        db.delete_image(b).unwrap();
+        assert_eq!(db.machines().unwrap()[0].image_id, None, "no link to a deleted (reusable) id");
+        assert!(db.image(a).unwrap().unwrap().is_default, "default moves to the image left");
+        let c = db.add_image(&new("c")).unwrap();
+        assert_eq!(db.machines().unwrap()[0].image_id, None, "a new image with the reused id {c} is not picked up");
+    }
+
+    #[test]
+    fn dhcp_mode_proxy_becomes_off() {
+        let p = tmp("broom_test_proxy.db");
+        Sqlite::open(&p).unwrap().set_config("dhcp_mode", "proxy").unwrap();
+        assert_eq!(Sqlite::open(&p).unwrap().get_config("dhcp_mode", ""), "off");
+        tmp("broom_test_proxy.db");
     }
 
     #[test]

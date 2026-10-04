@@ -23,7 +23,7 @@ if ([IO.Directory]::Exists($dd)) {
   $tmp = "$env:SystemRoot\Temp\broom-drivers"
   Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue
   foreach ($f in [IO.Directory]::GetFiles($dd, '*', [IO.SearchOption]::AllDirectories)) {
-    if ($f.EndsWith('.sha256')) { continue }
+    if ($f.EndsWith('.sha256') -or $f.EndsWith('.tar.gz')) { continue }
     $t = $tmp + $f.Substring($dd.Length)
     [IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($t)) | Out-Null
     [IO.File]::Copy($f, $t, $true)

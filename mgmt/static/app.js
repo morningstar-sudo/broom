@@ -226,8 +226,9 @@ async function dvDelete(id,who){if(!confirm('Delete '+who+'? Its DHCP binding an
 
 // ---- images ----
 const gbs=b=>b>=1e9?(b/1e9).toFixed(1)+' GB':(b/1e6).toFixed(0)+' MB';
+let imgRows=[];
 async function loadImages(){
-  const rows=await j('/api/images');
+  const rows=imgRows=await j('/api/images');
   document.querySelector('#images tbody').innerHTML=rows.map(i=>
     `<tr><td>${esc(i.name)}${i.export?`<div class="mono" style="font-size:12px" title="exported ${i.export.created?new Date(i.export.created*1000).toLocaleString():''} — save both into one folder, open the .vmx in VMware">⬇ <a href="/api/images/export-file?id=${i.id}&f=vmx">.vmx</a> · <a href="/api/images/export-file?id=${i.id}&f=vmdk">.vmdk ${gbs(i.export.size)}</a> (${esc(i.export.version)})</div>`:''}</td><td><span class="pill ${i.os}">${esc(i.os)}</span></td>
        <td class="mono">${esc(i.cache_mode||'disk')}</td>
@@ -242,7 +243,7 @@ async function loadImages(){
          <button class="ghost" onclick="republish(${i.id},'${esc(i.name)}')">Republish</button>
          <button class="ghost" onclick="showVersions(${i.id},'${esc(i.name)}','${esc(i.os)}')">Versions</button>
          <button class="ghost" onclick="exportImage(${i.id},'${esc(i.name)}',null)" title="download as a VMware VM (.vmx + .vmdk) to edit the golden">Export</button>
-         <button class="ghost" onclick="editBoot(${i.id},${JSON.stringify(esc(i.boot_script||''))})">Boot</button>
+         <button class="ghost" onclick="editBoot(${i.id})">Boot</button>
          <button class="ghost danger" onclick="delImage(${i.id},'${esc(i.name)}')">Delete</button>
        </td></tr>`).join('') || '<tr><td colspan=8 class="mono">no images yet</td></tr>';
   // srvhost inside the images fragment → set after it is injected.
@@ -309,7 +310,7 @@ async function versionToImage(version){
   try{await j('/api/images/from-version',mk({id:verImg.id,version,name}));loadImages();watchJob(name,el);}catch(e){el.textContent=' ✗ '+e.message;}}
 async function republish(id,name){const el=document.getElementById('img_status');
   try{await j('/api/images/publish',mk({id}));watchJob(name,el);}catch(e){el.textContent=' ✗ '+e.message;}}
-async function editBoot(id,cur){const s=prompt('iPXE boot script:',cur||'');if(s===null)return;
+async function editBoot(id){const cur=(imgRows.find(i=>i.id===id)||{}).boot_script||'';const s=prompt('iPXE boot script:',cur);if(s===null)return;
   await j('/api/images/boot-script',mk({id,boot_script:s}));loadImages();}
 async function delImage(id,name){if(!confirm('Delete image "'+name+'"?'))return;
   await j('/api/images/delete',mk({id}));loadImages();}
