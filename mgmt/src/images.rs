@@ -496,6 +496,15 @@ fn spawn_publish(st: &SharedState, name: String, upload: Option<std::path::PathB
     spawn_job(st, name, "publish", move |st, name, steps| {
         let first = upload.is_some() && crate::versions::list(name, None).is_empty();
         if let Some(dir) = upload {
+            // The convert replaces image.img, which a disk-cache target serves: with clients on it the publish below
+            // would refuse — after the old golden is already gone. Refuse first (the upload stays for a retry).
+            if let Some(img) = st.db.image_by_name(name)?.filter(|i| i.os == "linux" && i.cache_mode != "zram") {
+                if crate::publish::image_in_use(st, &img.name) {
+                    return Err("clients are connected to this disk-cache image — shut them down (or set it to zram cache), \
+                                then press Upload done again"
+                        .into());
+                }
+            }
             steps.go("convert upload→raw");
             crate::golden::prepare_golden(&dir, &crate::images_dir().join(name).join("image.img"))?;
             st.db.set_active_version(name_id(st, name)?, None)?; // new golden = no version yet
@@ -606,9 +615,15 @@ async fn set_cache_mode(
     // the DB without the publish that applies it. publish_iscsi falls back zram→disk by itself on RAM overflow.
     let (id, mode) = (b.id, b.mode);
     spawn_job(&st, name, "publish", move |st, name, steps| {
+        let before = st.db.image(id)?.map(|i| i.cache_mode);
         st.db.set_cache_mode(id, &mode)?;
         tracing::info!("image {name}: cache mode → {mode}");
-        crate::publish::run_publish(st, name, steps)
+        // The publish refused or failed → the mode in the DB goes back to what is still being served.
+        crate::publish::run_publish(st, name, steps).inspect_err(|_| {
+            if let Some(b) = &before {
+                let _ = st.db.set_cache_mode(id, b);
+            }
+        })
     })?;
     Ok(Json(serde_json::json!({"ok": true, "async": true})))
 }
@@ -665,6 +680,10 @@ async fn set_use_ssd(State(st): State<SharedState>, Json(b): Json<SsdBody>) -> R
     let img = st.db.image(b.id).map_err(ise)?.ok_or((StatusCode::NOT_FOUND, format!("image {} not found", b.id)))?;
     if img.os == "windows" && !b.on {
         return Err((StatusCode::BAD_REQUEST, "Windows images always use the SSD (they boot from a VHDX on it)".into()));
+    }
+    // A boot script from before the switch existed doesn't pass it to the client, which would keep using the SSD.
+    if img.boot_script.as_deref().is_some_and(|s| !s.contains("broom.ssd=")) {
+        return Err((StatusCode::BAD_REQUEST, format!("publish image {} again first (its boot script predates the SSD switch)", img.name)));
     }
     st.db.set_use_ssd(b.id, b.on).map_err(ise)?;
     tracing::info!("image {}: SSD {}", img.name, if b.on { "on (cache + writes on the SSD)" } else { "off (SSD untouched, RAM only)" });

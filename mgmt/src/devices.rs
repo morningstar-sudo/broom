@@ -251,7 +251,9 @@ async fn register_bulk(State(st): State<SharedState>, Json(b): Json<RegisterBulk
     let names = next_names(prefix, b.start, b.digits.clamp(1, 4), &taken, macs.len());
     let mut done = Vec::new();
     for (mac, host) in macs.iter().zip(names) {
-        let ip = leases.iter().find(|l| l.mac.eq_ignore_ascii_case(mac)).and_then(|l| l.ip.clone());
+        // The lease (DHCP server on), else the address it PXE-booted from (DHCP server off) — like single Register.
+        let ip = leases.iter().find(|l| l.mac.eq_ignore_ascii_case(mac)).and_then(|l| l.ip.clone())
+            .or_else(|| st.pxe_ip.lock().unwrap().get(&mac.to_lowercase()).cloned());
         let ip = ip.filter(|ip| !all.iter().any(|m| m.ip.as_deref() == Some(ip)));
         st.db.add_machine(mac, ip.as_deref(), Some(&host)).map_err(bad)?;
         tracing::info!("machine registered - mac {mac} - ip {} - hostname {host}", ip.as_deref().unwrap_or("-"));

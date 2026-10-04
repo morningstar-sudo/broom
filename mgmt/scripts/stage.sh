@@ -177,6 +177,21 @@ if wget -q -O /run/broom-cache-list "http://$SRV/api/cache-list" 2>/dev/null; th
       || { rm -rf "$p"; log "image ${p#img.} removed from this disk (no longer cached here / other version)"; }
   done
 fi
+# The parked image unused the longest (smallest .parked; busybox ls can't sort by time) → $old, "" when none.
+oldest(){
+  old=""; t=""
+  for p in $B/img.*; do
+    [ -d "$p" ] || continue
+    v=$(cat $p/.parked 2>/dev/null); case "$v" in ''|*[!0-9]*) v=0;; esac
+    if [ -z "$t" ] || [ "$v" -lt "$t" ]; then t=$v; old=$p; fi
+  done
+}
+# Room for this session (the child grows with what the guest writes; a base build needs a few GB): parked images go,
+# the oldest first, while BROOMWIN has less than 20 GB or 10 % free. (A new golden makes its own room in step 1.)
+while df -Pk $W | tail -1 | awk '{ m = $2 / 10; if (m < 20971520) m = 20971520; exit !($4 < m) }'; do
+  oldest; [ -n "$old" ] || break
+  rm -rf "$old"; log "image ${old##*/img.} removed from this disk (unused the longest) to keep room for the session"
+done
 cd /
 
 # 1. Golden hash mismatch → download the whole golden again. No delta: one sequential write into free space (nothing
@@ -213,15 +228,7 @@ if [ "$(cat $B/golden.sha256 2>/dev/null)" != "$HASH" ]; then
     have=$(fsize $D/golden.vhdx); avail=$(df -Pk $W | tail -1 | awk '{ print $4 }')
     awk -v a="$avail" -v h="${have:-0}" -v s="$size" 'BEGIN { exit !(a * 1024 + h >= s + 1073741824) }'
   }
-  # Short of space → parked images go, the one unused the longest first (smallest .parked; busybox ls can't sort).
-  oldest(){
-    old=""; t=""
-    for p in $B/img.*; do
-      [ -d "$p" ] || continue
-      v=$(cat $p/.parked 2>/dev/null); case "$v" in ''|*[!0-9]*) v=0;; esac
-      if [ -z "$t" ] || [ "$v" -lt "$t" ]; then t=$v; old=$p; fi
-    done
-  }
+  # Short of space → parked images go, the one unused the longest first.
   until room; do
     oldest
     [ -n "$old" ] || die "not enough space on BROOMWIN: the golden needs $(gb $size) + 1 GB -> a bigger disk or a smaller image"
@@ -268,6 +275,10 @@ fi
 # reset. Wrong or missing → downloaded again.
 configure_networking
 if wget -q -O /run/broom-files.sha256 http://$SRV/tftp/broom-win/$NAME/files.sha256 2>/dev/null && [ -s /run/broom-files.sha256 ]; then
+  # These files belong to the golden named on the list's "golden" line: another one (published meanwhile) → reboot
+  # for the new boot script instead of putting new templates next to this golden.
+  g=$(sed -n 's/^\([0-9a-f]*\)  golden$/\1/p' /run/broom-files.sha256)
+  [ -z "$g" ] || [ "$g" = "$HASH" ] || restart "image $NAME changed on the server -> reboot to get the new version"
   while read -r h f; do
     case "$f" in efi.tar.gz|child-template.vhdx|child-template.off|base-template.vhdx) ;; *) continue;; esac
     [ "$(sha256sum $B/$f 2>/dev/null | cut -c1-64)" = "$h" ] && continue

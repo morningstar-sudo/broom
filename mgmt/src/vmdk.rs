@@ -204,7 +204,12 @@ fn sparse_to(p: &Path, n: u64, out: &File, base: u64) -> Result<(), String> {
     // The grain directory is read whole into RAM: a header promising more of it than the file holds is corrupt (a
     // tiny crafted upload would otherwise ask for a multi-GB buffer and abort the whole server).
     let flen = f.metadata().map_err(|e| e.to_string())?.len();
-    let gd_len = ngt.checked_mul(4).filter(|&l| l <= flen).ok_or_else(|| format!("{}: corrupt VMDK (grain directory larger than the file)", p.display()))?;
+    // Also an absolute cap: an upload can be a sparse file of any apparent length. A real 4 TiB disk with 64 KiB grains
+    // needs 512 KiB of grain directory.
+    let gd_len = ngt
+        .checked_mul(4)
+        .filter(|&l| l <= flen && l <= 16 << 20)
+        .ok_or_else(|| format!("{}: corrupt VMDK (grain directory larger than the file or 16 MiB)", p.display()))?;
     let gd_at = h.gd_off.checked_mul(SECTOR).ok_or_else(|| format!("{}: corrupt VMDK header", p.display()))?;
     let gd = rd(&f, gd_at, gd_len as usize)?;
     let compressed = h.flags & COMPRESSED_GRAINS != 0;

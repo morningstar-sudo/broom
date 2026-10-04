@@ -90,7 +90,10 @@ fn vmdk_refs_safe(vmdk: &Path) -> Result<(), String> {
 pub fn prepare_golden(dir: &Path, dest: &Path) -> Result<(), String> {
     let tmp = dest.with_extension("img.new");
     let _ = std::fs::remove_file(&tmp);
-    let out = golden_from(dir, &tmp).and_then(|()| std::fs::rename(&tmp, dest).map_err(|e| format!("rename {}: {e}", tmp.display())));
+    // Flushed before the rename: after a power loss image.img is the whole new golden or still the old one.
+    let out = golden_from(dir, &tmp)
+        .and_then(|()| std::fs::File::open(&tmp).and_then(|f| f.sync_all()).map_err(|e| format!("sync {}: {e}", tmp.display())))
+        .and_then(|()| std::fs::rename(&tmp, dest).map_err(|e| format!("rename {}: {e}", tmp.display())));
     if out.is_err() {
         let _ = std::fs::remove_file(&tmp);
     }

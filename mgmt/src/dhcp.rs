@@ -587,17 +587,26 @@ async fn serve(sock: tokio::net::UdpSocket, port: u16, st: SharedState) {
         let (SocketAddr::V4(from), Some(req)) = (from, parse(&buf[..n])) else {
             continue;
         };
-        let Ok(cfg) = Cfg::load(&*st.db) else { continue };
-        let out = handle(&req, from, port, &cfg, &Store::load(&*st.db, now()));
-        if !out.log.is_empty() {
-            if out.warn {
-                tracing::warn!("{}", out.log);
-            } else {
-                tracing::info!("{}", out.log);
+        // The SQLite reads/writes of one packet run on a blocking thread, not on a runtime worker: a DHCP flood then
+        // queues here instead of stalling the web, TFTP and every other task.
+        let st2 = st.clone();
+        let reply = tokio::task::spawn_blocking(move || {
+            let cfg = Cfg::load(&*st2.db).ok()?;
+            let out = handle(&req, from, port, &cfg, &Store::load(&*st2.db, now()));
+            if !out.log.is_empty() {
+                if out.warn {
+                    tracing::warn!("{}", out.log);
+                } else {
+                    tracing::info!("{}", out.log);
+                }
             }
-        }
-        apply_lease(&*st.db, out.lease);
-        if let Some((p, dest)) = out.reply {
+            apply_lease(&*st2.db, out.lease);
+            out.reply
+        })
+        .await
+        .ok()
+        .flatten();
+        if let Some((p, dest)) = reply {
             let to = match dest {
                 Dest::Broadcast => SocketAddrV4::new(Ipv4Addr::BROADCAST, 68),
                 Dest::Unicast(a) => a,
@@ -624,8 +633,20 @@ pub async fn start(st: &SharedState) -> Result<String, String> {
     };
     // Bind the NEW listeners first (SO_REUSEPORT lets them share the ports with the old ones). Only once all binds
     // succeed do we stop the old listeners — a rejected config never leaves the café with no DHCP/TFTP.
-    let dhcp = if full { Some(bind(67, true)?) } else { None };
     let tftp = bind(69, false)?;
+    let dhcp = match full.then(|| bind(67, true)).transpose() {
+        Ok(d) => d,
+        Err(e) => {
+            // Nothing running yet (server start): TFTP alone still serves iPXE to a LAN whose router hands out the
+            // PXE options — better than no network boot at all. On an Apply the old listeners simply stay.
+            let mut net = st.net.lock().unwrap();
+            if net.is_empty() {
+                net.push(tokio::spawn(crate::tftp::serve(tftp, cfg.server, cfg.iface.clone())));
+                return Err(format!("{e} — DHCP server NOT running, TFTP :69 is"));
+            }
+            return Err(e);
+        }
+    };
     let mut handles = vec![tokio::spawn(crate::tftp::serve(tftp, cfg.server, cfg.iface.clone()))];
     handles.extend(dhcp.map(|d| tokio::spawn(serve(d, 67, st.clone()))));
     // Swap in ONE step: whatever was running (also the listeners of an Apply that ran at the same time) is stopped,

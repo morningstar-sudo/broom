@@ -78,18 +78,20 @@ pub(crate) fn key_ok(k: &str) -> bool {
 
 /// The registered machine behind a client IP, for the license endpoints. Only a machine's OWN bound IP counts —
 /// NOT a DHCP lease (an OFFER hold is trivially spoofed). So a machine that should receive a key must have a fixed
-/// IP set (Devices page). `arp` = the peer's
-/// MAC as the kernel sees it; when known it must match the machine's MAC (raises the bar; ARP can still be faked).
+/// IP set (Devices page). `arp` = the peer's MAC as the kernel sees it: it must be there and match the machine's
+/// MAC — a machine on the LAN that just opened a TCP connection always has an entry; none = a routed peer (another
+/// subnet) → refused (raises the bar; ARP can still be faked).
 fn machine_by_ip<'a>(ip: &str, machines: &'a [Machine], arp: Option<&str>) -> Option<&'a Machine> {
     let m = machines.iter().find(|m| m.ip.as_deref() == Some(ip))?;
     match arp {
         Some(mac) if !m.mac.eq_ignore_ascii_case(mac) => None, // IP right, MAC wrong → spoofed
-        _ => Some(m),
+        Some(_) => Some(m),
+        None => None,
     }
 }
 
 /// The MAC the kernel has for `ip` in the ARP cache (/proc/net/arp), lower-case `aa:bb:…`. None = no entry
-/// (the machine may just not have talked to the server yet — the caller treats that as "can't verify", not "deny").
+/// (not on this LAN, or not talked to the server — machine_by_ip refuses then).
 fn arp_mac(ip: &str) -> Option<String> {
     let arp = std::fs::read_to_string("/proc/net/arp").ok()?;
     for line in arp.lines().skip(1) {
@@ -212,7 +214,7 @@ fn license_key_and_lookup() {
     };
     let ms = [m(1, "aa:00:00:00:00:01", Some("10.0.0.51")), m(2, "AA:00:00:00:00:02", None)];
     // Only a machine's OWN bound IP counts, never a lease.
-    assert_eq!(machine_by_ip("10.0.0.51", &ms, None).map(|m| m.id), Some(1)); // bound IP, ARP unknown → allowed
+    assert_eq!(machine_by_ip("10.0.0.51", &ms, None).map(|m| m.id), None); // bound IP, no ARP entry (routed peer) → refused
     assert_eq!(machine_by_ip("10.0.0.51", &ms, Some("aa:00:00:00:00:01")).map(|m| m.id), Some(1)); // ARP matches
     assert_eq!(machine_by_ip("10.0.0.51", &ms, Some("bb:bb:bb:bb:bb:bb")).map(|m| m.id), None); // ARP MAC mismatch → spoofed
     assert_eq!(machine_by_ip("10.0.0.102", &ms, None).map(|m| m.id), None); // a lease IP is not accepted

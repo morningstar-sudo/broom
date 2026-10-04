@@ -25,10 +25,9 @@ struct MachineStatus {
     hostname: Option<String>,
     online: bool,
     registered: bool,
-    /// Registered machines only: id + license. The web admin is behind a login (auth.rs), so the full key is shown
-    /// to the operator here; it is still never handed to a client (only broom-done fetches it, once, over the LAN).
+    /// Registered machines only: id + license state and the key's last 5 characters. The full key is not in this list
+    /// (polled every few seconds); the machine detail (devices.rs) shows it to the operator on request.
     id: Option<i64>,
-    license_key: Option<String>,
     license_tail: Option<String>,
     license_state: Option<String>,
     license_result: Option<String>,
@@ -73,10 +72,16 @@ async fn status(State(st): State<SharedState>) -> Json<Vec<MachineStatus>> {
     // and blocks the runtime → concurrently it's ~1 s, without blocking a tokio worker.
     let entries: Vec<(String, Option<String>, Option<String>, bool)> =
         map.into_iter().map(|(mac, (ip, hostname, registered))| (mac, ip, hostname, registered)).collect();
+    // At most 32 pings at once: each holds a blocking thread up to 1 s, and the list can hold many machines (it also
+    // shows every MAC seen PXE-booting) — they must not crowd out logins and jobs on the blocking pool.
     let mut set = tokio::task::JoinSet::new();
+    let slots = std::sync::Arc::new(tokio::sync::Semaphore::new(32));
     for (i, (_, ip, _, _)) in entries.iter().enumerate() {
-        let ip = ip.clone();
-        set.spawn_blocking(move || (i, ip.as_deref().is_some_and(ping)));
+        let (ip, slots) = (ip.clone(), slots.clone());
+        set.spawn(async move {
+            let _slot = slots.acquire_owned().await;
+            (i, tokio::task::spawn_blocking(move || ip.as_deref().is_some_and(ping)).await.unwrap_or(false))
+        });
     }
     let mut online = vec![false; entries.len()];
     while let Some(res) = set.join_next().await {
@@ -92,7 +97,6 @@ async fn status(State(st): State<SharedState>) -> Json<Vec<MachineStatus>> {
             let m = rows.remove(&mac);
             MachineStatus {
                 id: m.as_ref().map(|m| m.id),
-                license_key: m.as_ref().and_then(|m| m.license_key.clone()),
                 license_tail: m.as_ref().and_then(|m| m.license_tail.clone()),
                 license_state: m.as_ref().and_then(|m| m.license_state.clone()),
                 license_result: m.as_ref().and_then(|m| m.license_result.clone()),

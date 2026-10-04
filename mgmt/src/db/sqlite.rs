@@ -210,16 +210,21 @@ impl Db for Sqlite {
 
     fn delete_image(&self, id: i64) -> DbResult<()> {
         // No foreign keys, and SQLite reuses the highest rowid → machines still pointing at this id would boot whatever
-        // image gets it next. Drop the link; the default (if it was this one) moves to the oldest image left.
+        // image gets it next. Drop the link. The default (if it was this one) moves only to the oldest PUBLISHED image of
+        // the same OS — never auto-boot another OS or an image with no boot script; none → no default (the menu waits).
         let mut c = self.c();
         let t = c.transaction().map_err(e)?;
+        let gone: Option<(String, bool)> =
+            t.query_row("SELECT os,is_default FROM images WHERE id=?1", [id], |r| Ok((r.get(0)?, r.get::<_, i64>(1)? == 1))).ok();
         t.execute("UPDATE machines SET image_id=NULL WHERE image_id=?1", [id]).map_err(e)?;
         t.execute("DELETE FROM images WHERE id=?1", [id]).map_err(e)?;
-        t.execute(
-            "UPDATE images SET is_default=1 WHERE id=(SELECT MIN(id) FROM images) AND NOT EXISTS(SELECT 1 FROM images WHERE is_default=1)",
-            [],
-        )
-        .map_err(e)?;
+        if let Some((os, true)) = gone {
+            t.execute(
+                "UPDATE images SET is_default=1 WHERE id=(SELECT MIN(id) FROM images WHERE os=?1 AND boot_script IS NOT NULL)",
+                [os],
+            )
+            .map_err(e)?;
+        }
         t.commit().map_err(e)
     }
 
@@ -503,16 +508,22 @@ mod tests {
     #[test]
     fn delete_image_unlinks_machines_and_moves_default() {
         let db = Sqlite::open(":memory:").unwrap();
-        let new = |name| NewImage { name, os: "linux", boot_script: None, cache_mode: "disk" };
-        let (a, b) = (db.add_image(&new("a")).unwrap(), db.add_image(&new("b")).unwrap());
+        let new = |name, os| NewImage { name, os, boot_script: Some("boot"), cache_mode: "disk" };
+        let (a, b) = (db.add_image(&new("a", "linux")).unwrap(), db.add_image(&new("b", "linux")).unwrap());
+        let w = db.add_image(&NewImage { name: "w", os: "windows", boot_script: Some("boot"), cache_mode: "disk" }).unwrap();
         db.set_default_image(b).unwrap();
         let m = db.add_machine("aa:bb:cc:dd:ee:01", None, None).unwrap();
         db.set_machine_image(m, Some(b)).unwrap();
         db.delete_image(b).unwrap();
         assert_eq!(db.machines().unwrap()[0].image_id, None, "no link to a deleted (reusable) id");
-        assert!(db.image(a).unwrap().unwrap().is_default, "default moves to the image left");
-        let c = db.add_image(&new("c")).unwrap();
+        assert!(db.image(a).unwrap().unwrap().is_default, "default moves to the published image of the same OS");
+        assert!(!db.image(w).unwrap().unwrap().is_default);
+        let c = db.add_image(&new("c", "linux")).unwrap();
         assert_eq!(db.machines().unwrap()[0].image_id, None, "a new image with the reused id {c} is not picked up");
+        // Last Linux image gone → no default at all (the Windows one is not picked: another OS).
+        db.delete_image(a).unwrap();
+        db.delete_image(c).unwrap();
+        assert!(db.images().unwrap().iter().all(|i| !i.is_default), "never another OS");
     }
 
     #[test]

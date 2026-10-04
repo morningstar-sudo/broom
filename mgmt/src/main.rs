@@ -229,6 +229,8 @@ pub type SharedState = Arc<AppState>;
 
 /// How long a PXE boot is remembered (the longest window anything checks: the license hand-out).
 pub const PXE_MEMORY_S: u64 = 30 * 60;
+/// Most MACs remembered at once (a room is far below it).
+const PXE_MAX: usize = 4096;
 
 impl AppState {
     /// `mac` just went through PXE (menu choice / the stage's driver query). Older entries are dropped on the way:
@@ -237,6 +239,12 @@ impl AppState {
         let now = now_secs();
         let mut seen = self.pxe_seen.lock().unwrap();
         seen.retain(|_, t| now.saturating_sub(*t) <= PXE_MEMORY_S);
+        // Bounded: both callers are public, a flood of made-up MACs must not grow it (and every scan of it) for 30 min.
+        if seen.len() >= PXE_MAX && !seen.contains_key(mac) {
+            if let Some(oldest) = seen.iter().min_by_key(|(_, t)| **t).map(|(m, _)| m.clone()) {
+                seen.remove(&oldest);
+            }
+        }
         seen.insert(mac.to_string(), now);
         let mut ips = self.pxe_ip.lock().unwrap();
         ips.retain(|m, _| seen.contains_key(m));
@@ -281,7 +289,18 @@ async fn main() {
 
     migrate_old_layout();
     info!("data in {}", home().display());
-    clean_leftovers(); // after the HTTP bind: no other instance (and so no job) can be running
+    // One instance per data directory: a second one on another --port gets past the HTTP bind above, and would then
+    // delete the running one's temp files and share :67/:69 with it (SO_REUSEPORT). The kernel drops the lock when the
+    // process dies, so a crash never leaves it stuck.
+    let lock = std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(home().join("bootrom.lock"));
+    // SAFETY: flock on a valid open fd.
+    let locked = lock.as_ref().is_ok_and(|f| unsafe { libc::flock(std::os::fd::AsRawFd::as_raw_fd(f), libc::LOCK_EX | libc::LOCK_NB) } == 0);
+    if !locked {
+        error!("another bootrom-mgmt is already running on {} — stop it first", home().display());
+        std::process::exit(1);
+    }
+    std::mem::forget(lock); // held for the life of the process
+    clean_leftovers(); // no other instance (and so no job) can be running
 
     // Preflight (root; kernel modules only warn) → stop if it fails. Network never configured → setup detects it and
     // seeds the DHCP config (dev: --skip-preflight skips both).

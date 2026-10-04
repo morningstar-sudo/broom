@@ -237,6 +237,10 @@ async fn set_dhcp(
     // WAN/VPN link). "off" needs nothing.
     let mode = b.mode.as_deref().unwrap_or(&st.db.get_config("dhcp_mode", "off")).to_string();
     let iface = b.iface.clone().unwrap_or_else(|| st.db.get_config("dhcp_iface", ""));
+    // A typo would be saved and take DHCP/TFTP down at the next start (binds fail): only interfaces this host has.
+    if !iface.trim().is_empty() && !std::path::Path::new("/sys/class/net").join(iface.trim()).exists() {
+        return Err((StatusCode::BAD_REQUEST, format!("interface {:?} does not exist on this server", iface.trim())));
+    }
     if mode == "full" && iface.trim().is_empty() {
         return Err((StatusCode::BAD_REQUEST, "the DHCP server needs a specific interface (leaving it blank binds every interface)".into()));
     }

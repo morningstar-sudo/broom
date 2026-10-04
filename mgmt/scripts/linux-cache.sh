@@ -35,6 +35,8 @@ sleep $(( $(od -An -N2 -tu2 /dev/urandom) % 300 ))
 # Whole-file copy (no delta): this image's old copy goes first, then — while the golden doesn't fit — the copy unused
 # the longest. One sequential write into free space keeps the new file unfragmented.
 rm -f "$C/$NAME.img" "$C/$NAME.sha256"
+# Bigger than the whole cache partition → it can never fit: keep the other copies instead of evicting them for nothing.
+[ "$(df -B1 --output=size $C | tail -1)" -gt "$SIZE" ] || { log "cache: golden ($SIZE B) larger than the cache partition — not cached"; exit 0; }
 while [ "$(df -B1 --output=avail $C | tail -1)" -le "$SIZE" ]; do
   old=$(ls -tr $C/*.sha256 2>/dev/null | head -1); [ -n "$old" ] || break
   n=${old##*/}; n=${n%.sha256}; rm -f "$C/$n.img" "$old"; log "cache: $n removed (unused the longest) to make room"

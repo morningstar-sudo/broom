@@ -128,7 +128,14 @@ fn parse_meta(text: &str) -> V {
             }
         }
     }
-    fn value(toks: &[T], i: &mut usize) -> V {
+    // Real VG metadata nests a few levels; a crafted text ([[[[… / a{a{a{…) would recurse until the stack overflows
+    // — that aborts the whole server (not a catchable panic). Past MAX_DEPTH the rest of the text is ignored.
+    const MAX_DEPTH: u32 = 64;
+    fn value(toks: &[T], i: &mut usize, depth: u32) -> V {
+        if depth > MAX_DEPTH {
+            *i = toks.len();
+            return V::Str(String::new());
+        }
         match toks.get(*i) {
             Some(T::Str(s)) => {
                 *i += 1;
@@ -145,7 +152,7 @@ fn parse_meta(text: &str) -> V {
                     if toks[*i] == T::Sym(',') {
                         *i += 1;
                     } else {
-                        l.push(value(toks, i));
+                        l.push(value(toks, i, depth + 1));
                     }
                 }
                 *i += 1;
@@ -157,7 +164,11 @@ fn parse_meta(text: &str) -> V {
             }
         }
     }
-    fn section(toks: &[T], i: &mut usize) -> V {
+    fn section(toks: &[T], i: &mut usize, depth: u32) -> V {
+        if depth > MAX_DEPTH {
+            *i = toks.len();
+            return V::Sec(Vec::new());
+        }
         let mut items = Vec::new();
         while *i < toks.len() {
             match &toks[*i] {
@@ -171,11 +182,11 @@ fn parse_meta(text: &str) -> V {
                     match toks.get(*i) {
                         Some(T::Sym('{')) => {
                             *i += 1;
-                            items.push((name, section(toks, i)));
+                            items.push((name, section(toks, i, depth + 1)));
                         }
                         Some(T::Sym('=')) => {
                             *i += 1;
-                            items.push((name, value(toks, i)));
+                            items.push((name, value(toks, i, depth + 1)));
                         }
                         _ => {}
                     }
@@ -185,7 +196,7 @@ fn parse_meta(text: &str) -> V {
         }
         V::Sec(items)
     }
-    section(&toks, &mut 0)
+    section(&toks, &mut 0, 0)
 }
 
 /// If the partition at `start` is an LVM2 PV: (pv uuid without dashes, metadata text).
@@ -355,6 +366,12 @@ pub fn extract_boot(raw: &str, dst: &str) -> Result<Boot, String> {
     std::fs::create_dir_all(dst).map_err(|e| e.to_string())?;
     let dir = dir.trim_end_matches('/');
     for (src, name) in [(format!("{dir}/vmlinuz-{kver}"), "vmlinuz"), (format!("{dir}/initrd.img-{kver}"), "initrd.img")] {
+        // Read whole into RAM: a size from the (untrusted) golden's inode is checked first — a real kernel/initrd is
+        // tens of MB, a crafted one could ask for any amount.
+        let len = fs.metadata(src.as_str()).map_err(|e| format!("stat {src} in the golden: {e}"))?.len();
+        if len > 512 << 20 {
+            return Err(format!("{src} in the golden is {len} bytes — not a kernel/initrd (max 512 MiB)"));
+        }
         let data = fs.read(src.as_str()).map_err(|e| format!("read {src} from the golden: {e}"))?;
         std::fs::write(format!("{dst}/{name}"), data).map_err(|e| format!("write {dst}/{name}: {e}"))?;
     }
@@ -365,6 +382,13 @@ pub fn extract_boot(raw: &str, dst: &str) -> Result<Boot, String> {
 mod tests {
     use super::*;
     use std::process::Command;
+
+    /// Deeply nested crafted metadata (a stack overflow would abort the whole server) → parsed up to the limit, no crash.
+    #[test]
+    fn deep_lvm_metadata_no_overflow() {
+        let _ = parse_meta(&"a{".repeat(200_000));
+        let _ = parse_meta(&format!("x = {}", "[".repeat(200_000)));
+    }
 
     /// A crafted LVM label (pv header offset past the sector, a huge metadata size) → None, no panic / no giant buffer.
     #[test]

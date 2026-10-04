@@ -101,11 +101,17 @@ fn menu_images(images: Vec<crate::db::Image>, own: Option<i64>) -> Vec<MenuImage
 }
 
 /// A menu choice: log the boot + hand over the image's boot script.
-pub async fn start(State(st): State<SharedState>, Query(q): Q) -> impl IntoResponse {
+pub async fn start(
+    State(st): State<SharedState>,
+    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
+    Query(q): Q,
+) -> impl IntoResponse {
     let (mac, ip, m) = client(&st, &q);
     if !mac.is_empty() {
-        // Went through PXE: /api/booted (Windows) and /api/license compare against this.
-        st.saw_pxe(&mac, (ip != "?").then_some(ip.as_str()));
+        // Went through PXE: /api/booted (Windows) and /api/license compare against this. The IP remembered (Machines
+        // page, Register) is the connection's — not the ?ip= the client claims.
+        let peer = peer.ip().to_canonical().to_string();
+        st.saw_pxe(&mac, Some(&peer));
     }
     let host = m.and_then(|m| m.hostname);
     // Image names are [A-Za-z0-9_-]; keep only those (the value is logged and echoed into the iPXE script).
@@ -120,11 +126,14 @@ pub async fn start(State(st): State<SharedState>, Query(q): Q) -> impl IntoRespo
             // Per-boot switches the Windows stage reads from its cmdline (broom.base= / broom.strict=), and the Broom
             // SSD layout both OSes use (broom.lxgb= Linux share, broom.wbgb= writeback inside it).
             let strict = st.db.get_config("strict_reset", "0") == "1";
-            let linux_sizes = st.db.images().unwrap_or_default().into_iter().filter(|i| i.os == "linux" && i.use_ssd).filter_map(|i| {
+            let linux_sizes = st.db.images().unwrap_or_default().into_iter().filter(|i| i.os == "linux" && i.use_ssd && i.hash.is_some()).filter_map(|i| {
                 std::fs::metadata(crate::images_dir().join(&i.name).join("image.img")).ok().map(|m| m.len())
             });
             format!(
-                "#!ipxe\nset broom-base {}\nset broom-strict {}\nset broom-lxgb {}\nset broom-wbgb {WB_GB}\nset broom-ssd {}\n{}{bs}\n",
+                "#!ipxe\nset broom-srv {}\nset broom-base {}\nset broom-strict {}\nset broom-lxgb {}\nset broom-wbgb {WB_GB}\nset broom-ssd {}\n{}{bs}\n",
+                // The server's address at boot time — boot scripts use ${broom-srv}, so changing the Server IP needs
+                // no republish.
+                st.db.get_config("dhcp_server_ip", ""),
                 i.base_mode as u8,
                 strict as u8,
                 linux_share_gb(linux_sizes),

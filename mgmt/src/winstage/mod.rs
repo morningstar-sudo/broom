@@ -168,7 +168,9 @@ pub fn publish(st: &SharedState, id: i64, name: &str, steps: &mut crate::publish
         }
     };
     // The stage checks these small files against this list on every boot (a guest could swap them on the SSD).
-    let mut sums = String::new();
+    // First line: the golden these files belong to — the stage applies them only to that golden (a client still on
+    // the previous hash during a publish never gets the new templates next to its old golden).
+    let mut sums = format!("{hash}  golden\n");
     for f in ["efi.tar.gz", "child-template.vhdx", "child-template.off", "base-template.vhdx"] {
         let h = crate::hash::file_hash(&format!("{out}/{f}")).ok_or(format!("sha256 of {f} failed"))?;
         sums.push_str(&format!("{h}  {f}\n"));
@@ -176,8 +178,8 @@ pub fn publish(st: &SharedState, id: i64, name: &str, steps: &mut crate::publish
     std::fs::write(format!("{out}/files.sha256"), sums).map_err(|e| format!("files.sha256: {e}"))?;
     std::fs::write(&sum_file, &hash).map_err(|e| format!("golden.sha256: {e}"))?;
     let bs = format!(
-        "kernel http://{ip}/tftp/broom-stage/vmlinuz initrd=stage.img ip=dhcp BOOTIF=01-${{mac:hexhyp}} broom.name={name} broom.hash={hash} broom.srv={ip} broom.host=${{broom-host}} broom.lic=${{broom-lic}} broom.reg=${{broom-reg}} broom.base=${{broom-base}} broom.strict=${{broom-strict}} broom.lxgb=${{broom-lxgb}} broom.wbgb=${{broom-wbgb}}\n\
-         initrd http://{ip}/tftp/broom-stage/stage.img\n\
+        "kernel http://${{broom-srv}}/tftp/broom-stage/vmlinuz initrd=stage.img ip=dhcp BOOTIF=01-${{mac:hexhyp}} broom.name={name} broom.hash={hash} broom.srv=${{broom-srv}} broom.host=${{broom-host}} broom.lic=${{broom-lic}} broom.reg=${{broom-reg}} broom.base=${{broom-base}} broom.strict=${{broom-strict}} broom.lxgb=${{broom-lxgb}} broom.wbgb=${{broom-wbgb}}\n\
+         initrd http://${{broom-srv}}/tftp/broom-stage/stage.img\n\
          boot"
     );
     let before = st.db.image(id)?;

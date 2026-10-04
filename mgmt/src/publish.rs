@@ -222,8 +222,8 @@ fn publish_iscsi(st: &SharedState, id: i64, name: &str) -> Result<String, String
                     Reboot/close the clients (publish off-hours), or set this image to zram cache."
             .into());
     }
-    let ip = st.db.get_config("dhcp_server_ip", "");
-    if ip.is_empty() {
+    // Boot scripts get it at boot (${broom-srv}, /boot/start); without one no client could reach the server.
+    if st.db.get_config("dhcp_server_ip", "").is_empty() {
         return Err("dhcp_server_ip is empty — run `setup` first".into());
     }
     // Kernel and initrd are built in tftp/broom/<name>.new/ and swapped in only right before the new
@@ -235,7 +235,7 @@ fn publish_iscsi(st: &SharedState, id: i64, name: &str) -> Result<String, String
     // saved boot script, iqn_of() and gc all still mean the old one — a failed publish never lets gc drop the target
     // the boot script points at.
     let g = gen_of(st, name) + 1;
-    let out = publish_iscsi_staged(st, id, name, g, &img_abs, &want, &ip, &staged).and_then(|r| {
+    let out = publish_iscsi_staged(st, id, name, g, &img_abs, &want, &staged).and_then(|r| {
         let old = crate::tftp_dir().join("broom").join(format!("{name}.old"));
         let _ = std::fs::remove_dir_all(&old);
         let _ = std::fs::rename(&live, &old);
@@ -281,7 +281,6 @@ fn publish_iscsi_staged(
     g: u64,
     img_abs: &Path,
     want: &str,
-    ip: &str,
     staged: &Path,
 ) -> Result<(String, String, String), String> {
     // 1. Extract kernel + initrd from the golden, read the root UUID.
@@ -319,9 +318,9 @@ fn publish_iscsi_staged(
     let hash = crate::hash::file_hash(&img_abs.to_string_lossy()).ok_or_else(|| format!("sha256 of {} failed", img_abs.display()))?;
     let size = std::fs::metadata(img_abs).map_err(|e| e.to_string())?.len();
     let bs = format!(
-        "sanhook iscsi:{ip}::::{iqn} || shell\n\
-         kernel http://{ip}/tftp/broom/{name}/vmlinuz initrd=initrd.img ip=dhcp root=UUID={root_uuid} ro fsck.mode=skip overlayroot=device:dev=/dev/disk/by-label/broomwb,recurse=0 broom.name={name} broom.hash={hash} broom.size={size} broom.srv={ip} broom.reg=${{broom-reg}} broom.lxgb=${{broom-lxgb}} broom.wbgb=${{broom-wbgb}} broom.ssd=${{broom-ssd}}\n\
-         initrd http://{ip}/tftp/broom/{name}/initrd.img\n\
+        "sanhook iscsi:${{broom-srv}}::::{iqn} || shell\n\
+         kernel http://${{broom-srv}}/tftp/broom/{name}/vmlinuz initrd=initrd.img ip=dhcp root=UUID={root_uuid} ro fsck.mode=skip overlayroot=device:dev=/dev/disk/by-label/broomwb,recurse=0 broom.name={name} broom.hash={hash} broom.size={size} broom.srv=${{broom-srv}} broom.reg=${{broom-reg}} broom.lxgb=${{broom-lxgb}} broom.wbgb=${{broom-wbgb}} broom.ssd=${{broom-ssd}}\n\
+         initrd http://${{broom-srv}}/tftp/broom/{name}/initrd.img\n\
          boot"
     );
     Ok((bs, hash, cache_mode))

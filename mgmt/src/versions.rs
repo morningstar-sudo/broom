@@ -154,6 +154,10 @@ pub fn snapshot(name: &str, label: &str) -> Result<(Manifest, usize), String> {
 fn snapshot_at(root: &Path, img: &Path, name: &str, label: &str) -> Result<(Manifest, usize), String> {
     let f = File::open(img).map_err(e(&img.display().to_string()))?;
     let size = f.metadata().map_err(e("stat image"))?.len();
+    // Worst case every data block is new: refuse up front instead of filling the disk (and the DB with it).
+    let used = std::os::unix::fs::MetadataExt::blocks(&f.metadata().map_err(e("stat image"))?) * 512;
+    std::fs::create_dir_all(root).map_err(e("mkdir storage"))?;
+    crate::publish::need_space(root, used, "snapshot")?;
     let mut chunks = Vec::new();
     let mut new = 0;
     let mut buf = Vec::new();
@@ -292,7 +296,11 @@ pub fn delete(name: &str, version: &str) -> Result<usize, String> {
 fn delete_at(root: &Path, name: &str, version: &str) -> Result<usize, String> {
     load(root, name, version)?; // validates + exists
     std::fs::remove_file(manifest_dir(root, name).join(format!("{version}.json"))).map_err(e("delete manifest"))?;
-    gc(root)
+    // The version is gone either way; a gc that fails (an unreadable manifest) only leaves chunks for a later one.
+    Ok(gc(root).unwrap_or_else(|err| {
+        tracing::warn!("versions gc after deleting {name} {version}: {err}");
+        0
+    }))
 }
 
 /// Drop every version of an image (image deleted), then collect garbage.

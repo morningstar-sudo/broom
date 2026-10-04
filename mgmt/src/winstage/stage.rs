@@ -661,7 +661,8 @@ mod tests {
                 None => "wget(){ return 4; }".into(),
             };
             let sh = format!(
-                "B={d}/b; NAME={name}; SRV=x\nlog(){{ :; }}; configure_networking(){{ :; }}; {wget}\n{body}",
+                "B={d}/b; W={d}; NAME={name}; SRV=x\nlog(){{ :; }}; configure_networking(){{ :; }}; {wget}\n\
+                 df(){{ printf 'h\\nx 104857600 0 99999999 0 /\\n'; }}\n{body}", // plenty of room: nothing evicted for it
                 d = d.display(),
                 body = part.replace("/run/broom-cache-list", &format!("{}/list", d.display()))
             );
@@ -691,7 +692,8 @@ mod tests {
     #[test]
     fn stage_room_evicts_oldest_parked() {
         let s = super::STAGE_SCRIPT;
-        let part = &s[s.find("  gb(){").unwrap()..s.find("  # $f.ok = file fully downloaded").unwrap()];
+        let oldest = &s[s.find("oldest(){").unwrap()..s.find("# Room for this session").unwrap()];
+        let part = format!("{oldest}\n{}", &s[s.find("  gb(){").unwrap()..s.find("  # $f.ok = file fully downloaded").unwrap()]);
         let d = std::env::temp_dir().join("broom_t_room");
         let _ = std::fs::remove_dir_all(&d);
         for (n, parked) in [("b", "1700000200"), ("c", "1700000300"), ("a", "1700000100")] {
@@ -710,6 +712,35 @@ mod tests {
         let sh2 = sh.replace("[ $n -le 1 ]", "false");
         assert_eq!(String::from_utf8_lossy(&stage_sh().args(["-c", &sh2]).output().unwrap().stdout).trim(), "DIE");
         let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// Room for the session (step 0): parked images go, oldest first, while less than 20 GB / 10 % is free; enough room
+    /// → nothing removed.
+    #[test]
+    fn stage_session_room() {
+        let s = super::STAGE_SCRIPT;
+        let part = &s[s.find("oldest(){").unwrap()..s.find("# 1. Golden hash mismatch").unwrap()];
+        let part = &part[..part.find("cd /").unwrap()]; // up to the end of step 0
+        let run = |avail_kb: &str| {
+            let d = std::env::temp_dir().join(format!("broom_t_sroom_{avail_kb}"));
+            let _ = std::fs::remove_dir_all(&d);
+            for (n, parked) in [("b", "200"), ("a", "100")] {
+                std::fs::create_dir_all(d.join(format!("img.{n}"))).unwrap();
+                std::fs::write(d.join(format!("img.{n}/.parked")), parked).unwrap();
+            }
+            // 100 GB disk: 20 GB is the bar. Room appears once img.a is gone.
+            let sh = format!(
+                "B={d}; W={d}\nlog(){{ :; }}\n\
+                 df(){{ [ -d {d}/img.a ] && a={avail_kb} || a=30000000; printf 'h\\nx 104857600 0 %s 0 /\\n' $a; }}\n{part}",
+                d = d.display()
+            );
+            assert!(stage_sh().args(["-c", &sh]).status().unwrap().success());
+            let out = (d.join("img.a").exists(), d.join("img.b").exists());
+            let _ = std::fs::remove_dir_all(&d);
+            out
+        };
+        assert_eq!(run("1000"), (false, true), "short of room → the oldest parked image goes, then enough");
+        assert_eq!(run("25000000"), (true, true), "25 GB free → nothing removed");
     }
 
     /// Real HTTPS download (GitHub release → redirect to its CDN): cargo test download_https -- --ignored
