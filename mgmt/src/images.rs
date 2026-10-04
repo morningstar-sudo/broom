@@ -10,6 +10,7 @@ use axum::{
 use serde::Deserialize;
 use std::collections::HashMap;
 
+use crate::api::{ise, ApiError};
 use crate::db::NewImage as NewImageRow;
 use crate::SharedState;
 
@@ -37,13 +38,6 @@ pub fn routes() -> Router<SharedState> {
         .route("/api/images/export", post(export))
         .route("/api/images/from-version", post(from_version))
         .route("/api/images/export-file", get(export_file))
-}
-
-pub(crate) type ApiError = (StatusCode, String);
-
-fn ise(e: String) -> ApiError {
-    tracing::error!("internal error: {e}"); // keep OS paths/errors in the server log, not the response
-    (StatusCode::INTERNAL_SERVER_ERROR, "internal error".into())
 }
 
 /// Image name by id, 404 if missing.
@@ -188,7 +182,7 @@ async fn golden_chunk(State(st): State<SharedState>, Query(q): Query<ChunkReq>) 
     }
     // Cap concurrent 4 MB read+hash jobs: a flood of chunk requests can't saturate the blocking pool / disk.
     let _permit = st.chunk_sem.acquire().await.map_err(|e| ise(e.to_string()))?;
-    let z = tokio::task::spawn_blocking(move || crate::publish::golden_chunk_zst(&q.name, q.i, &q.h))
+    let z = tokio::task::spawn_blocking(move || crate::chunks::golden_chunk_zst(&q.name, q.i, &q.h))
         .await
         .map_err(|e| ise(e.to_string()))?
         .map_err(|(changed, e)| (if changed { StatusCode::CONFLICT } else { StatusCode::INTERNAL_SERVER_ERROR }, e))?;
@@ -482,7 +476,7 @@ fn spawn_publish(st: &SharedState, name: String, upload: Option<std::path::PathB
         let first = upload.is_some() && crate::versions::list(name, None).is_empty();
         if let Some(dir) = upload {
             steps.go("convert upload→raw");
-            crate::publish::prepare_golden(&dir, &crate::images_dir().join(name).join("image.img"))?;
+            crate::golden::prepare_golden(&dir, &crate::images_dir().join(name).join("image.img"))?;
             st.db.set_active_version(name_id(st, name)?, None)?; // new golden = no version yet
         }
         let msg = crate::publish::run_publish(st, name, steps)?;

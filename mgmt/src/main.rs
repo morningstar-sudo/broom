@@ -1,22 +1,27 @@
 // main.rs — bootrom mgmt app (Rust/axum). One binary, runs on the Linux server.
 // Modules: boot (iPXE menu), images (+versions, publish), monitor (+wol), machines/devices, dhcp/tftp/iscsi, auth.
+mod api;
 mod archive;
 mod auth;
 mod boot;
+mod chunks;
 mod db;
 mod devices;
 mod dhcp;
 mod disk;
 mod drivers;
 mod export;
+mod golden;
 mod images;
 mod iscsi;
+mod license;
 mod linuxfs;
 mod machines;
 mod monitor;
 mod overlay;
 mod preflight;
 mod publish;
+mod settings;
 mod setup;
 mod tftp;
 mod versions;
@@ -190,7 +195,21 @@ pub fn now_secs() -> u64 {
 }
 pub type SharedState = Arc<AppState>;
 
+/// How long a PXE boot is remembered (the longest window anything checks: the license hand-out).
+pub const PXE_MEMORY_S: u64 = 30 * 60;
+
 impl AppState {
+    /// `mac` just went through PXE (menu choice / the stage's driver query). Older entries are dropped on the way:
+    /// both callers are public endpoints, so the map must not grow with every MAC someone makes up.
+    pub fn saw_pxe(&self, mac: &str) {
+        let now = now_secs();
+        let mut seen = self.pxe_seen.lock().unwrap();
+        seen.retain(|_, t| now.saturating_sub(*t) <= PXE_MEMORY_S);
+        seen.insert(mac.to_string(), now);
+        drop(seen);
+        self.not_reset.lock().unwrap().remove(mac);
+    }
+
     /// Record an image job status + push it to open web tabs.
     pub fn set_job(&self, name: &str, status: String) {
         self.jobs.lock().unwrap().insert(name.to_string(), status.clone());
@@ -307,7 +326,9 @@ async fn main() {
         .route("/boot/start", get(boot::start)) // menu choice → "client started" log + image boot script
         .merge(images::routes()) // images, versions, upload, publish
         .merge(drivers::routes()) // Windows driver packages
-        .merge(machines::routes()) // machines, DHCP/boot config, license
+        .merge(machines::routes()) // Machines table
+        .merge(license::routes()) // Windows license keys + boot reports
+        .merge(settings::routes()) // boot menu, zram, DHCP, guest user
         .merge(devices::routes()) // Devices page: edit / bulk / CSV / detail
         .merge(monitor::routes()) // online status, Wake-on-LAN
         .merge(auth::routes()) // admin login

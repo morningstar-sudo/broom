@@ -95,8 +95,7 @@ pub async fn start(State(st): State<SharedState>, Query(q): Q) -> impl IntoRespo
     let (mac, ip, m) = client(&st, &q);
     if !mac.is_empty() {
         // Went through PXE: /api/booted (Windows) and /api/license compare against this.
-        st.pxe_seen.lock().unwrap().insert(mac.clone(), crate::now_secs());
-        st.not_reset.lock().unwrap().remove(&mac);
+        st.saw_pxe(&mac);
     }
     let host = m.and_then(|m| m.hostname);
     // Image names are [A-Za-z0-9_-]; keep only those (the value is logged and echoed into the iPXE script).

@@ -7,6 +7,7 @@ use std::collections::HashMap;
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 
 use crate::db::{Db, Lease};
+use crate::now_secs as now;
 use crate::SharedState;
 
 const MAGIC: [u8; 4] = [99, 130, 83, 99];
@@ -504,10 +505,6 @@ fn apply_lease(db: &dyn Db, op: LeaseOp) {
     if let Err(e) = r {
         tracing::error!("dhcp: lease write failed: {e}");
     }
-}
-
-fn now() -> u64 {
-    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs())
 }
 
 /// UDP socket bound to `addr`, optionally pinned to one interface (SO_BINDTODEVICE) and allowed to broadcast.

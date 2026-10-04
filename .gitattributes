@@ -2,3 +2,6 @@
 *.sh  text eol=lf
 *.cmd text eol=crlf
 *.efi binary
+# Scripts embedded in the binary (include_str!): byte-exact LF on every checkout — CRLF would break the client
+# stage / Linux hooks, and the PowerShell files get CRLF added when written into the golden.
+mgmt/scripts/* text eol=lf

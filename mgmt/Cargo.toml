@@ -1,6 +1,6 @@
 [package]
 name = "bootrom-mgmt"
-version = "0.5.2"
+version = "0.5.3"
 edition = "2024"
 description = "Diskless boot server: DHCP, TFTP, iPXE, iSCSI and a web admin in one binary"
 

@@ -16,7 +16,8 @@ use std::collections::{BTreeSet, HashMap};
 use std::path::PathBuf;
 
 use crate::db::Driver;
-use crate::images::{valid_name, write_chunk, ApiError, CHUNK_MAX};
+use crate::api::{bad, ise, ApiError};
+use crate::images::{valid_name, write_chunk, CHUNK_MAX};
 use crate::SharedState;
 
 pub fn routes() -> Router<SharedState> {
@@ -30,15 +31,6 @@ pub fn routes() -> Router<SharedState> {
         .route("/api/drivers/for", post(for_machine))
 }
 
-fn ise(e: impl ToString) -> ApiError {
-    tracing::error!("internal error: {}", e.to_string()); // keep OS paths/errors in the server log, not the response
-    (StatusCode::INTERNAL_SERVER_ERROR, "internal error".to_string())
-}
-
-fn bad(e: impl ToString) -> ApiError {
-    (StatusCode::BAD_REQUEST, e.to_string())
-}
-
 // Distinct prefixes so a package named e.g. "up-foo" can't collide with the upload/extract dir of "foo"
 // (both names are valid_name, so a shared prefix would overlap).
 fn upload_dir(name: &str) -> PathBuf {
@@ -48,10 +40,6 @@ fn upload_dir(name: &str) -> PathBuf {
 /// What the stage downloads: /tftp/broom-drivers/<name>.tar.gz.
 fn tar_path(name: &str) -> PathBuf {
     crate::tftp_dir().join("broom-drivers").join(format!("{name}.tar.gz"))
-}
-
-fn now() -> i64 {
-    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64)
 }
 
 /// .inf text: UTF-16 LE/BE when it has a BOM (NVIDIA/AMD ship those), else UTF-8/ANSI.
@@ -108,15 +96,15 @@ pub(crate) fn group_ok(g: &str) -> bool {
 /// The uploaded zip → tar.gz for the stage + hardware IDs. Blocking. Returns (sha256, size, IDs, .inf count).
 fn process(name: &str) -> Result<(String, u64, Vec<String>, usize), String> {
     let up = upload_dir(name);
-    let zip = crate::publish::walk(&up)
+    let zip = crate::golden::walk(&up)
         .into_iter()
         .find(|p| p.extension().is_some_and(|e| e.eq_ignore_ascii_case("zip")))
         .ok_or("upload a .zip of the extracted driver folder")?;
     let ex = crate::work_dir().join(format!("drvex.{name}"));
     let _ = std::fs::remove_dir_all(&ex);
     let r = (|| {
-        crate::publish::unzip(&zip, &ex)?;
-        let infs: Vec<PathBuf> = crate::publish::walk(&ex)
+        crate::golden::unzip(&zip, &ex)?;
+        let infs: Vec<PathBuf> = crate::golden::walk(&ex)
             .into_iter()
             .filter(|p| p.extension().is_some_and(|e| e.eq_ignore_ascii_case("inf")))
             .collect();
@@ -135,7 +123,7 @@ fn process(name: &str) -> Result<(String, u64, Vec<String>, usize), String> {
             return Err(format!("packing the driver: {e}"));
         }
         std::fs::rename(&tmp, &tar).map_err(|e| e.to_string())?;
-        let sha = crate::publish::file_hash(&tar.to_string_lossy()).ok_or("sha256 of the package failed")?;
+        let sha = crate::chunks::file_hash(&tar.to_string_lossy()).ok_or("sha256 of the package failed")?;
         let size = std::fs::metadata(&tar).map_err(|e| e.to_string())?.len();
         Ok((sha, size, ids.into_iter().collect(), infs.len()))
     })();
@@ -212,7 +200,7 @@ async fn upload_done(State(st): State<SharedState>, Json(b): Json<NameBody>) -> 
     }
     let name = b.name.clone();
     let (sha, size, ids, infs) = tokio::task::spawn_blocking(move || process(&name)).await.map_err(ise)?.map_err(bad)?;
-    st.db.put_driver(&b.name, &sha, size, &ids, now()).map_err(ise)?;
+    st.db.put_driver(&b.name, &sha, size, &ids, crate::now_secs() as i64).map_err(ise)?;
     tracing::info!(
         "driver package {}: {infs} .inf, {} hardware IDs, {:.1} MB",
         b.name,
@@ -277,20 +265,20 @@ async fn for_machine(State(st): State<SharedState>, Query(q): Query<ForQuery>, b
     // still gets its driver list, but can't pollute machine_hw with junk.
     let known = m.is_some() || st.db.leases().map_err(ise)?.iter().any(|l| l.mac.eq_ignore_ascii_case(&mac));
     if known {
-        st.db.put_machine_hw(&mac, &hw.iter().cloned().collect::<Vec<_>>(), now()).map_err(ise)?;
+        st.db.put_machine_hw(&mac, &hw.iter().cloned().collect::<Vec<_>>(), crate::now_secs() as i64).map_err(ise)?;
     }
     let drivers = st.db.drivers().map_err(ise)?;
     let got = pick(&drivers, &hw, m.as_ref().and_then(|m| m.grp.as_deref()));
     // The stage asks this on every boot, near its end → the machine IS going through PXE (license window,
-    // "not reset" check in machines.rs).
-    st.pxe_seen.lock().unwrap().insert(mac.clone(), crate::now_secs());
-    st.not_reset.lock().unwrap().remove(&mac);
+    // "not reset" check in license.rs).
+    st.saw_pxe(&mac);
     // Another package set than last time → the stage rebuilds base → it needs the license key once more.
-    // (Baseline in RAM: the first query after a server restart only records it.)
-    let set: Vec<String> = got.iter().map(|d| format!("{} {}", d.name, d.sha256)).collect();
-    let changed = DRV_SETS.lock().unwrap().insert(mac.clone(), set.clone()).is_some_and(|old| old != set);
-    if let Some(m) = m.as_ref().filter(|_| changed) {
-        if st.db.rearm_quiet(m.id).map_err(ise)? {
+    // (Baseline in RAM: the first query after a server restart only records it.) Registered machines only — license
+    // keys exist only for them, and an unknown MAC (anyone can send one) must not grow the map.
+    if let Some(m) = m.as_ref() {
+        let set: Vec<String> = got.iter().map(|d| format!("{} {}", d.name, d.sha256)).collect();
+        let changed = DRV_SETS.lock().unwrap().insert(mac.clone(), set.clone()).is_some_and(|old| old != set);
+        if changed && st.db.rearm_quiet(m.id).map_err(ise)? {
             tracing::info!("license of {} armed again (driver set changed → base rebuilt)", m.hostname.as_deref().unwrap_or(&m.mac));
         }
     }

@@ -23,6 +23,7 @@ use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::{LazyLock, Mutex, OnceLock};
 
+use crate::now_secs as now;
 use crate::SharedState;
 
 const COOKIE: &str = "broom_session";
@@ -38,10 +39,6 @@ pub fn routes() -> Router<SharedState> {
         .route("/api/auth/logout", post(logout))
         // Not under /api/auth/ (public prefix): the guard requires a session for it.
         .route("/api/password", post(change_pw))
-}
-
-fn now() -> u64 {
-    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs())
 }
 
 fn hex(b: &[u8]) -> String {

@@ -14,7 +14,9 @@ use std::collections::{BTreeSet, HashSet};
 use std::net::Ipv4Addr;
 
 use crate::db::Machine;
-use crate::machines::{hostname_ok, key_ok, now, who, HOSTNAME_RULE, KEY_RULE};
+use crate::api::{bad, ise, ApiError};
+use crate::license::{key_ok, KEY_RULE};
+use crate::machines::{hostname_ok, who, HOSTNAME_RULE};
 use crate::SharedState;
 
 pub fn routes() -> Router<SharedState> {
@@ -26,17 +28,6 @@ pub fn routes() -> Router<SharedState> {
         .route("/api/machines/export.csv", get(export_csv))
         .route("/api/machines/import", post(import_csv))
         .route("/api/machines/detail", get(detail))
-}
-
-type ApiError = (StatusCode, String);
-
-fn ise(e: impl ToString) -> ApiError {
-    tracing::error!("internal error: {}", e.to_string()); // keep OS paths/errors in the server log, not the response
-    (StatusCode::INTERNAL_SERVER_ERROR, "internal error".to_string())
-}
-
-fn bad(e: impl ToString) -> ApiError {
-    (StatusCode::BAD_REQUEST, e.to_string())
 }
 
 fn ok_json(v: serde_json::Value) -> Json<serde_json::Value> {
@@ -448,7 +439,7 @@ async fn detail(State(st): State<SharedState>, Query(q): Query<IdQuery>) -> Resu
         "machine": m,
         "license_key": license_key,
         "image": image,
-        "lease": lease.map(|l| serde_json::json!({"ip": l.ip, "expires_in": l.expires - now(), "source": l.source})),
+        "lease": lease.map(|l| serde_json::json!({"ip": l.ip, "expires_in": l.expires - crate::now_secs() as i64, "source": l.source})),
         "hwids": hw,
         "drivers": got,
     })))
