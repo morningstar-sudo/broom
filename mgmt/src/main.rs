@@ -226,31 +226,21 @@ async fn main() {
     migrate_old_layout();
     info!("data in {}", home().display());
 
-    // Preflight: pass → continue. Fail, or network never configured → run setup BY ITSELF (detect network +
-    // install packages + seed DHCP config) then preflight again; still failing → report clearly + exit ≠ 0
-    // (dev: --skip-preflight skips it).
+    // Preflight (root; kernel modules only warn) → stop if it fails. Network never configured → setup detects it and
+    // seeds the DHCP config (dev: --skip-preflight skips both).
     if !skip_preflight {
+        if let Err(e) = preflight::run() {
+            error!("preflight: {e}");
+            std::process::exit(1);
+        }
         let unconfigured = db::open(&db::url())
             .map(|d| d.get_config("dhcp_server_ip", "").is_empty())
             .unwrap_or(true);
-        if unconfigured || preflight::run().is_err() {
-            warn!("preflight failed or network not configured → running setup");
-            setup::run(&args); // detect network + install packages + seed DHCP config (needs root)
-            match preflight::run() {
-                Ok(()) => info!("preflight passed after setup"),
-                Err(report) => {
-                    for m in &report.other {
-                        error!("preflight: {m}");
-                    }
-                    if let Some(cmd) = report.install_cmd() {
-                        error!("preflight: install the missing packages by hand: {cmd}");
-                    }
-                    std::process::exit(1);
-                }
-            }
-        } else {
-            info!("preflight passed");
+        if unconfigured {
+            warn!("network not configured yet → running setup");
+            setup::run(&args);
         }
+        info!("preflight passed");
     }
 
     let database = db::open(&db::url()).unwrap_or_else(|e| {

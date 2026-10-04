@@ -15,11 +15,11 @@ Everything is **one static binary** — no dnsmasq, tftpd, targetcli or extra se
 
 VMDK/VHDX conversion, partition tables and archives are done in-process too (no qemu-img, sfdisk, cpio, tar,
 hivex), and the Windows client stage (kernel + initrd + Secure Boot shim) is built by CI and downloaded from the
-release on the first Windows publish — **a release binary needs no packages on the server**, only a kernel with
+release on the first Windows publish — **the server needs no packages at all**, only a kernel with
 `loop`, `ntfs3` (Windows images), the LIO iSCSI target and `zram` (preflight warns about missing ones).
 Offline server: download `broom-stage.tar.gz` of the same release elsewhere and copy it next to the binary (e.g.
-`/opt/bootrom/broom-stage.tar.gz`); the next Windows publish unpacks it. A locally built binary has no pinned stage and builds it on the server
-instead (`initramfs-tools`, `ntfs-3g`, `dosfstools`, `efibootmgr`, `fdisk`, `wget`, `zstd`, installed by the first run).
+`/opt/bootrom/broom-stage.tar.gz`); the next Windows publish unpacks it. A locally built binary has no pinned stage: see
+*Build* for making its bundle.
 
 ## How it works
 
@@ -37,7 +37,7 @@ Deploy into a **fixed directory** (images and the database live next to the bina
 ```bash
 sudo mkdir -p /opt/bootrom && cd /opt/bootrom
 sudo cp <path>/bootrom-mgmt .
-# First run with no network config: setup detects the network + installs packages, then serves.
+# First run with no network config: setup detects the network, then serves (nothing to install).
 # Any old dnsmasq / tftpd-hpa / targetcli restore service is stopped and disabled automatically.
 sudo ./bootrom-mgmt
 ```
@@ -183,6 +183,15 @@ changes it and signs out every other session. A few properties are inherent to d
 Builds iPXE only when its patches or pinned commit changed (`--ipxe` forces it), then the release binary + unit
 tests (`--no-test` to skip; `--live` also runs the root-only LIO/zram/ping/LVM tests). Output:
 `mgmt/dist/bootrom-mgmt`. Don't build with sudo.
+
+A local build has no pinned Windows stage bundle. To publish Windows images with it, make one on a machine with
+`initramfs-tools fdisk ntfs-3g dosfstools efibootmgr wget zstd shim-signed` and a `-generic` kernel installed (a
+throw-away Ubuntu VM or the CI runner does), then copy it next to the binary on the server:
+
+```bash
+sudo mgmt/dist/bootrom-mgmt build-stage /tmp/stage --kernel "$(ls /lib/modules | grep -- -generic$ | sort -V | tail -1)"
+scp /tmp/stage/broom-stage.tar.gz root@server:/opt/bootrom/   # next to bootrom-mgmt; the next Windows publish unpacks it
+```
 
 Requirements: **Rust stable via [rustup](https://rustup.rs)** + `musl-tools` (the binary is built static
 with musl → runs on any x86_64 Linux, no glibc version issues; edition 2024, toolchain pinned in

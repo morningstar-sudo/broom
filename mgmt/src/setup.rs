@@ -1,5 +1,5 @@
-// setup.rs — auto-fix called from main() when preflight FAILS or the network isn't configured yet
-// (no separate subcommand). Detect IFACE/IP/SUBNET → install packages → seed the DHCP config into
+// setup.rs — first run, called from main() while the network isn't configured yet
+// (no separate subcommand). Detect IFACE/IP/SUBNET/gateway/DNS → seed the DHCP config into
 // the DB. The DHCP/TFTP servers themselves are built in (dhcp.rs/tftp.rs) and started by main().
 // Also `bootrom-mgmt install-service` (systemd unit, install_service below).
 //
@@ -127,15 +127,6 @@ fn detect_subnet(iface: &str) -> Option<String> {
         .map(|cidr| cidr.split('/').next().unwrap_or(cidr).to_string())
 }
 
-fn run_cmd(bin: &str, args: &[&str]) -> bool {
-    tracing::info!("setup: running {bin} {}", args.join(" "));
-    Command::new(bin)
-        .args(args)
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
-}
-
 /// Read `--flag value` from args.
 fn flag(args: &[String], name: &str) -> Option<String> {
     args.iter()
@@ -145,7 +136,7 @@ fn flag(args: &[String], name: &str) -> Option<String> {
 }
 
 pub fn run(args: &[String]) {
-    tracing::info!("setup: detecting network + installing packages");
+    tracing::info!("setup: detecting the network");
 
     // 1. Network parameters (flags override detection).
     let (d_iface, d_ip, d_gw) = detect_iface_ip();
@@ -172,32 +163,17 @@ pub fn run(args: &[String]) {
         std::process::exit(1);
     }
 
-    // 3. Install missing packages.
-    let pkgs = preflight::missing_pkgs();
-    if pkgs.is_empty() {
-        tracing::info!("setup: all packages present");
-    } else {
-        tracing::info!("setup: installing packages: {}", pkgs.join(" "));
-        run_cmd("apt-get", &["update", "-y"]);
-        let mut a = vec!["install", "-y"];
-        a.extend(pkgs.iter().map(|s| s.as_str()));
-        if !run_cmd("apt-get", &a) {
-            tracing::error!("setup: apt install failed");
-            std::process::exit(1);
-        }
-    }
-
-    // 4. Boot asset directory (kernels/initrds/golden files served over HTTP /tftp/...).
+    // 3. Boot asset directory (kernels/initrds/golden files served over HTTP /tftp/...).
     if let Err(e) = std::fs::create_dir_all(crate::tftp_dir()) {
         tracing::error!("setup: mkdir {} failed: {e}", crate::tftp_dir().display());
     }
 
-    // 5. Seed the DHCP config into the DB (source of truth for dhcp.rs).
+    // 4. Seed the DHCP config into the DB (source of truth for dhcp.rs).
     let database = db::open(&db::url()).unwrap_or_else(|e| {
         tracing::error!("database: {e}");
         std::process::exit(1)
     });
-    // Setup also runs when a later preflight fails (e.g. a package removed): never overwrite what the admin set on the
+    // Setup runs again whenever the server IP is unset (e.g. cleared): never overwrite what the admin set on the
     // web. Detected values only fill EMPTY keys; flags given on the command line always win.
     let seed = |k: &str, detected: Option<String>, fl: &str| {
         let v = flag(args, fl).or_else(|| detected.filter(|_| database.get_config(k, "").is_empty()));

@@ -565,7 +565,7 @@ restart "-> Windows ($MODE)"
 /// Build the stage: kernel `kernel` (None = the running one) + initrd (mkinitramfs, own confdir) → `sd`.
 /// Kernel + script + hook unchanged → keep the previous build (mkinitramfs MODULES=most takes about a minute).
 /// Returns true if freshly built.
-pub fn build_stage(kernel: Option<&str>, sd: &str) -> Result<bool, String> {
+fn build_stage(kernel: Option<&str>, sd: &str) -> Result<bool, String> {
     let kv = match kernel {
         Some(k) => k.to_string(),
         None => std::fs::read_to_string("/proc/sys/kernel/osrelease").map_err(|e| format!("kernel release: {e}"))?.trim().to_string(),
@@ -605,7 +605,7 @@ pub fn build_stage(kernel: Option<&str>, sd: &str) -> Result<bool, String> {
         .filter(|b| !list.lines().any(|l| l.ends_with(&format!("broom/bin/{b}"))))
         .collect();
     if !missing.is_empty() {
-        return Err(format!("stage initrd is missing {} — install the packages on the server (fdisk ntfs-3g dosfstools efibootmgr wget mawk zstd) then Publish again", missing.join(", ")));
+        return Err(format!("stage initrd is missing {} — install fdisk ntfs-3g dosfstools efibootmgr wget mawk zstd on the machine that builds the bundle", missing.join(", ")));
     }
     std::fs::rename(&tmp, format!("{sd}/stage.img")).map_err(|e| e.to_string())?;
     std::fs::copy(format!("/boot/vmlinuz-{kv}"), format!("{sd}/vmlinuz"))
@@ -633,20 +633,36 @@ pub fn stage_pinned() -> Option<&'static str> {
     parse_pin(STAGE_PIN).map(|(sha, _)| sha)
 }
 
-/// Make sure stage_dir() holds the stage: the pinned bundle — `broom-stage.tar.gz` next to the binary if someone
-/// copied it there (offline server), else downloaded once from the Release — or, for a binary without a pinned
-/// bundle, built here. Returns what happened.
+/// Make sure stage_dir() holds the stage — always from a bundle, never built on the server (no packages there):
+/// `broom-stage.tar.gz` next to the binary if someone copied it there, else (release binary) downloaded once from
+/// the Release. A release binary accepts only its pinned bundle. Returns what happened.
 pub fn ensure_stage() -> Result<String, String> {
     let sd = stage_dir();
-    let Some(want) = stage_pinned() else {
-        return Ok(if build_stage(None, &sd)? { "built on this server" } else { "kept" }.into());
-    };
+    let local = crate::home().join("broom-stage.tar.gz");
     let mark = format!("{sd}/bundle.sha256");
     let have = |f: &str| Path::new(&format!("{sd}/{f}")).is_file();
-    if std::fs::read_to_string(&mark).is_ok_and(|s| s.trim() == want) && have("vmlinuz") && have("stage.img") {
+    let installed = |want: &str| std::fs::read_to_string(&mark).is_ok_and(|s| s.trim() == want) && have("vmlinuz") && have("stage.img");
+    let Some(want) = stage_pinned() else {
+        // Locally built binary: the bundle its builder made with `build-stage` (it matches their stage script).
+        if local.is_file() {
+            let sha = crate::publish::file_hash(&local.to_string_lossy()).ok_or_else(|| format!("{}: unreadable", local.display()))?;
+            install_bundle(&local, &sha, &sd)?;
+            let _ = std::fs::remove_file(&local);
+            return Ok("installed from broom-stage.tar.gz next to the binary".into());
+        }
+        if std::fs::read_to_string(&mark).is_ok() && have("vmlinuz") && have("stage.img") {
+            return Ok("kept".into());
+        }
+        return Err(format!(
+            "this binary was built locally and has no Windows stage: on a machine with initramfs-tools fdisk ntfs-3g \
+             dosfstools efibootmgr wget zstd shim-signed and a -generic kernel, run `sudo ./bootrom-mgmt build-stage <dir> \
+             --kernel <version>-generic`, copy <dir>/broom-stage.tar.gz to {} and publish again (or use a release binary)",
+            local.display()
+        ));
+    };
+    if installed(want) {
         return Ok("kept".into());
     }
-    let local = crate::home().join("broom-stage.tar.gz");
     if local.is_file() {
         install_bundle(&local, want, &sd)?;
         let _ = std::fs::remove_file(&local); // unpacked into tftp/broom-stage/
