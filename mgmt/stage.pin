@@ -1,0 +1,3 @@
+# Windows stage bundle this binary belongs to, embedded at build time (winstage.rs).
+# CI writes two lines here before its final build: the sha256 of broom-stage.tar.gz, then its download URL.
+# Comments only (as committed) = a local build: the server builds the stage itself.

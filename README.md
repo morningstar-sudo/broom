@@ -14,8 +14,12 @@ Everything is **one static binary** — no dnsmasq, tftpd, targetcli or extra se
 - **Linux goldens read in-process** — ext4 + LVM, no libguestfs
 
 VMDK/VHDX conversion, partition tables and archives are done in-process too (no qemu-img, sfdisk, cpio, tar,
-hivex). Only the Windows client stage is still built from server packages (`initramfs-tools`, `ntfs-3g`,
-`dosfstools`, `efibootmgr`, `fdisk`, `wget`, `zstd`); the first run installs them automatically.
+hivex), and the Windows client stage (kernel + initrd + Secure Boot shim) is built by CI and downloaded from the
+release on the first Windows publish — **a release binary needs no packages on the server**, only a kernel with
+`loop`, `ntfs3` (Windows images), the LIO iSCSI target and `zram` (preflight warns about missing ones).
+Offline server: download `broom-stage.tar.gz` of the same release elsewhere and copy it next to the binary (e.g.
+`/opt/bootrom/broom-stage.tar.gz`); the next Windows publish unpacks it. A locally built binary has no pinned stage and builds it on the server
+instead (`initramfs-tools`, `ntfs-3g`, `dosfstools`, `efibootmgr`, `fdisk`, `wget`, `zstd`, installed by the first run).
 
 ## How it works
 
@@ -68,12 +72,11 @@ Writes `/etc/systemd/system/bootrom-mgmt.service` (runs the binary from its own 
 keeps any `BOOTROM_*` / `RUST_LOG` set in your shell), then enables and starts it. Stop a foreground instance first —
 both want ports 67/69/80. To upgrade: `systemctl stop bootrom-mgmt`, replace the binary, `systemctl start bootrom-mgmt`.
 
-**Secure Boot (test, Ubuntu servers):** tick **Secure Boot clients** on the Network page. Tested on Ubuntu
-22.04/24.04 servers; on Debian, its own `shim-signed` + Debian-signed kernel should work the same way (untested). Clients then get the official iPXE signed
-by the iPXE project (`mgmt/ipxe/signed/`, via its Microsoft-signed shim) instead of broom's own build, and the Ubuntu
-kernels boot through Ubuntu's Microsoft-signed shim (`apt install shim-signed` on the server). The Windows stage runs
-the server's own kernel, which must be ≥ 6.x: shim rejects the 5.15 kernel ("Relocation section is invalid"), so on
-Ubuntu 22.04 install `linux-generic-hwe-22.04`, reboot, then publish again. On the clients: enable
+**Secure Boot (test):** tick **Secure Boot clients** on the Network page. Clients then get the official iPXE signed
+by the iPXE project (`mgmt/ipxe/signed/`, via its Microsoft-signed shim) instead of broom's own build, and the kernels
+boot through Ubuntu's Microsoft-signed shim: the Windows stage runs Ubuntu's Canonical-signed generic kernel from the
+stage bundle (whatever distro/kernel the server has), and Ubuntu goldens' own kernels pass the same shim. Goldens of
+other distros need their kernel signed for that shim. On the clients: enable
 Secure Boot and the "Microsoft 3rd-party UEFI CA" (often off on Secured-core PCs). The menu footer (Host / IP / MAC)
 then shows as lines under the images. Untick to go back to broom's own iPXE. TPM 2.0, VBS / Memory integrity (HVCI)
 and IOMMU work on the clients too — broom-prep-win turns on VBS + HVCI in the golden (runs where the client has VT-x);
@@ -191,9 +194,10 @@ into `mgmt/ipxe/ipxe-src/` and builds `snponly.efi`, which is embedded in the bi
 Neither is committed. To change iPXE: commit inside `ipxe-src/`, regenerate the patches (command at the top of
 `mgmt/ipxe/build.sh`), rebuild.
 
-CI (`.github/workflows/build.yml`) runs `./build.sh --ipxe` on every push / PR and publishes
-`bootrom-mgmt`, `snponly.efi` and `SHA256SUMS`; pushes to `main` are tagged `v<version>-<short-sha>`
-and released.
+CI (`.github/workflows/build.yml`) runs `./build.sh --ipxe` on every push / PR, builds the Windows stage bundle
+(`bootrom-mgmt build-stage` on Ubuntu's generic kernel + shim-signed), rebuilds the binary pinned to that bundle
+(its sha256 + URL appended to `mgmt/stage.pin`, embedded in the binary) and publishes `bootrom-mgmt`, `broom-stage.tar.gz`, `snponly.efi` and
+`SHA256SUMS`; pushes to `main` are tagged `v<version>-<short-sha>` and released.
 
 ## Repository layout
 

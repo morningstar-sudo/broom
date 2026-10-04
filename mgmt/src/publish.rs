@@ -426,9 +426,13 @@ pub(crate) fn walk(dir: &Path) -> Vec<std::path::PathBuf> {
 /// verifies any Canonical-signed kernel. Copied to tftp/shim/shimx64.efi at every publish (cheap); boot.rs adds the
 /// `shim` line. Missing → only Secure Boot clients are affected (warning).
 pub(crate) fn refresh_shim() {
-    let src = ["/usr/lib/shim/shimx64.efi.signed.latest", "/usr/lib/shim/shimx64.efi.signed"].into_iter().find(|p| Path::new(p).is_file());
+    // The stage bundle (CI-built, see winstage::ensure_stage) carries Ubuntu's shim; else the server's own shim-signed.
+    let bundled = crate::tftp_dir().join("broom-stage/shimx64.efi").to_string_lossy().into_owned();
+    let src = [bundled.as_str(), "/usr/lib/shim/shimx64.efi.signed.latest", "/usr/lib/shim/shimx64.efi.signed"]
+        .into_iter()
+        .find(|p| Path::new(p).is_file());
     let Some(src) = src else {
-        return tracing::warn!("no shim-signed on this server (apt install shim-signed): Secure Boot clients cannot boot the kernels");
+        return tracing::warn!("no shim yet (published a Windows image once, or apt install shim-signed): Secure Boot clients cannot boot the kernels");
     };
     let dir = crate::tftp_dir().join("shim");
     if let Err(e) = std::fs::create_dir_all(&dir).and_then(|_| std::fs::copy(src, dir.join("shimx64.efi"))) {
@@ -438,16 +442,23 @@ pub(crate) fn refresh_shim() {
 
 pub fn run_publish(st: &SharedState, name: &str, steps: &mut Steps) -> Result<String, String> {
     let img = st.db.image_by_name(name)?.ok_or(format!("image '{name}' not found in DB"))?;
-    refresh_shim();
     let (id, os) = (img.id, img.os);
-    match os.as_str() {
+    let r = match os.as_str() {
         "linux" => {
+            // Secure Boot clients boot Linux goldens through the shim, which comes with the stage bundle.
+            if st.db.get_config("ipxe_signed", "0") == "1" {
+                if let Err(e) = crate::winstage::ensure_stage() {
+                    tracing::warn!("stage bundle (for its Secure Boot shim): {e}");
+                }
+            }
             steps.go("publish linux (kernel/initrd + iSCSI)");
             publish_iscsi(st, id, name)
         }
         "windows" => crate::winstage::publish(st, id, name, steps),
         other => Err(format!("invalid os: {other} (linux|windows)")),
-    }
+    };
+    refresh_shim(); // after: a Windows publish may just have installed the stage bundle (and its shim)
+    r
 }
 
 /// Shared RO iSCSI target for an image (kernel LIO via configfs, iscsi.rs). `backing` = golden

@@ -55,10 +55,34 @@ jobs:
       - name: Build iPXE + bootrom-mgmt + unit tests
         run: bash build.sh --ipxe
 
+      # The Windows stage (kernel + initrd + shim) is built HERE, on Ubuntu's Canonical-signed generic kernel + its
+      # Microsoft-signed shim: servers then install no packages for it and Secure Boot works whatever kernel they run.
+      - name: Stage bundle
+        id: stage
+        run: |
+          sudo apt-get install -y -qq linux-image-generic shim-signed initramfs-tools fdisk ntfs-3g dosfstools efibootmgr wget zstd mawk
+          kv=$(ls /lib/modules | grep -- '-generic$' | sort -V | tail -1)
+          mkdir -p "$PWD/stage-out"
+          sha=$(sudo mgmt/dist/bootrom-mgmt build-stage "$PWD/stage-out" --kernel "$kv" | tail -1)
+          sudo chown -R "$(id -u):$(id -g)" stage-out
+          echo "kernel $kv - broom-stage.tar.gz sha256 $sha"
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+
+      # The same binary again, now pinned to that bundle (mgmt/stage.pin, embedded at build time): it downloads it
+      # from this release on the first Windows publish and accepts nothing else.
+      - name: Pin the stage bundle in the binary
+        run: |
+          printf '%s\n%s\n' "${{ steps.stage.outputs.sha }}" \
+            "https://github.com/${{ github.repository }}/releases/download/${{ steps.tag.outputs.name }}/broom-stage.tar.gz" \
+            >> mgmt/stage.pin
+          cat mgmt/stage.pin
+          bash build.sh --no-test
+
       - name: Checksums
         run: |
+          cp stage-out/broom-stage.tar.gz mgmt/dist/
           cd mgmt
-          sha256sum dist/bootrom-mgmt ipxe/snponly.efi | tee SHA256SUMS
+          sha256sum dist/bootrom-mgmt ipxe/snponly.efi dist/broom-stage.tar.gz | tee SHA256SUMS
           file dist/bootrom-mgmt
 
       - uses: actions/upload-artifact@v4
@@ -67,6 +91,7 @@ jobs:
           path: |
             mgmt/dist/bootrom-mgmt
             mgmt/ipxe/snponly.efi
+            mgmt/dist/broom-stage.tar.gz
             mgmt/SHA256SUMS
           if-no-files-found: error
 
@@ -82,5 +107,6 @@ jobs:
           files: |
             mgmt/dist/bootrom-mgmt
             mgmt/ipxe/snponly.efi
+            mgmt/dist/broom-stage.tar.gz
             mgmt/SHA256SUMS
           generate_release_notes: true

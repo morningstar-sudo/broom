@@ -202,8 +202,10 @@ impl AppState {
 async fn main() {
     init_logging();
     let args: Vec<String> = std::env::args().collect();
-    if args.get(1).map(String::as_str) == Some("install-service") {
-        setup::install_service(&args);
+    match args.get(1).map(String::as_str) {
+        Some("install-service") => setup::install_service(&args),
+        Some("build-stage") => winstage::build_bundle(&args), // CI: the Windows stage bundle
+        _ => {}
     }
 
     let skip_preflight = args.iter().any(|a| a == "--skip-preflight");

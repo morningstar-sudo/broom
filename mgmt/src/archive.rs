@@ -66,6 +66,52 @@ pub fn tar_gz(dir: &Path, out: &Path) -> Result<(), String> {
     gz.finish().and_then(|mut w| w.flush()).map_err(|e| format!("{}: {e}", out.display()))
 }
 
+/// Extract a tar.gz written by `tar_gz` (ustar + GNU long names; files + directories) into `dest`. Paths must stay
+/// inside `dest` (no absolute paths, no `..`).
+pub fn untar_gz(file: &Path, dest: &Path) -> Result<(), String> {
+    use flate2::read::GzDecoder;
+    use std::io::Read;
+    let f = std::fs::File::open(file).map_err(|e| format!("{}: {e}", file.display()))?;
+    let mut r = GzDecoder::new(std::io::BufReader::new(f));
+    let err = |e: std::io::Error| format!("{}: {e}", file.display());
+    std::fs::create_dir_all(dest).map_err(|e| format!("{}: {e}", dest.display()))?;
+    let mut long: Option<String> = None;
+    loop {
+        let mut h = [0u8; 512];
+        r.read_exact(&mut h).map_err(err)?;
+        if h.iter().all(|&b| b == 0) {
+            return Ok(()); // end of archive
+        }
+        let field = |a: usize, b: usize| String::from_utf8_lossy(&h[a..b]).trim_end_matches('\0').trim().to_string();
+        let size = u64::from_str_radix(&field(124, 136), 8).map_err(|_| format!("{}: bad tar header", file.display()))?;
+        let mut data = vec![0u8; size as usize];
+        r.read_exact(&mut data).map_err(err)?;
+        let pad = (512 - size % 512) % 512;
+        r.read_exact(&mut vec![0u8; pad as usize]).map_err(err)?;
+        let kind = h[156];
+        if kind == b'L' {
+            long = Some(String::from_utf8_lossy(&data).trim_end_matches('\0').to_string());
+            continue;
+        }
+        let name = long.take().unwrap_or_else(|| field(0, 100));
+        let rel = Path::new(name.trim_end_matches('/'));
+        if rel.is_absolute() || rel.components().any(|c| !matches!(c, std::path::Component::Normal(_))) {
+            return Err(format!("{}: unsafe path {name:?} in the archive", file.display()));
+        }
+        let out = dest.join(rel);
+        match kind {
+            b'5' => std::fs::create_dir_all(&out).map_err(|e| format!("{}: {e}", out.display()))?,
+            b'0' | 0 => {
+                if let Some(p) = out.parent() {
+                    std::fs::create_dir_all(p).map_err(|e| format!("{}: {e}", p.display()))?;
+                }
+                std::fs::write(&out, &data).map_err(|e| format!("{}: {e}", out.display()))?;
+            }
+            _ => return Err(format!("{}: unsupported entry {name:?} (type {})", file.display(), kind as char)),
+        }
+    }
+}
+
 fn walk(root: &Path, d: &Path, out: &mut Vec<(String, bool)>) -> Result<(), String> {
     for e in std::fs::read_dir(d).map_err(|e| format!("{}: {e}", d.display()))? {
         let e = e.map_err(|e| e.to_string())?;
@@ -162,6 +208,21 @@ mod tests {
         assert_eq!(std::fs::read(d.join("out/EFI/Microsoft/Boot/BCD")).unwrap(), vec![7u8; 70000]);
         assert_eq!(std::fs::read(d.join("out").join(&long)).unwrap(), b"[Version]\n", "GNU long name");
         assert!(d.join("out/empty.txt").exists());
+        // Our own reader (stage bundle) gets the same tree back.
+        untar_gz(&d.join("a.tar.gz"), &d.join("mine")).unwrap();
+        assert_eq!(std::fs::read(d.join("mine/EFI/Microsoft/Boot/BCD")).unwrap(), vec![7u8; 70000]);
+        assert_eq!(std::fs::read(d.join("mine").join(&long)).unwrap(), b"[Version]\n");
+        assert!(d.join("mine/empty.txt").is_file());
+        // Paths escaping the target are refused.
+        for bad in ["../x", "/etc/x", "a/../../x"] {
+            let mut gz = GzEncoder::new(Vec::new(), Compression::default());
+            header(&mut gz, bad, 0o644, 2, b'0').unwrap();
+            gz.write_all(&[b'h', b'i']).unwrap();
+            gz.write_all(&[0u8; 510 + 1024]).unwrap();
+            let evil = d.join("evil.tar.gz");
+            std::fs::write(&evil, gz.finish().unwrap()).unwrap();
+            assert!(untar_gz(&evil, &d.join("evil")).unwrap_err().contains("unsafe path"), "{bad}");
+        }
         std::os::unix::fs::symlink("/etc/passwd", src.join("evil")).unwrap();
         assert!(tar_gz(&src, &d.join("c.tar.gz")).is_err(), "symlinks refused");
         let _ = std::fs::remove_dir_all(&d);

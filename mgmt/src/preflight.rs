@@ -1,4 +1,5 @@
-// preflight.rs — check the tools the binary still shells out to before serving (DHCP/TFTP are built in).
+// preflight.rs — before serving: root, kernel modules (warnings), and — only for a binary without a pinned stage
+// bundle — the tools the Windows stage is built from on this server.
 // Missing packages are grouped into one apt command; misc (permissions) reported separately.
 use std::process::Command;
 
@@ -13,6 +14,21 @@ pub const BINS: &[(&str, &str, &str)] = &[
     ("wget", "wget", "client stage downloads golden.vhdx"),
     ("zstd", "zstd", "client stage decompresses delta golden chunks"),
 ];
+
+/// Kernel modules broom uses (built in or loadable) and what breaks without them.
+const KERNEL_MODULES: &[(&str, &str)] = &[
+    ("loop", "Windows publish (mounting the golden's partition)"),
+    ("ntfs3", "Windows publish (editing the golden)"),
+    ("target_core_mod", "Linux images (iSCSI target)"),
+    ("iscsi_target_mod", "Linux images (iSCSI target)"),
+    ("zram", "the zram cache mode of Linux images"),
+];
+
+/// Loaded / built in (/sys/module) or loadable (modprobe dry run).
+fn kernel_has(m: &str) -> bool {
+    std::path::Path::new(&format!("/sys/module/{m}")).exists()
+        || Command::new("modprobe").args(["-n", "-q", m]).status().is_ok_and(|s| s.success())
+}
 
 fn has_bin(name: &str) -> bool {
     Command::new("sh")
@@ -31,6 +47,10 @@ pub fn is_root() -> bool {
 /// List of missing apt packages (deduplicated).
 pub fn missing_pkgs() -> Vec<String> {
     let mut pkgs: Vec<String> = Vec::new();
+    // A CI-built binary brings its stage as a bundle (winstage::ensure_stage): the server needs none of these.
+    if crate::winstage::stage_pinned().is_some() {
+        return pkgs;
+    }
     for (bin, pkg, _why) in BINS {
         if !has_bin(bin) {
             let p = pkg.to_string();
@@ -64,6 +84,12 @@ pub fn run() -> Result<(), Report> {
 
     if !is_root() {
         other.push("must run as root (DHCP :67 / TFTP :69 / HTTP :80, iSCSI, zram, loop mounts)".into());
+    }
+    // Kernel features, not packages: only a warning (each serves one kind of image).
+    for (m, why) in KERNEL_MODULES {
+        if !kernel_has(m) {
+            tracing::warn!("preflight: kernel module {m} not available — {why}");
+        }
     }
 
     if pkgs.is_empty() && other.is_empty() {
