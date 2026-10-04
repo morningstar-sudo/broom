@@ -158,6 +158,13 @@ fi
 if [ -d "img.$NAME" ]; then
   for f in "img.$NAME"/*; do [ -e "$f" ] && mv "$f" .; done
   rm -f "img.$NAME/.parked"; rmdir "img.$NAME" 2>/dev/null
+  # A parked set sat on BROOMWIN while other sessions ran: its golden is checked against the SERVER's hash (cmdline,
+  # not the copy's own golden.sha256) before it is used again — one read, only when switching images. Mismatch
+  # (changed meanwhile, or republished) → step 1 downloads it again.
+  if [ -f golden.vhdx ] && [ "$(cat golden.sha256 2>/dev/null)" = "$HASH" ]; then
+    log "checking the golden of $NAME after its time parked..."
+    [ "$(sha256sum golden.vhdx | cut -c1-64)" = "$HASH" ] || { rm -f golden.sha256; log "golden of $NAME does not match the server's -> downloaded again"; }
+  fi
 fi
 echo "$NAME" > active.txt
 # Parked images the server no longer lets this machine keep (deleted / republished: "name hash" lines) → removed.
@@ -423,9 +430,10 @@ else
 fi
 cd /
 
-# 3. ESP: bootmgr + BCD (vhd=[locate]\broom\child.vhdx) — copied again every boot.
+# 3. ESP: bootmgr + BCD (vhd=[locate]\broom\child.vhdx) — a fresh filesystem every boot, so nothing written to the
+#    ESP during a session (another loader, a changed BCD) survives it; the partition (PARTUUID) stays.
+mkfs.fat -F32 -n BROOMEFI "$(part $disk 1)" >/dev/null || die "mkfs.fat ESP"
 mount -t vfat "$(part $disk 1)" $E || die "mount ESP"
-rm -rf $E/EFI/Microsoft
 tar -xzf $B/efi.tar.gz -C $E || die "extract efi.tar.gz"
 # Drop the fallback loader \EFI\Boot\bootx64.efi (copied by bcdboot): with it the firmware boots the SSD directly
 # (default disk entry) → skips the stage → NO reset. The only way in is the stage's BootNext.
@@ -464,9 +472,13 @@ case "$wins $n " in *" $pxe "*) pxe="";; esac
 [ -n "$pxe" ] && [ -n "$(line $pxe)" ] || pxe=""
 order=$(efibootmgr | sed -n 's/^BootOrder: //p')
 b=""; c=""; d=""; e=""; old=$IFS; IFS=,
+# Every entry that boots from this SSD (its ESP's PARTUUID), whatever its name or loader file.
+mine=""; [ -n "$pu" ] && mine=" $(nums "$pu") "
 for x in $order; do
   case ",$n,$pxe," in *",$x,"*) continue;; esac
   case "$wins" in *" $x "*) c="${c:+$c,}$x"; continue;; esac
+  # Strict reset: no way into this SSD but the stage's BootNext — any other entry on it stays out of the order too.
+  [ "$STRICT" = 1 ] && case "$mine" in *" $x "*) continue;; esac
   # Other NICs / IPv6 PXE after Windows: server down → the firmware reaches Broom Windows without their timeouts.
   case "$net" in *" $x "*) if [ -n "$pxe" ]; then d="${d:+$d,}$x"; else b="${b:+$b,}$x"; fi; continue;; esac
   e="${e:+$e,}$x"

@@ -139,10 +139,12 @@ mod tests {
         let (out, lay, mkfs) = run("blank", &[("sda", &[])], "1", 55, &[]);
         assert_eq!(out, "WB=/dev/sda3 CACHE=/dev/sda4");
         assert!(lay.contains("size=444GiB, type=EBD0") && lay.contains("name=broomcache") && mkfs.trim() == "/dev/sda4", "{lay}{mkfs}");
-        // Laid out by Windows while there was no Linux image → laid out again, even unregistered (it is broom's).
-        let (out, lay, _) = run("winonly", &[("sda", WIN)], "", 55, &[]);
-        assert_eq!(out, "WB=/dev/sda3 CACHE=/dev/sda4");
-        assert!(lay.contains("name=BROOMWIN"), "Windows keeps its part: {lay}");
+        // Laid out for Windows only (no Linux image then / too small) → NEVER laid out again here (Windows would wipe it
+        // back on its next boot, and its goldens + bases would be lost): RAM only, disk untouched.
+        assert_eq!(run("winonly", &[("sda", WIN)], "1", 55, &[]), ("WB= CACHE=".into(), String::new(), String::new()));
+        // A broken Linux-only layout (no cache partition, no Windows part) → laid out again.
+        let (out, lay, _) = run("broken", &[("sda", &["broomwb"])], "", 55, &[]);
+        assert!(out == "WB=/dev/sda3 CACHE=/dev/sda4" && lay.contains("name=BROOMWIN"), "{out}{lay}");
         // Shared layout already there → used as is; the cache formatted only when it isn't yet.
         assert_eq!(run("ready", &[("sda", ALL)], "", 55, &["/dev/sda4"]), ("WB=/dev/sda3 CACHE=/dev/sda4".into(), String::new(), String::new()));
         assert_eq!(run("unfmt", &[("sda", ALL)], "", 55, &[]).2.trim(), "/dev/sda4", "laid out by Windows → formatted here");

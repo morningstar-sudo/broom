@@ -79,10 +79,10 @@ when space runs out, the copy unused the longest goes.
 network and the session's writes stay in RAM. Windows images always use the SSD (they boot from a VHDX on it).
 
 The Linux part is sized from the Linux goldens that use the SSD (30 GB writeback + their total + 5 GB); with none,
-Windows gets the whole disk. The split is set when the disk is laid out: a disk laid out by Windows before any Linux
-image existed is laid out again once on its first Linux boot (the Windows bases are rebuilt), and Linux goldens that
-later outgrow their part evict each other (or boot over iSCSI). To re-split, wipe the disk (`wipefs -a`) and boot
-again.
+Windows gets the whole disk. The split is set when the disk is laid out and Windows comes first: the Linux side never
+lays out a disk that holds Windows' partitions — on a disk laid out before any Linux image existed (or too small for
+both) Linux images run from RAM (writeback in zram, golden over iSCSI), and Linux goldens that later outgrow their
+part evict each other (or boot over iSCSI). To re-split, wipe the disk (`wipefs -a`) and boot again.
 
 ### Run as a service
 

@@ -224,6 +224,26 @@ fn clone_at(root: &Path, from: &str, version: &str, to: &str, label: &str) -> Re
     write_durable(&dir.join("v1.json"), &serde_json::to_vec(&m).unwrap()).map_err(e("write manifest"))
 }
 
+/// Can `version` be restored? Its manifest loads and every chunk it names is stored with the right length (content is
+/// checked by hash while restoring). → the bytes of data it holds (the space a restore needs). Checked BEFORE anything
+/// served is touched.
+pub fn check(name: &str, version: &str) -> Result<u64, String> {
+    check_at(&storage(), name, version)
+}
+
+fn check_at(root: &Path, name: &str, version: &str) -> Result<u64, String> {
+    let m = load(root, name, version)?;
+    let mut data = 0;
+    for (i, h) in m.chunks.iter().enumerate().filter(|(_, h)| h.as_str() != ZERO) {
+        let len = m.chunk_size.min(m.size - i as u64 * m.chunk_size);
+        if std::fs::metadata(chunk_path(root, h)).map(|x| x.len()).ok() != Some(len) {
+            return Err(format!("version {version}: chunk {i} is missing or damaged — it can't be restored"));
+        }
+        data += len;
+    }
+    Ok(data)
+}
+
 /// `version` → a new file `dst` (export), image.img untouched.
 pub fn rehydrate_to(name: &str, version: &str, dst: &Path) -> Result<usize, String> {
     rehydrate_at(&storage(), dst, name, version)
@@ -334,6 +354,11 @@ mod tests {
         std::fs::write(manifest_dir(&root, "img").join("v3.tmp"), b"{").unwrap();
         assert!(gc(&root).is_ok());
         assert_eq!(list_at(&root, "img", None).len(), 2);
+        // check(): restorable → bytes of data; a chunk gone → refused before anything is touched.
+        assert_eq!(check_at(&root, "img", &v1.version).unwrap(), 1000);
+        std::fs::remove_file(chunk_path(&root, &h)).unwrap();
+        assert!(check_at(&root, "img", &v1.version).unwrap_err().contains("missing or damaged"));
+        assert!(check_at(&root, "img", "v99").is_err());
         let _ = std::fs::remove_dir_all(&d);
     }
 

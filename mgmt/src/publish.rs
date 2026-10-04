@@ -144,9 +144,9 @@ pub fn run_publish(st: &SharedState, name: &str, steps: &mut Steps) -> Result<St
 
 /// Shared RO iSCSI target for an image (kernel LIO via configfs, iscsi.rs). `backing` = golden
 /// file (disk) or /dev/zramN (zram). Idempotent (re-creates). Returns the IQN.
-fn export_target(st: &SharedState, name: &str, cache_mode: &str, backing: &str) -> Result<String, String> {
-    let iqn = iqn_of(st, name);
-    let store = store_of(name, gen_of(st, name));
+fn export_target(st: &SharedState, name: &str, g: u64, cache_mode: &str, backing: &str) -> Result<String, String> {
+    let iqn = iqn_at(st, name, g);
+    let store = store_of(name, g);
     let lio = crate::iscsi::Lio::system()?;
     // Targets made before iqn_base used a fixed IQN — remove that one too (legacy; drop once no such server is left).
     lio.remove(name, &format!("iqn.2026-08.net.tiem:{name}"));
@@ -173,6 +173,15 @@ pub fn restore_targets(st: &SharedState) {
         if img.os != "linux" || img.boot_script.is_none() || lio.has_target(&iqn_of(st, &img.name)) {
             continue;
         }
+        // Claim the job slot like any job: a publish / rollback / delete started from the web meanwhile is refused
+        // instead of racing this one (same staging dir, same generation, same image.img).
+        {
+            let mut jobs = st.jobs.lock().unwrap();
+            if jobs.get(&img.name).is_some_and(|s| s.starts_with('⏳')) {
+                continue;
+            }
+            jobs.insert(img.name.clone(), "⏳ restoring the iSCSI target...".into());
+        }
         let r = if img.cache_mode == "zram" {
             // The RAM copy died with the reboot (the old /dev/zramN may now be someone else's) →
             // forget it, publish again = new zram + target. Falls back to disk by itself on RAM overflow.
@@ -182,11 +191,17 @@ pub fn restore_targets(st: &SharedState) {
             let path = images_dir().join(&img.name).join("image.img");
             std::fs::canonicalize(&path)
                 .map_err(|e| format!("{}: {e}", path.display()))
-                .and_then(|p| export_target(st, &img.name, "disk", &p.to_string_lossy()))
+                .and_then(|p| export_target(st, &img.name, gen_of(st, &img.name), "disk", &p.to_string_lossy()))
         };
         match r {
-            Ok(_) => tracing::info!("iSCSI target for image {} restored ({})", img.name, img.cache_mode),
-            Err(e) => tracing::error!("iSCSI target for image {} not restored: {e}", img.name),
+            Ok(_) => {
+                tracing::info!("iSCSI target for image {} restored ({})", img.name, img.cache_mode);
+                st.set_job(&img.name, format!("✓ iSCSI target restored ({})", img.cache_mode));
+            }
+            Err(e) => {
+                tracing::error!("iSCSI target for image {} not restored: {e}", img.name);
+                st.set_job(&img.name, format!("✗ iSCSI target not restored: {e}"));
+            }
         }
     }
 }
@@ -216,22 +231,45 @@ fn publish_iscsi(st: &SharedState, id: i64, name: &str) -> Result<String, String
     let live = crate::tftp_dir().join("broom").join(name);
     let staged = crate::tftp_dir().join("broom").join(format!("{name}.new"));
     let _ = std::fs::remove_dir_all(&staged);
-    let out = publish_iscsi_staged(st, id, name, &img_abs, &want, &ip, &staged);
+    // The new generation (new IQN + backstore + zram device) is only RECORDED once everything worked: until then the
+    // saved boot script, iqn_of() and gc all still mean the old one — a failed publish never lets gc drop the target
+    // the boot script points at.
+    let g = gen_of(st, name) + 1;
+    let out = publish_iscsi_staged(st, id, name, g, &img_abs, &want, &ip, &staged).and_then(|r| {
+        let old = crate::tftp_dir().join("broom").join(format!("{name}.old"));
+        let _ = std::fs::remove_dir_all(&old);
+        let _ = std::fs::rename(&live, &old);
+        if let Err(e) = std::fs::rename(&staged, &live) {
+            let _ = std::fs::rename(&old, &live); // the old kernel/initrd back where the old boot script expects them
+            return Err(format!("swap in {}: {e}", live.display()));
+        }
+        let _ = std::fs::remove_dir_all(&old);
+        Ok(r)
+    });
     match out {
         Ok((bs, hash, cache_mode)) => {
-            let old = crate::tftp_dir().join("broom").join(format!("{name}.old"));
-            let _ = std::fs::remove_dir_all(&old);
-            let _ = std::fs::rename(&live, &old);
-            std::fs::rename(&staged, &live).map_err(|e| format!("swap in {}: {e}", live.display()))?;
-            let _ = std::fs::remove_dir_all(&old);
+            st.db.set_config(&format!("iscsi_gen:{name}"), &g.to_string())?;
             st.db.set_published(id, &bs, &hash)?;
             gc_superseded(st, name);
             Ok(format!("Publish OK — golden '{name}' iSCSI RO ({cache_mode}) + kernel/initrd + boot_script overlay"))
         }
         Err(e) => {
             let _ = std::fs::remove_dir_all(&staged);
+            drop_generation(st, name, g); // its target / zram device, if it got that far
             Err(e)
         }
+    }
+}
+
+/// Remove one generation's target and zram device (a publish that failed after making them).
+fn drop_generation(st: &SharedState, name: &str, g: u64) {
+    if let Some(lio) = crate::iscsi::Lio::existing() {
+        lio.remove(&store_of(name, g), &iqn_at(st, name, g));
+    }
+    let dev = st.db.get_config(&zram_key(name, g), "");
+    if !dev.is_empty() {
+        zram_remove(&dev);
+        let _ = st.db.set_config(&zram_key(name, g), "");
     }
 }
 
@@ -240,6 +278,7 @@ fn publish_iscsi_staged(
     st: &SharedState,
     id: i64,
     name: &str,
+    g: u64,
     img_abs: &Path,
     want: &str,
     ip: &str,
@@ -250,9 +289,8 @@ fn publish_iscsi_staged(
 
     // 2. cache_mode (images column): disk → serve the file directly; zram → load the img into /dev/zramN.
     // zram fails (RAM overflow / error) → fall back to disk BY ITSELF (DB updated) so the image always boots.
-    // New generation: new IQN + backstore (+ new zram device), leaving the previous target for connected clients.
-    let _ = bump_gen(st, name);
-    let g = gen_of(st, name);
+    // Generation g (the caller records it on success): new IQN + backstore (+ new zram device), leaving the previous
+    // target for connected clients.
     let (cache_mode, backing) = if want == "zram" {
         match ensure_zram(st, name, g, img_abs) {
             Ok(dev) => ("zram".to_string(), dev),
@@ -268,7 +306,7 @@ fn publish_iscsi_staged(
 
     // 3. Shared RO iSCSI target (zram = block backstore, disk = fileio). Superseded ones are dropped by the caller
     //    once the new boot script is saved (a client may still boot the old one until then).
-    let iqn = export_target(st, name, &cache_mode, &backing)?;
+    let iqn = export_target(st, name, g, &cache_mode, &backing)?;
 
     // 4. iPXE boot_script. The initrd hook reads broom.name/hash/size/srv/reg/lxgb/ssd from the cmdline.
     // sanhook = iPXE attaches iSCSI via iBFT (does not boot the LUN); initrd open-iscsi reads the iBFT →
@@ -333,6 +371,12 @@ fn ensure_zram(st: &SharedState, name: &str, g: u64, img: &Path) -> Result<Strin
         ));
     }
 
+    // A device left under this generation's key by a publish that died midway (the number is reused) → freed first.
+    let stale = st.db.get_config(&zram_key(name, g), "");
+    if !stale.is_empty() {
+        zram_remove(&stale);
+        let _ = st.db.set_config(&zram_key(name, g), "");
+    }
     // New zram device (zstd) + load the raw img into it.
     let dev = zram_add(size)?;
     let copy = || -> std::io::Result<()> {
@@ -386,17 +430,15 @@ fn gen_of(st: &SharedState, name: &str) -> u64 {
     st.db.get_config(&format!("iscsi_gen:{name}"), "0").parse().unwrap_or(0)
 }
 
-/// Increment the generation and return the new (current) IQN.
-fn bump_gen(st: &SharedState, name: &str) -> String {
-    let g = gen_of(st, name) + 1;
-    let _ = st.db.set_config(&format!("iscsi_gen:{name}"), &g.to_string());
-    iqn_of(st, name)
+/// The current (published) IQN for an image — the one its saved boot script points at.
+pub(crate) fn iqn_of(st: &SharedState, name: &str) -> String {
+    iqn_at(st, name, gen_of(st, name))
 }
 
-/// The current IQN for an image: `<iqn_base>:<name>.g<gen>`. Image names are `[A-Za-z0-9_-]` (no dot), so `.g` is an
+/// IQN of generation `g`: `<iqn_base>:<name>.g<g>`. Image names are `[A-Za-z0-9_-]` (no dot), so `.g` is an
 /// unambiguous separator.
-pub(crate) fn iqn_of(st: &SharedState, name: &str) -> String {
-    format!("{}:{name}.g{}", st.db.get_config("iqn_base", "iqn.2026-01.local.broom"), gen_of(st, name))
+fn iqn_at(st: &SharedState, name: &str, g: u64) -> String {
+    format!("{}:{name}.g{g}", st.db.get_config("iqn_base", "iqn.2026-01.local.broom"))
 }
 
 /// LIO backstore name for a generation (must differ per gen, or two targets would collide on one backstore).

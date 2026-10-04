@@ -57,14 +57,19 @@ if [ "$SSD" != 0 ] && command -v sfdisk >/dev/null && command -v losetup >/dev/n
     done
   done
   [ -n "$bd" ] && { wb=$(byname $bd broomwb); cache=$(byname $bd broomcache); }
-  # A disk is partitioned (WIPED) only when it is the Broom SSD without the Linux part (laid out by Windows while
-  # there was no Linux image — only broom data on it), or on a REGISTERED machine (broom.reg=1, Machines page) with
-  # exactly ONE local disk. An unknown machine that PXE-boots, or one with several disks and no Broom SSD yet (which
-  # one is the scratch SSD?), keeps its disks untouched and writes to zram below.
+  # A disk is partitioned (WIPED) only on a REGISTERED machine (broom.reg=1, Machines page) with exactly ONE local
+  # disk and no Broom SSD yet. A Broom SSD that holds Windows' partitions is NEVER laid out again here — Windows needs
+  # the disk, and doing so would wipe its goldens and bases (and Windows would wipe it back on its next boot): no
+  # Linux part on it → writeback in RAM (zram), golden over iSCSI. An unknown machine that PXE-boots, or one with
+  # several disks and no Broom SSD yet (which one is the scratch SSD?), keeps its disks untouched too.
   set -- $localdisks
   new=""
   if [ -n "$bd" ]; then
-    [ -n "$cache" ] || new=$bd
+    if [ -z "$cache" ] && [ -n "$(byname $bd BROOMWIN)$(byname $bd BROOMEFI)" ]; then
+      log "no Linux part on the Broom SSD /dev/$bd (laid out for Windows) -> writeback in RAM (zram); wipe the disk to re-split it"
+    elif [ -z "$cache" ]; then
+      new=$bd   # a broken Linux-only layout: only broom data on it
+    fi
   elif [ "$REG" = 1 ] && [ $# -eq 1 ]; then
     new=$1
   else

@@ -216,24 +216,45 @@ async fn rollback(State(st): State<SharedState>, Json(b): Json<VersionBody>) -> 
     let img = st.db.image(b.id).map_err(ise)?.ok_or((StatusCode::NOT_FOUND, format!("image {} not found", b.id)))?;
     let version = b.version;
     spawn_job(&st, img.name.clone(), "rollback", move |st, name, steps| {
-        // Rollback rewrites the shared golden (image.img). For a disk-cache image that file backs the live target,
-        // so a connected client would read half old / half new → refuse while any client is attached. zram is safe:
-        // the running client keeps its own RAM copy, and the republish below makes a fresh device.
-        if img.os == "linux" && img.cache_mode != "zram" {
-            if crate::publish::image_in_use(st, name) {
-                return Err("clients are connected; rolling back rewrites the shared disk golden they are reading. \
-                            Reboot/close the clients (do it off-hours), or set this image to zram cache."
-                    .into());
-            }
-            // Nobody is attached now, but one could attach during the rewrite and read half old / half new → no
-            // target until the republish below makes a fresh one (a client booting meanwhile stops at its shell).
-            crate::publish::drop_all_targets(st, name);
+        let disk_target = img.os == "linux" && img.cache_mode != "zram";
+        let busy = || {
+            Err::<(), String>(
+                "clients are connected; rolling back replaces the shared disk golden they are reading. \
+                 Reboot/close the clients (do it off-hours), or set this image to zram cache."
+                    .into(),
+            )
+        };
+        // Everything is checked and the version rebuilt into image.img.new BEFORE the served golden or its target is
+        // touched: a missing chunk, a full disk or a crash leaves the image exactly as it was.
+        if disk_target && crate::publish::image_in_use(st, name) {
+            busy()?;
         }
+        let data = {
+            let _g = st.versions_lock.lock().unwrap_or_else(|p| p.into_inner());
+            crate::versions::check(name, &version)?
+        };
+        let dir = crate::images_dir().join(name);
+        crate::publish::need_space(&dir, data, "rolling back")?;
         steps.go(&format!("restore {version}"));
+        let (img_path, tmp) = (dir.join("image.img"), dir.join("image.img.new"));
+        let _ = std::fs::remove_file(&tmp);
         let n = {
             let _g = st.versions_lock.lock().unwrap_or_else(|p| p.into_inner());
-            crate::versions::rehydrate(name, &version)?
-        };
+            crate::versions::rehydrate_to(name, &version, &tmp)
+        }
+        .inspect_err(|_| {
+            let _ = std::fs::remove_file(&tmp);
+        })?;
+        // A disk-cache target serves image.img: nobody may be attached when it is replaced; the target goes with the
+        // old file (a client booting before the republish below stops at its shell instead of reading a mix).
+        if disk_target {
+            if crate::publish::image_in_use(st, name) {
+                let _ = std::fs::remove_file(&tmp);
+                busy()?;
+            }
+            crate::publish::drop_all_targets(st, name);
+        }
+        std::fs::rename(&tmp, &img_path).map_err(|e| format!("{}: {e}", img_path.display()))?;
         st.db.set_active_version(img.id, Some(&version))?;
         let msg = crate::publish::run_publish(st, name, steps)?;
         Ok(format!("rolled back to {version} ({n} chunks rewritten) — {msg}"))

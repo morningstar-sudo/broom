@@ -561,16 +561,17 @@ mod tests {
                  Boot0003* IBA GE Slot 0100 v1553\tPciRoot(0x0)/Pci(0x1f,0x6)/MAC(001122334455,0)\n\
                  Boot0004* UEFI: PXE IPv6 Intel(R) I219-V\tPciRoot(0x0)/Pci(0x1f,0x6)/MAC(001122334455,0)/IPv6(0)\n\
                  Boot0005* EFI Network 1\tVenHw(1234)\n\
-                 Boot0007* Broom Windows\tHD(1,GPT,bbbb)/File(\\EFI\\Microsoft\\Boot\\bootmgfw.efi)\n";
+                 Boot0007* Broom Windows\tHD(1,GPT,bbbb)/File(\\EFI\\Microsoft\\Boot\\bootmgfw.efi)\n\
+                 Boot0008* Other loader\tHD(1,GPT,bbbb)/File(\\EFI\\other\\x.efi)\n";
         let run = |current: &str, strict: &str| {
             let d = std::env::temp_dir().join(format!("broom_t_order_{}_{strict}", if current.is_empty() { "none" } else { current }));
             std::fs::create_dir_all(&d).unwrap();
             std::fs::write(d.join("v.txt"), v).unwrap();
             let plain: String = v.lines().map(|l| l.split('\t').next().unwrap().to_string() + "\n").collect();
             let head = if current.is_empty() { String::new() } else { format!("BootCurrent: {current}\n") };
-            std::fs::write(d.join("plain.txt"), format!("{head}BootOrder: 0000,0004,0003,0007,0001,0005\n{plain}")).unwrap();
+            std::fs::write(d.join("plain.txt"), format!("{head}BootOrder: 0000,0004,0003,0007,0001,0005,0008\n{plain}")).unwrap();
             let sh = format!(
-                "cd {}; B=.; n=0007; STRICT={strict}\nlog(){{ echo \"$*\" >> log; }}\n\
+                "cd {}; B=.; n=0007; pu=bbbb; STRICT={strict}\nlog(){{ echo \"$*\" >> log; }}\n\
                  efibootmgr(){{ case \"$1\" in -v) cat v.txt;; -q) echo \"$3\" > set.txt;; *) cat plain.txt;; esac; }}\n{part}",
                 d.display()
             );
@@ -581,13 +582,14 @@ mod tests {
             out
         };
         let (set, file, log, strict) = run("0003", "");
-        assert_eq!(set, "0003,0007,0000,0004,0005,0001", "PXE (named IBA GE…) first, other network after Windows");
+        assert_eq!(set, "0003,0007,0000,0004,0005,0001,0008", "PXE (named IBA GE…) first, other network after Windows");
         assert_eq!(file, set, "the order Windows restores");
         assert!(log.contains("PXE Boot0003 (IBA GE Slot 0100 v1553)"), "{log}");
         assert_eq!(strict, "", "no strict.txt without strict reset");
-        assert_eq!(run("", "").0, "0004,0003,0005,0007,0000,0001", "no BootCurrent → every network entry first");
-        assert_eq!(run("0000", "").0, "0004,0003,0005,0007,0000,0001", "BootCurrent = Windows entry → ignored");
-        // Strict reset: every Windows entry (Broom Windows + Windows Boot Manager) out of BootOrder, listed for Windows.
+        assert_eq!(run("", "").0, "0004,0003,0005,0007,0000,0001,0008", "no BootCurrent → every network entry first");
+        assert_eq!(run("0000", "").0, "0004,0003,0005,0007,0000,0001,0008", "BootCurrent = Windows entry → ignored");
+        // Strict reset: every Windows entry (Broom Windows + Windows Boot Manager) out of BootOrder, listed for Windows;
+        // any other entry on this SSD (0008, another loader) stays out too.
         let (set, file, _, strict) = run("0003", "1");
         assert_eq!((set.as_str(), file.as_str(), strict.as_str()), ("0003,0004,0005,0001", "0003,0004,0005,0001", "0007,0000"));
     }
