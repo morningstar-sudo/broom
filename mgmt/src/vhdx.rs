@@ -1,7 +1,7 @@
 // vhdx.rs — minimal VHDX (MS-VHDX v1.0) reader/writer for Windows native boot.
-// Read: disk parameters + DataWriteGuid of the golden (created by qemu-img). Write: an empty DIFFERENCING file
-// (BAT all "not present" → every read falls through to the parent) pointing to its parent via parent_linkage + relative_path.
-// No Linux tool can create a differencing VHDX (qemu-img doesn't support it) → written by hand.
+// Write: the golden as a DYNAMIC VHDX from its raw disk (write_dynamic, replaces qemu-img), and empty DIFFERENCING
+// files (BAT all "not present" → every read falls through to the parent) pointing to their parent via
+// parent_linkage + relative_path (write_empty). Read: disk parameters + DataWriteGuid (read_info).
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom, Write};
 
@@ -143,14 +143,23 @@ fn utf16(s: &str) -> Vec<u8> {
     s.encode_utf16().flat_map(|u| u.to_le_bytes()).collect()
 }
 
-/// Write an empty VHDX with the same size as `parent`. `rel_parent` Some → differencing pointing to the parent
-/// (parent_linkage = parent DataWriteGuid, relative_path); None → plain dynamic (tests only).
-/// Returns the absolute offset of the parent_linkage GUID string (UTF-16, 76 bytes) — the client stage patches
-/// it there when the parent (base.vhdx) GUID is only known at run time.
-pub fn write_empty(path: &str, parent: &Info, rel_parent: Option<&str>) -> Result<u64, String> {
-    let ls = parent.logical_sector as u64;
-    let chunk = (1u64 << 23) * ls / CHILD_BLOCK;
-    let data_blocks = parent.virtual_size.div_ceil(CHILD_BLOCK);
+/// Byte layout of a VHDX without its payload: 0..1MB file identifier + 2 headers + 2 region tables; log 1..2MB;
+/// BAT from 2MB; metadata (1MB) after the BAT. Payload blocks start at `meta_off + 1MB`.
+struct Layout {
+    head: Vec<u8>,
+    meta: Vec<u8>,
+    bat_off: u64,
+    bat_len: u64,
+    meta_off: u64,
+    /// Absolute offset of the parent_linkage GUID string (differencing only).
+    linkage_abs: u64,
+}
+
+/// `block` = payload block size; `rel_parent` Some → differencing (parent_linkage = info's DataWriteGuid).
+fn layout(info: &Info, block: u64, rel_parent: Option<&str>) -> Layout {
+    let ls = info.logical_sector as u64;
+    let chunk = (1u64 << 23) * ls / block;
+    let data_blocks = info.virtual_size.div_ceil(block);
     let bat_entries = if rel_parent.is_some() {
         data_blocks.div_ceil(chunk) * (chunk + 1)
     } else {
@@ -196,18 +205,18 @@ pub fn write_empty(path: &str, parent: &Info, rel_parent: Option<&str>) -> Resul
     // Metadata region: entry table (≤64KB) + entry data from 64KB.
     let mut items: Vec<(&str, Vec<u8>, u32)> = vec![
         (FILE_PARAMS, {
-            let mut v = (CHILD_BLOCK as u32).to_le_bytes().to_vec();
+            let mut v = (block as u32).to_le_bytes().to_vec();
             v.extend_from_slice(&(if rel_parent.is_some() { 2u32 } else { 0 }).to_le_bytes()); // HasParent
             v
         }, 4), // IsRequired
-        (VDISK_SIZE, parent.virtual_size.to_le_bytes().to_vec(), 6), // IsVirtualDisk|IsRequired
+        (VDISK_SIZE, info.virtual_size.to_le_bytes().to_vec(), 6), // IsVirtualDisk|IsRequired
         (PAGE83, rand_guid().to_vec(), 6),
-        (LOGICAL_SS, parent.logical_sector.to_le_bytes().to_vec(), 6),
-        (PHYSICAL_SS, parent.physical_sector.to_le_bytes().to_vec(), 6),
+        (LOGICAL_SS, info.logical_sector.to_le_bytes().to_vec(), 6),
+        (PHYSICAL_SS, info.physical_sector.to_le_bytes().to_vec(), 6),
     ];
     let mut linkage_in_item = 0u64;
     if let Some(rel) = rel_parent {
-        let kv = [("parent_linkage", guid_str(&parent.data_write_guid)), ("relative_path", rel.to_string())];
+        let kv = [("parent_linkage", guid_str(&info.data_write_guid)), ("relative_path", rel.to_string())];
         let mut loc = guid_bytes(PARENT_LOC_TYPE).to_vec();
         loc.extend_from_slice(&0u16.to_le_bytes());
         loc.extend_from_slice(&(kv.len() as u16).to_le_bytes());
@@ -247,15 +256,84 @@ pub fn write_empty(path: &str, parent: &Info, rel_parent: Option<&str>) -> Resul
         }
         data_off += data.len().div_ceil(8) * 8;
     }
+    Layout { head, meta, bat_off, bat_len, meta_off, linkage_abs }
+}
 
+/// Write an empty VHDX with the same size as `parent`. `rel_parent` Some → differencing pointing to the parent
+/// (parent_linkage = parent DataWriteGuid, relative_path); None → plain dynamic (tests only).
+/// Returns the absolute offset of the parent_linkage GUID string (UTF-16, 76 bytes) — the client stage patches
+/// it there when the parent (base.vhdx) GUID is only known at run time.
+pub fn write_empty(path: &str, parent: &Info, rel_parent: Option<&str>) -> Result<u64, String> {
+    let l = layout(parent, CHILD_BLOCK, rel_parent);
     // BAT + log = all zeros (sparse, set_len). Write the header area + metadata.
     let mut f = File::create(path).map_err(|e| format!("{path}: {e}"))?;
-    f.set_len(meta_off + MB).map_err(|e| e.to_string())?;
-    f.write_all(&head).map_err(|e| e.to_string())?;
-    f.seek(SeekFrom::Start(meta_off)).map_err(|e| e.to_string())?;
-    f.write_all(&meta).map_err(|e| e.to_string())?;
+    f.set_len(l.meta_off + MB).map_err(|e| e.to_string())?;
+    f.write_all(&l.head).map_err(|e| e.to_string())?;
+    f.seek(SeekFrom::Start(l.meta_off)).map_err(|e| e.to_string())?;
+    f.write_all(&l.meta).map_err(|e| e.to_string())?;
     f.sync_all().map_err(|e| e.to_string())?;
-    Ok(linkage_abs)
+    Ok(l.linkage_abs)
+}
+
+/// Block size of the golden (dynamic) VHDX — Hyper-V's default for dynamic disks.
+const GOLDEN_BLOCK: u64 = 32 * MB;
+/// BAT payload state: block fully present in the file.
+const PAYLOAD_FULLY_PRESENT: u64 = 6;
+
+/// `src` (a raw disk) → dynamic VHDX at `path` (replaces `qemu-img convert -O vhdx`). Blocks that are all zero
+/// are left out (BAT "not present" reads as zeros); the others are stored in VIRTUAL order, so the same golden
+/// always lays out the same way (the clients' delta updates compare 4 MB chunks of this file). Zero 1MB pieces
+/// inside a stored block stay holes in the server's file.
+pub fn write_dynamic(src: &crate::disk::Source, path: &str) -> Result<(), String> {
+    use std::os::unix::fs::FileExt;
+    if src.len % 512 != 0 || src.len == 0 {
+        return Err(format!("raw disk size {} is not a multiple of 512", src.len));
+    }
+    let info = Info { data_write_guid: [0; 16], virtual_size: src.len, logical_sector: 512, physical_sector: 4096 };
+    let l = layout(&info, GOLDEN_BLOCK, None);
+    let chunk = (1u64 << 23) * 512 / GOLDEN_BLOCK;
+    let f = File::create(path).map_err(|e| format!("{path}: {e}"))?;
+    let mut blocks = std::collections::BTreeSet::new();
+    for (a, b) in src.data_ranges() {
+        blocks.extend(a / GOLDEN_BLOCK..b.div_ceil(GOLDEN_BLOCK));
+    }
+    let blocks: Vec<u64> = blocks.into_iter().filter(|&i| i * GOLDEN_BLOCK < src.len).collect();
+    let mut bat = vec![0u8; l.bat_len as usize];
+    let mut next = l.meta_off + MB;
+    // A window of blocks is read in parallel, placed in virtual order, then written in parallel. The window's
+    // buffers are reused (RAM: workers × 32 MB, touched once).
+    let w = crate::disk::workers();
+    let bufs: Vec<std::sync::Mutex<Vec<u8>>> = (0..w).map(|_| std::sync::Mutex::new(vec![0u8; GOLDEN_BLOCK as usize])).collect();
+    for win in blocks.chunks(w) {
+        let slots: Vec<usize> = (0..win.len()).collect();
+        let present = crate::disk::par_map(&slots, |&k| {
+            let mut b = bufs[k].lock().unwrap();
+            src.read_at(win[k] * GOLDEN_BLOCK, &mut b)?;
+            Ok(b.iter().any(|&x| x != 0))
+        })?;
+        let mut jobs = Vec::new();
+        for (k, &i) in win.iter().enumerate().filter(|&(k, _)| present[k]) {
+            let e = ((next / MB) << 20) | PAYLOAD_FULLY_PRESENT;
+            let idx = (i + i / chunk) as usize * 8;
+            bat[idx..idx + 8].copy_from_slice(&e.to_le_bytes());
+            jobs.push((next, k));
+            next += GOLDEN_BLOCK;
+        }
+        crate::disk::par_map(&jobs, |&(at, k)| {
+            let b = bufs[k].lock().unwrap();
+            for (n, piece) in b.chunks(MB as usize).enumerate() {
+                if piece.iter().any(|&x| x != 0) {
+                    f.write_all_at(piece, at + n as u64 * MB).map_err(|e| format!("write {path}: {e}"))?;
+                }
+            }
+            Ok(())
+        })?;
+    }
+    f.set_len(next).map_err(|e| e.to_string())?;
+    f.write_all_at(&l.head, 0).map_err(|e| e.to_string())?;
+    f.write_all_at(&bat, l.bat_off).map_err(|e| e.to_string())?;
+    f.write_all_at(&l.meta, l.meta_off).map_err(|e| e.to_string())?;
+    f.sync_all().map_err(|e| e.to_string())
 }
 
 #[cfg(test)]
@@ -273,6 +351,84 @@ mod tests {
         assert_eq!(guid_str(&guid_bytes(s)), s);
         // Windows layout: first 3 fields LE → first byte = 0x66.
         assert_eq!(guid_bytes(BAT_GUID)[0], 0x66);
+    }
+
+    /// Raw disk with data, holes and a partial last block → dynamic VHDX → qemu-img (independent reader) reads back
+    /// exactly the same bytes; zero blocks take no space; blocks are stored in virtual order.
+    #[test]
+    fn dynamic_matches_qemu() {
+        use std::os::unix::fs::FileExt;
+        let d = std::env::temp_dir().join("broom_t_vhdx_dyn");
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let raw = d.join("disk.raw");
+        let f = File::create(&raw).unwrap();
+        let len = 200 * MB + 512 * 3; // not a multiple of the 32 MB block
+        f.set_len(len).unwrap();
+        let mut seed = 0x1234_5678u32;
+        let mut noise = |n: usize| -> Vec<u8> {
+            (0..n).map(|_| { seed ^= seed << 13; seed ^= seed >> 17; seed ^= seed << 5; seed as u8 }).collect()
+        };
+        f.write_all_at(&noise(4096), 0).unwrap(); // block 0
+        f.write_all_at(&noise(3 * MB as usize), 70 * MB).unwrap(); // block 2, spans 1MB pieces
+        f.write_all_at(&noise(700), len - 700).unwrap(); // partial last block
+        f.write_all_at(&vec![0u8; 4 * MB as usize], 130 * MB).unwrap(); // written zeros: still a zero block
+        drop(f);
+        let out = d.join("g.vhdx");
+        write_dynamic(&crate::disk::Source::file(&raw).unwrap(), out.to_str().unwrap()).unwrap();
+        let i = read_info(out.to_str().unwrap()).unwrap();
+        assert_eq!((i.virtual_size, i.logical_sector, i.physical_sector), (len, 512, 4096));
+        let q = |args: &[&str]| std::process::Command::new("qemu-img").args(args).status().unwrap().success();
+        assert!(q(&["check", "-q", "-f", "vhdx", out.to_str().unwrap()]), "qemu-img check");
+        let back = d.join("back.raw");
+        assert!(q(&["convert", "-f", "vhdx", "-O", "raw", out.to_str().unwrap(), back.to_str().unwrap()]));
+        assert!(std::fs::read(&back).unwrap() == std::fs::read(&raw).unwrap(), "same bytes");
+        // 3 stored blocks (0, 2, last) after header/log/BAT/metadata.
+        assert_eq!(std::fs::metadata(&out).unwrap().len(), 4 * MB + 3 * GOLDEN_BLOCK);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// Manual timing vs qemu-img: BROOM_BENCH_RAW=/path/disk.raw cargo test --release bench_convert -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn bench_convert() {
+        let Ok(raw) = std::env::var("BROOM_BENCH_RAW") else { return };
+        let _ = std::process::Command::new("sync").status();
+        let out = format!("{raw}.broom.vhdx");
+        let t = std::time::Instant::now();
+        write_dynamic(&crate::disk::Source::file(std::path::Path::new(&raw)).unwrap(), &out).unwrap();
+        let _ = std::process::Command::new("sync").status(); // both sides pay the flush
+        println!("broom vhdx:    {:?}", t.elapsed());
+        let t = std::time::Instant::now();
+        let q = format!("{raw}.qemu.vhdx");
+        assert!(std::process::Command::new("qemu-img")
+            .args(["convert", "-m", "16", "-O", "vhdx", "-o", "subformat=dynamic", &raw, &q])
+            .status()
+            .unwrap()
+            .success());
+        let _ = std::process::Command::new("sync").status(); // both sides pay the flush
+        println!("qemu-img vhdx: {:?}", t.elapsed());
+        let v = format!("{raw}.broom.vmdk");
+        let t = std::time::Instant::now();
+        crate::vmdk::write_sparse(&crate::disk::Source::file(std::path::Path::new(&raw)).unwrap(), std::path::Path::new(&v)).unwrap();
+        let _ = std::process::Command::new("sync").status(); // both sides pay the flush
+        println!("broom vmdk:    {:?}", t.elapsed());
+        let back = format!("{raw}.back");
+        let t = std::time::Instant::now();
+        crate::vmdk::to_raw(std::path::Path::new(&v), std::path::Path::new(&back)).unwrap();
+        let _ = std::process::Command::new("sync").status(); // both sides pay the flush
+        println!("broom vmdk→raw:{:?}", t.elapsed());
+        let t = std::time::Instant::now();
+        assert!(std::process::Command::new("qemu-img")
+            .args(["convert", "-m", "16", "-W", "-f", "vmdk", "-O", "raw", &v, &format!("{raw}.qback")])
+            .status()
+            .unwrap()
+            .success());
+        let _ = std::process::Command::new("sync").status(); // both sides pay the flush
+        println!("qemu vmdk→raw: {:?}", t.elapsed());
+        for f in [out, q, v, back, format!("{raw}.qback")] {
+            let _ = std::fs::remove_file(f);
+        }
     }
 
     /// Write a differencing file → reading back matches the parent parameters; parent_linkage sits at the returned offset.

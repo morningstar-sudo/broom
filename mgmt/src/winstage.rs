@@ -846,11 +846,11 @@ fn build_golden(raw: &str, out: &str, name: &str, steps: &mut crate::publish::St
         Ok(drv)
     })?;
 
-    // 4. golden.vhdx (dynamic, 16 I/O threads) + 2 empty child VHDX: base-template (parent golden) and
+    // 4. golden.vhdx (dynamic, blocks in disk order) + 2 empty child VHDX: base-template (parent golden) and
     //    child-template (parent base.vhdx — base's GUID is only known on the client → the stage patches it at an offset).
     steps.go("convert raw→vhdx");
     let golden = format!("{out}/golden.vhdx");
-    run("qemu-img", &["convert", "-m", "16", "-O", "vhdx", "-o", "subformat=dynamic", raw, &format!("{golden}.tmp")])?;
+    crate::vhdx::write_dynamic(&crate::disk::Source::file(Path::new(raw))?, &format!("{golden}.tmp"))?;
     std::fs::rename(format!("{golden}.tmp"), &golden).map_err(|e| e.to_string())?;
     let gi = crate::vhdx::read_info(&golden)?;
     crate::vhdx::write_empty(&format!("{out}/base-template.vhdx"), &gi, Some(".\\golden.vhdx"))?;

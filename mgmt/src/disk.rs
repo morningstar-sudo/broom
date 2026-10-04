@@ -227,10 +227,157 @@ pub fn write_single_gpt(path: &str, start: u64, size: u64) -> Result<(), String>
     f.sync_all().map_err(|e| e.to_string())
 }
 
+/// I/O threads for image conversions: the CPU count, 2..=8 (more only queues behind the disk).
+pub fn workers() -> usize {
+    std::thread::available_parallelism().map_or(4, |n| n.get()).clamp(2, 8)
+}
+
+/// `f` over `items` on `workers()` threads (a shared work queue), results in input order. The first error stops
+/// the remaining items and is returned.
+pub fn par_map<T: Sync, R: Send>(items: &[T], f: impl Fn(&T) -> Result<R, String> + Sync) -> Result<Vec<R>, String> {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let next = AtomicUsize::new(0);
+    let out: Vec<std::sync::Mutex<Option<Result<R, String>>>> = items.iter().map(|_| Default::default()).collect();
+    std::thread::scope(|s| {
+        for _ in 0..workers().min(items.len()) {
+            s.spawn(|| loop {
+                let i = next.fetch_add(1, Ordering::Relaxed);
+                if i >= items.len() {
+                    break;
+                }
+                let r = f(&items[i]);
+                let failed = r.is_err();
+                *out[i].lock().unwrap() = Some(r);
+                if failed {
+                    next.store(items.len(), Ordering::Relaxed);
+                    break;
+                }
+            });
+        }
+    });
+    // Items before a failure were all claimed earlier, so they finished: the first Err in order is the real one.
+    out.into_iter().map(|m| m.into_inner().unwrap().unwrap_or_else(|| Err("stopped after an error".into()))).collect()
+}
+
+/// A virtual disk made of byte ranges of files, back to back (a whole raw golden, or head.raw + the Windows
+/// partition of a golden + tail.raw for an export). Read side of the VHDX/VMDK writers.
+pub struct Source {
+    segs: Vec<(File, u64, u64)>, // (file, offset in it, length)
+    pub len: u64,
+}
+
+impl Source {
+    pub fn file(path: &std::path::Path) -> Result<Source, String> {
+        Source::new(&[(path, 0, None)])
+    }
+
+    /// Segments (path, offset, length — None = to the end of the file).
+    pub fn new(parts: &[(&std::path::Path, u64, Option<u64>)]) -> Result<Source, String> {
+        let mut segs = Vec::new();
+        let mut len = 0;
+        for (p, off, l) in parts {
+            let f = File::open(p).map_err(|e| format!("{}: {e}", p.display()))?;
+            let size = f.metadata().map_err(|e| e.to_string())?.len();
+            let l = l.unwrap_or(size.saturating_sub(*off));
+            if off + l > size {
+                return Err(format!("{}: range {off}+{l} beyond its {size} bytes", p.display()));
+            }
+            len += l;
+            segs.push((f, *off, l));
+        }
+        Ok(Source { segs, len })
+    }
+
+    /// Read `buf.len()` bytes at virtual offset `off`; past the end reads zeros.
+    pub fn read_at(&self, mut off: u64, buf: &mut [u8]) -> Result<(), String> {
+        buf.fill(0);
+        let (mut base, mut done) = (0u64, 0usize);
+        for (f, so, sl) in &self.segs {
+            if done == buf.len() {
+                break;
+            }
+            if off < base + sl {
+                let n = ((base + sl - off) as usize).min(buf.len() - done);
+                f.read_exact_at(&mut buf[done..done + n], so + (off - base)).map_err(|e| format!("read: {e}"))?;
+                done += n;
+                off += n as u64;
+            }
+            base += sl;
+        }
+        Ok(())
+    }
+
+    /// Virtual byte ranges that may hold data, sorted: the holes of sparse files are skipped (SEEK_DATA/SEEK_HOLE),
+    /// so a mostly empty 100 GB golden is not read end to end. A filesystem without SEEK_DATA → everything.
+    pub fn data_ranges(&self) -> Vec<(u64, u64)> {
+        use std::os::fd::AsRawFd;
+        let mut out = Vec::new();
+        let mut base = 0u64;
+        for (f, so, sl) in &self.segs {
+            let (fd, end) = (f.as_raw_fd(), so + sl);
+            let mut pos = *so;
+            while pos < end {
+                // SAFETY: lseek on an open fd; no memory is touched.
+                let d = unsafe { libc::lseek(fd, pos as libc::off_t, libc::SEEK_DATA) };
+                if d < 0 {
+                    if std::io::Error::last_os_error().raw_os_error() != Some(libc::ENXIO) {
+                        out.push((base + pos - so, base + sl)); // no SEEK_DATA here: assume data
+                    }
+                    break;
+                }
+                let d = (d as u64).max(pos);
+                if d >= end {
+                    break;
+                }
+                // SAFETY: as above.
+                let h = unsafe { libc::lseek(fd, d as libc::off_t, libc::SEEK_HOLE) };
+                let h = if h < 0 { end } else { (h as u64).min(end) };
+                out.push((base + d - so, base + h - so));
+                pos = h;
+            }
+            base += sl;
+        }
+        out
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::process::Command;
+
+    #[test]
+    fn par_map_order_and_errors() {
+        let items: Vec<u32> = (0..100).collect();
+        assert_eq!(par_map(&items, |&x| Ok(x * 2)).unwrap(), items.iter().map(|x| x * 2).collect::<Vec<_>>());
+        let e = par_map(&items, |&x| if x == 37 { Err(format!("bad {x}")) } else { Ok(x) }).unwrap_err();
+        assert_eq!(e, "bad 37");
+        assert!(par_map(&Vec::<u32>::new(), |&x| Ok(x)).unwrap().is_empty());
+    }
+
+    #[test]
+    fn source_segments_and_holes() {
+        let d = std::env::temp_dir().join("broom_t_source");
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let (a, b) = (d.join("a"), d.join("b"));
+        std::fs::write(&a, b"HEAD").unwrap();
+        let f = File::create(&b).unwrap();
+        f.set_len(64 << 20).unwrap();
+        f.write_all_at(b"DATA", 32 << 20).unwrap();
+        let s = Source::new(&[(&a, 0, None), (&b, 16 << 20, Some(32 << 20))]).unwrap();
+        assert_eq!(s.len, 4 + (32 << 20));
+        let mut buf = [0u8; 8];
+        s.read_at(2, &mut buf).unwrap();
+        assert_eq!(&buf[..2], b"AD", "first segment, then zeros of the second");
+        s.read_at(4 + (16 << 20), &mut buf[..4]).unwrap();
+        assert_eq!(&buf[..4], b"DATA");
+        let r = s.data_ranges();
+        assert!(r.iter().any(|&(x, y)| x <= 4 + (16 << 20) && y >= 8 + (16 << 20)), "{r:?}");
+        let total: u64 = r.iter().map(|(x, y)| y - x).sum();
+        assert!(total < 8 << 20, "holes skipped: {r:?}");
+        let _ = std::fs::remove_dir_all(&d);
+    }
 
     fn sfdisk(path: &str, script: &str) {
         use std::io::Write;

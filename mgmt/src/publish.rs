@@ -214,21 +214,9 @@ pub(crate) fn unzip(zip_path: &Path, dir: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// `qemu-img info` → the virtual size in bytes. None if it can't be read (caller treats that as too risky).
-fn qemu_virtual_size(file: &Path) -> Option<u64> {
-    let out = Command::new("qemu-img").args(["info", "--output=json"]).arg(file).output().ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    let text = String::from_utf8_lossy(&out.stdout);
-    // "virtual-size": 123456,  — parse without a JSON dep.
-    let v = text.split("\"virtual-size\"").nth(1)?.split([':', ',']).nth(1)?.trim().parse::<u64>().ok()?;
-    Some(v)
-}
-
 /// Every string a VMDK descriptor points at (extent file names + parentFileNameHint) must be a plain name inside the
-/// upload folder — a descriptor can otherwise name `/dev/sda` or a server file as an "extent", and qemu-img (root)
-/// would copy it into the golden. Non-descriptor (monolithic) vmdks have no such lines and pass.
+/// upload folder — a descriptor can otherwise name `/dev/sda` or a server file as an "extent", and the conversion
+/// (root) would copy it into the golden. Non-descriptor (monolithic) vmdks have no such lines and pass.
 fn vmdk_refs_safe(vmdk: &Path) -> Result<(), String> {
     let head = vmdk_head(vmdk);
     if !is_vmdk_descriptor(vmdk) {
@@ -286,7 +274,7 @@ fn golden_from(dir: &Path, dest: &Path) -> Result<(), String> {
     let raw = files.iter().find(|p| ext(p) == "img" || ext(p) == "raw");
     // Pick the vmdk to convert: a .vmx names the disk the VM ACTUALLY uses (even with a branching
     // snapshot tree) → preferred. No .vmx: one file → use it; several → pick_vmdk.
-    // qemu-img reads extents/parents from the same directory.
+    // Extents are read from the same directory.
     // A .vmx lists every disk the VM attaches. broom serves ONE OS disk, so more than one disk is ambiguous (which
     // is the OS?) — fail loudly instead of silently converting whichever comes first (e.g. a stale SCSI disk while
     // the real OS is on nvme0:0).
@@ -313,20 +301,17 @@ fn golden_from(dir: &Path, dest: &Path) -> Result<(), String> {
         pick_vmdk(&vmdks)
     };
     if let Some(v) = chosen_vmdk {
-        // Untrusted upload processed as root: every vmdk's extents must stay inside the folder (no /dev/sda,
-        // no server files), the virtual size must be sane, and -f vmdk stops a disguised qcow2 backing file.
+        // Untrusted upload processed as root: every vmdk's extents must stay inside the folder (no /dev/sda, no server
+        // files — vmdk.rs refuses those too), no parent disk, and the virtual size must be sane.
         for vmdk in walk(dir).iter().filter(|p| ext(p) == "vmdk") {
             vmdk_refs_safe(vmdk)?;
         }
-        match qemu_virtual_size(&v) {
-            Some(sz) if sz <= MAX_GOLDEN => {}
-            Some(sz) => return Err(format!("golden virtual size {sz} bytes is above the {MAX_GOLDEN} limit")),
-            None => return Err("could not read the vmdk (qemu-img info failed) — is it a valid disk?".into()),
+        let sz = crate::vmdk::virtual_size(&v).map_err(|e| format!("{}: {e}", v.display()))?;
+        if sz > MAX_GOLDEN {
+            return Err(format!("golden virtual size {sz} bytes is above the {MAX_GOLDEN} limit"));
         }
         tracing::info!("golden: converting {}", v.display());
-        // -f vmdk: don't probe the format (a descriptor could disguise a qcow2 backing file). -m 16: 16 parallel I/O
-        // coroutines (default 8); -W: out-of-order writes (sparse raw target).
-        run("qemu-img", &["convert", "-f", "vmdk", "-m", "16", "-W", "-O", "raw", &v.to_string_lossy(), &dest.to_string_lossy()])
+        crate::vmdk::to_raw(&v, dest)
     } else if let Some(r) = raw {
         if std::fs::metadata(r).map(|m| m.len()).unwrap_or(0) > MAX_GOLDEN {
             return Err(format!("raw image is above the {MAX_GOLDEN} byte limit"));
@@ -433,23 +418,6 @@ pub(crate) fn walk(dir: &Path) -> Vec<std::path::PathBuf> {
         }
     }
     out
-}
-
-fn run(bin: &str, args: &[&str]) -> Result<(), String> {
-    tracing::debug!("exec: {bin} {}", args.join(" "));
-    let out = Command::new(bin)
-        .args(args)
-        .output()
-        .map_err(|e| format!("{bin}: {e}"))?;
-    if out.status.success() {
-        Ok(())
-    } else {
-        Err(format!(
-            "{bin} {} failed: {}",
-            args.join(" "),
-            String::from_utf8_lossy(&out.stderr).trim()
-        ))
-    }
 }
 
 /// Publish an image according to its os. Blocking (called from spawn_blocking).

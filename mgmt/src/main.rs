@@ -21,6 +21,7 @@ mod setup;
 mod tftp;
 mod versions;
 mod vhdx;
+mod vmdk;
 mod winstage;
 mod wol;
 
