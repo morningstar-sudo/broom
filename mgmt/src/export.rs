@@ -84,22 +84,18 @@ pub(crate) fn keep_boot_regions(raw: &Path, name: &str, (start, size): (u64, u64
     std::fs::write(d.join("orig.json"), serde_json::to_vec(&o).unwrap_or_default()).map_err(|e| e.to_string())
 }
 
-/// Free bytes on the filesystem holding `p`.
-fn free_bytes(p: &Path) -> Option<u64> {
-    use std::os::unix::ffi::OsStrExt;
-    let c = std::ffi::CString::new(p.as_os_str().as_bytes()).ok()?;
-    // SAFETY: valid NUL-terminated path + a zeroed out-struct that statvfs fills.
-    let mut s: libc::statvfs = unsafe { std::mem::zeroed() };
-    (unsafe { libc::statvfs(c.as_ptr(), &mut s) } == 0).then(|| s.f_bavail as u64 * s.f_frsize as u64)
-}
-
 /// Build work/export/<name>/ from the current golden (version None) or a saved version. Blocking (job).
 pub fn run_export(st: &SharedState, name: &str, os: &str, version: Option<&str>, steps: &mut crate::publish::Steps) -> Result<String, String> {
-    let out = export_dir(name);
+    // Built in <dir>.new and renamed when complete: a download meanwhile gets "no export yet", never a half-written
+    // vmdk. The old export goes first (its space is needed).
+    let done = export_dir(name);
+    let out = done.with_extension("new");
+    let _ = std::fs::remove_dir_all(&done);
     let _ = std::fs::remove_dir_all(&out);
     std::fs::create_dir_all(&out).map_err(|e| format!("{}: {e}", out.display()))?;
     let r = build(st, name, os, version, &out, steps);
     let _ = std::fs::remove_file(out.join("src.raw"));
+    let r = r.and_then(|msg| std::fs::rename(&out, &done).map(|()| msg).map_err(|e| format!("{}: {e}", done.display())));
     if r.is_err() {
         let _ = std::fs::remove_dir_all(&out);
     }
@@ -112,10 +108,7 @@ fn build(st: &SharedState, name: &str, os: &str, version: Option<&str>, out: &Pa
     // The vmdk holds about the data of the golden (+ a restored version needs its own copy first).
     let used = std::fs::metadata(&img).map_err(|_| format!("image {name} has no golden yet"))?.blocks() * 512;
     let copies = if version.is_some() { 2 } else { 1 };
-    let need = used * copies + (1 << 30);
-    if let Some(free) = free_bytes(out).filter(|&f| f < need) {
-        return Err(format!("export needs ~{:.0} GB free in {}, only {:.0} GB", need as f64 / 1e9, out.display(), free as f64 / 1e9));
-    }
+    crate::publish::need_space(out, used * copies, "export")?;
     let src = match version {
         None => img,
         Some(v) => {

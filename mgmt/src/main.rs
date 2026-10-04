@@ -106,6 +106,37 @@ fn migrate_old_layout() {
     }
 }
 
+/// Temp files a job leaves when the server stops midway (crash, power loss, restart). At start no job runs yet, so
+/// every one of them is a leftover: removed before anything else (they can be GBs).
+fn clean_leftovers() {
+    let rm = |p: &Path| {
+        let r = if p.is_dir() { std::fs::remove_dir_all(p) } else { std::fs::remove_file(p) };
+        if r.is_ok() {
+            info!("removed leftover {}", p.display());
+        }
+    };
+    let each = |dir: &Path, keep: &dyn Fn(&str) -> bool| {
+        for e in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+            if !keep(&e.file_name().to_string_lossy()) {
+                rm(&e.path());
+            }
+        }
+    };
+    // images/<name>/image.img.new (convert), tftp/broom-win/<name>/golden.vhdx.tmp (publish).
+    for e in std::fs::read_dir(images_dir()).into_iter().flatten().flatten() {
+        rm(&e.path().join("image.img.new"));
+    }
+    for e in std::fs::read_dir(tftp_dir().join("broom-win")).into_iter().flatten().flatten() {
+        rm(&e.path().join("golden.vhdx.tmp"));
+    }
+    // tftp/broom/<name>.new|.old (Linux publish swap); tftp/broom-stage.new-*|.old-* (stage bundle install).
+    each(&tftp_dir().join("broom"), &|n| !(n.ends_with(".new") || n.ends_with(".old")));
+    each(tftp_dir(), &|n| !(n.starts_with("broom-stage.new") || n.starts_with("broom-stage.old")));
+    // work/: bundle downloads, half-built exports.
+    each(&work_dir(), &|n| !(n.starts_with("broom-stage-") && n.ends_with(".tar.gz")));
+    each(&work_dir().join("export"), &|n| !n.ends_with(".new"));
+}
+
 /// Web admin embedded in the binary — deploy a single file, no static/ directory to ship.
 const INDEX_HTML: &str = include_str!("../static/index.html");
 /// Standalone login/setup page (auth.rs). Served at /login; unauthenticated page requests are redirected here.
@@ -183,6 +214,9 @@ pub struct AppState {
     pub net: Mutex<Vec<tokio::task::JoinHandle<()>>>,
     /// mac → unix time of its last PXE boot (menu choice /boot/start, or the Windows stage's driver query): see saw_pxe.
     pub pxe_seen: Mutex<std::collections::HashMap<String, u64>>,
+    /// mac → the IP its last menu choice came from (same entries as pxe_seen): with the DHCP server off this is how
+    /// new machines are found (Machines page).
+    pub pxe_ip: Mutex<std::collections::HashMap<String, String>>,
     /// mac → unix time Windows reported a boot WITHOUT a PXE boot just before (session not reset). Cleared by the
     /// next PXE boot. Shown on the Machines page.
     pub not_reset: Mutex<std::collections::HashMap<String, u64>>,
@@ -199,12 +233,17 @@ pub const PXE_MEMORY_S: u64 = 30 * 60;
 impl AppState {
     /// `mac` just went through PXE (menu choice / the stage's driver query). Older entries are dropped on the way:
     /// both callers are public endpoints, so the map must not grow with every MAC someone makes up.
-    pub fn saw_pxe(&self, mac: &str) {
+    pub fn saw_pxe(&self, mac: &str, ip: Option<&str>) {
         let now = now_secs();
         let mut seen = self.pxe_seen.lock().unwrap();
         seen.retain(|_, t| now.saturating_sub(*t) <= PXE_MEMORY_S);
         seen.insert(mac.to_string(), now);
-        drop(seen);
+        let mut ips = self.pxe_ip.lock().unwrap();
+        ips.retain(|m, _| seen.contains_key(m));
+        if let Some(ip) = ip {
+            ips.insert(mac.to_string(), ip.to_string());
+        }
+        drop((seen, ips));
         self.not_reset.lock().unwrap().remove(mac);
     }
 
@@ -242,6 +281,7 @@ async fn main() {
 
     migrate_old_layout();
     info!("data in {}", home().display());
+    clean_leftovers(); // after the HTTP bind: no other instance (and so no job) can be running
 
     // Preflight (root; kernel modules only warn) → stop if it fails. Network never configured → setup detects it and
     // seeds the DHCP config (dev: --skip-preflight skips both).
@@ -273,6 +313,7 @@ async fn main() {
         versions_lock: Mutex::new(()),
         net: Mutex::new(Vec::new()),
         pxe_seen: Mutex::new(std::collections::HashMap::new()),
+        pxe_ip: Mutex::new(std::collections::HashMap::new()),
         not_reset: Mutex::new(std::collections::HashMap::new()),
     });
     auth::init_setup_token(&state);

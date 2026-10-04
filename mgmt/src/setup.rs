@@ -118,13 +118,28 @@ fn detect_dns() -> Vec<String> {
         .unwrap_or_default()
 }
 
-fn detect_subnet(iface: &str) -> Option<String> {
+/// (network, netmask) of the interface's connected route, e.g. 10.0.0.0/23 → ("10.0.0.0", "255.255.254.0").
+fn detect_subnet(iface: &str) -> Option<(String, String)> {
     let out = sh(&format!(
         "ip -o route show dev {iface} scope link proto kernel 2>/dev/null"
     ));
-    out.split_whitespace()
-        .next()
-        .map(|cidr| cidr.split('/').next().unwrap_or(cidr).to_string())
+    cidr_parts(out.split_whitespace().next()?)
+}
+
+fn cidr_parts(cidr: &str) -> Option<(String, String)> {
+    let (net, prefix) = cidr.split_once('/').unwrap_or((cidr, "24"));
+    let p: u32 = prefix.parse().ok().filter(|p| *p <= 32)?;
+    let mask = if p == 0 { 0 } else { u32::MAX << (32 - p) };
+    Some((net.to_string(), std::net::Ipv4Addr::from(mask).to_string()))
+}
+
+#[cfg(test)]
+#[test]
+fn cidr_to_netmask() {
+    assert_eq!(cidr_parts("10.0.0.0/23"), Some(("10.0.0.0".into(), "255.255.254.0".into())));
+    assert_eq!(cidr_parts("192.168.1.0/24"), Some(("192.168.1.0".into(), "255.255.255.0".into())));
+    assert_eq!(cidr_parts("10.0.0.0"), Some(("10.0.0.0".into(), "255.255.255.0".into())), "no prefix → /24");
+    assert_eq!(cidr_parts("10.0.0.0/33"), None);
 }
 
 /// Read `--flag value` from args.
@@ -142,7 +157,9 @@ pub fn run(args: &[String]) {
     let (d_iface, d_ip, d_gw) = detect_iface_ip();
     let iface = flag(args, "--iface").or(d_iface);
     let ip = flag(args, "--ip").or(d_ip);
-    let subnet = flag(args, "--subnet").or_else(|| iface.as_deref().and_then(detect_subnet));
+    let detected = iface.as_deref().and_then(detect_subnet);
+    let subnet = flag(args, "--subnet").or_else(|| detected.as_ref().map(|(n, _)| n.clone()));
+    let netmask = detected.map(|(_, m)| m);
 
     let (iface, ip, subnet) = match (iface, ip, subnet) {
         (Some(i), Some(p), Some(s)) => (i, p, s),
@@ -185,6 +202,12 @@ pub fn run(args: &[String]) {
     seed("dhcp_iface", Some(iface), "--iface");
     seed("dhcp_server_ip", Some(ip), "--ip");
     seed("dhcp_subnet", Some(subnet), "--subnet");
+    // The seed is 255.255.255.0 in a new DB → the detected mask replaces it (a /23 LAN gets 255.255.254.0).
+    if flag(args, "--netmask").is_none() && database.get_config("dhcp_range_start", "").is_empty() {
+        if let Some(m) = &netmask {
+            database.set_config("dhcp_netmask", m).ok();
+        }
+    }
     if flag(args, "--mode").is_some() || database.get_config("dhcp_mode", "").is_empty() {
         database.set_config("dhcp_mode", mode).ok(); // normalized: full | off
     }

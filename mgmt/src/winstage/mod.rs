@@ -281,6 +281,9 @@ fn build_golden(raw: &str, out: &str, name: &str, steps: &mut crate::publish::St
     steps.go("convert raw→vhdx");
     let golden = format!("{out}/golden.vhdx");
     let tmp = format!("{golden}.tmp");
+    // The VHDX holds the raw's allocated blocks (holes stay out), next to the old golden until it replaces it.
+    let used = std::fs::metadata(raw).map(|m| std::os::unix::fs::MetadataExt::blocks(&m) * 512).unwrap_or(0);
+    crate::publish::need_space(Path::new(out), used, "building golden.vhdx")?;
     if let Err(e) = crate::disk::Source::file(Path::new(raw)).and_then(|src| crate::vhdx::write_dynamic(&src, &tmp)) {
         let _ = std::fs::remove_file(&tmp);
         return Err(e);

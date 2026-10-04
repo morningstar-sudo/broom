@@ -396,14 +396,14 @@ function setDns(csv){const l=document.getElementById('dns_list');if(!l)return;l.
   const v=(csv||'').split(',').map(s=>s.trim()).filter(Boolean);for(const x of (v.length?v:[''])) l.appendChild(dnsBox(x));dnsButton();}
 function getDns(){return [...document.querySelectorAll('#dns_list input.dns')].map(e=>e.value.trim()).filter(Boolean).join(',');}
 async function loadDhcp(){const c=await j('/api/dhcp');
-  ['mode','iface','server_ip','subnet','range_start','range_end','gateway'].forEach(k=>{const e=document.getElementById('dhcp_'+k);if(e)e.value=c[k]||'';});
+  ['mode','iface','server_ip','subnet','netmask','range_start','range_end','gateway'].forEach(k=>{const e=document.getElementById('dhcp_'+k);if(e)e.value=c[k]||'';});
   for(const k of ['ipxe_signed','strict_reset','rapid_commit','ipxe_fast','authoritative','send_hostname']){const e=document.getElementById('dhcp_'+k);if(e)e.checked=!!c[k];}
   setDns(c.dns);
   const ps=document.getElementById('pxe_srv');if(ps&&c.server_ip)ps.textContent=c.server_ip;
   const dm=document.getElementById('dhcp_mode');if(dm)dm.onchange=toggleFull;toggleFull();}
 function toggleFull(){const dm=document.getElementById('dhcp_mode');if(!dm)return;
   for(const id of ['full_only','full_only_opts']){const e=document.getElementById(id);if(e)e.style.display=dm.value==='full'?'':'none';}}
-async function applyDhcp(){const b={};['mode','iface','server_ip','subnet','range_start','range_end','gateway'].forEach(k=>b[k]=document.getElementById('dhcp_'+k).value);
+async function applyDhcp(){const b={};['mode','iface','server_ip','subnet','netmask','range_start','range_end','gateway'].forEach(k=>b[k]=document.getElementById('dhcp_'+k).value);
   for(const k of ['ipxe_signed','strict_reset','rapid_commit','ipxe_fast','authoritative','send_hostname']){const e=document.getElementById('dhcp_'+k);if(e)b[k]=e.checked?'1':'0';}
   b.dns=getDns();
   const m=document.getElementById('dhcp_msg');

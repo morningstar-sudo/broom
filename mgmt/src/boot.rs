@@ -105,7 +105,7 @@ pub async fn start(State(st): State<SharedState>, Query(q): Q) -> impl IntoRespo
     let (mac, ip, m) = client(&st, &q);
     if !mac.is_empty() {
         // Went through PXE: /api/booted (Windows) and /api/license compare against this.
-        st.saw_pxe(&mac);
+        st.saw_pxe(&mac, (ip != "?").then_some(ip.as_str()));
     }
     let host = m.and_then(|m| m.hostname);
     // Image names are [A-Za-z0-9_-]; keep only those (the value is logged and echoed into the iPXE script).
@@ -166,7 +166,8 @@ fn menu_script(images: &[MenuImage], timeout_s: u64, host: Option<&str>, lic: Op
     let mut targets = String::new();
     let mut default = None;
     for (i, img) in images.iter().enumerate() {
-        let label = format!("img_{}", sanitize(&img.name));
+        // By position, not by name: "win-11" and "win_11" would both become img_win_11 and boot the same target.
+        let label = format!("img{}", i + 1);
         let key = if i < 9 { format!("--key {} ", i + 1) } else { String::new() };
         items.push_str(&format!("item {key}{label} [{}] {}\n", i + 1, img.name));
         // The server logs the boot and returns the image's script (image names are URL-safe: [A-Za-z0-9_-]).
@@ -236,13 +237,6 @@ fn menu_script(images: &[MenuImage], timeout_s: u64, host: Option<&str>, lic: Op
     )
 }
 
-/// iPXE labels should only use [A-Za-z0-9_]. Other characters become '_'.
-fn sanitize(s: &str) -> String {
-    s.chars()
-        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::{linux_share_gb, menu_script, MenuImage};
@@ -264,11 +258,11 @@ mod tests {
         let s = menu_script(&[img("win-11", true), img("ubuntu", false)], 5, Some("FPS-43 $x|"), Some(3), true, false);
         assert!(s.starts_with("#!ipxe\n"));
         assert!(s.is_ascii(), "the iPXE font is ASCII only");
-        assert!(s.contains("item --key 1 img_win_11 [1] win-11\n"));
-        assert!(s.contains("item --key 2 img_ubuntu [2] ubuntu\n"));
-        assert!(s.contains("choose --default img_win_11 --timeout 5000 sel || goto shell"));
+        assert!(s.contains("item --key 1 img1 [1] win-11\n"));
+        assert!(s.contains("item --key 2 img2 [2] ubuntu\n"));
+        assert!(s.contains("choose --default img1 --timeout 5000 sel || goto shell"));
         // A choice goes through the server (boot log + the image's script).
-        assert!(s.contains(":img_win_11\nchain /boot/start?image=win-11&mac=${net0/mac}&ip=${net0/ip} || goto start\n"));
+        assert!(s.contains(":img1\nchain /boot/start?image=win-11&mac=${net0/mac}&ip=${net0/ip} || goto start\n"));
         assert!(s.contains("set menu-footer Host: FPS-43x|IP: ${net0/ip}|MAC: ${net0/mac}\n"));
         assert!(s.contains("set broom-host FPS-43x\n"));
         assert!(s.contains("set broom-lic 3\n"), "license generation, never the key");
@@ -333,7 +327,7 @@ mod tests {
     fn menu_secure_boot_footer_as_gap_lines() {
         let s = menu_script(&[img("win-11", true)], 5, Some("PC05"), None, true, true);
         assert!(s.is_ascii());
-        let item = s.find("item --key 1 img_win_11").unwrap();
+        let item = s.find("item --key 1 img1 ").unwrap();
         let head = s.find("item --gap Host : PC05\nitem --gap IP   : ${net0/ip}\nitem --gap MAC  : ${net0/mac}\n").unwrap();
         assert!(head < item && s.contains("item --gap Arrows/number to select, Enter to boot\n"));
         assert!(!menu_script(&[img("a", false)], 5, None, None, false, false).contains("item --gap"));

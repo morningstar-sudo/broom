@@ -165,7 +165,7 @@ struct NameBody {
 /// POST /api/drivers/upload-start {name} — fresh upload folder.
 async fn upload_start(Json(b): Json<NameBody>) -> Result<Json<serde_json::Value>, ApiError> {
     if !valid_name(&b.name) {
-        return Err(bad("package name may only contain letters/digits/_/-"));
+        return Err(bad("package name: 1-64 letters/digits/_/-"));
     }
     let dir = upload_dir(&b.name);
     let _ = tokio::fs::remove_dir_all(&dir).await;
@@ -303,7 +303,7 @@ async fn for_machine(State(st): State<SharedState>, Query(q): Query<ForQuery>, b
     // "not reset" check in license.rs). Refreshed here because a golden download can outlast the window opened at
     // /boot/start; it grants nothing /boot/start doesn't (both are open to any client). It never re-arms a key:
     // that is decided on the server (rearm_changed), never by what a client sends.
-    st.saw_pxe(&mac);
+    st.saw_pxe(&mac, None);
     let who = m.and_then(|m| m.hostname).unwrap_or_else(|| mac.clone());
     tracing::info!(
         "client {who} drivers: {}",

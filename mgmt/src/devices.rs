@@ -204,7 +204,7 @@ async fn bulk(State(st): State<SharedState>, Json(b): Json<BulkBody>) -> Result<
         }
         "wake" => {
             for m in &targets {
-                crate::wol::wake(&m.mac).map_err(|e| bad(format!("{}: {e}", who(m))))?;
+                crate::wol::wake(&*st.db, &m.mac).map_err(|e| bad(format!("{}: {e}", who(m))))?;
             }
         }
         "delete" => {

@@ -19,7 +19,12 @@ pub async fn serve(sock: UdpSocket, server: Ipv4Addr, iface: String) {
     serve_inner(sock, server, iface).await
 }
 
+/// Transfers at once. Each holds a socket for up to ~10 s (retries): a flood of (spoofed) RRQs must not use up the
+/// process's file descriptors (HTTP and everything else would fail). A room booting at once stays far below it.
+const MAX_TRANSFERS: usize = 64;
+
 async fn serve_inner(sock: UdpSocket, server: Ipv4Addr, iface: String) {
+    let slots = std::sync::Arc::new(tokio::sync::Semaphore::new(MAX_TRANSFERS));
     let mut buf = [0u8; 1500];
     loop {
         let Ok((n, peer)) = sock.recv_from(&mut buf).await else { continue };
@@ -27,9 +32,15 @@ async fn serve_inner(sock: UdpSocket, server: Ipv4Addr, iface: String) {
         if op(&buf[..n]) != RRQ {
             continue;
         }
+        // All slots busy → drop the request (the client retries its RRQ).
+        let Ok(slot) = slots.clone().try_acquire_owned() else {
+            tracing::debug!("tftp {peer}: {MAX_TRANSFERS} transfers running, request dropped");
+            continue;
+        };
         let req = buf[..n].to_vec();
         let iface = iface.clone();
         tokio::spawn(async move {
+            let _slot = slot;
             if let Err(e) = transfer(&req, peer, server, &iface).await {
                 tracing::warn!("tftp {peer}: {e}");
             }

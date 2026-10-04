@@ -14,7 +14,8 @@ $s = "$env:SystemRoot\Setup\Scripts\broom-bootorder.ps1"
 $a = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument "-NoProfile -ExecutionPolicy Bypass -File $s"
 $t1 = New-ScheduledTaskTrigger -AtStartup
 $t2 = New-ScheduledTaskTrigger -Once -At (Get-Date) -RepetitionInterval (New-TimeSpan -Minutes 5) -RepetitionDuration (New-TimeSpan -Days 3650)
-Register-ScheduledTask -TaskName BroomBootOrder -Action $a -Trigger $t1,$t2 -User SYSTEM -RunLevel Highest -Force | Out-Null
+try { Register-ScheduledTask -TaskName BroomBootOrder -Action $a -Trigger $t1,$t2 -User SYSTEM -RunLevel Highest -Force -ErrorAction Stop | Out-Null }
+catch { step "boot order task FAILED: $_ (PXE may not stay first, boots are not reported)" }
 & powershell -NoProfile -ExecutionPolicy Bypass -File $s
 # Drivers (Drivers page): the stage put this machine's packages in broom\drivers -> install them into base.
 # Copied to a local folder first (pnputil wants a normal path); only drivers matching real devices get installed.
@@ -36,7 +37,10 @@ if ([IO.Directory]::Exists($dd)) {
 $h = $v.Path + 'broom\host.txt'
 if ([IO.File]::Exists($h)) {
   $n = [IO.File]::ReadAllText($h).Trim()
-  if ($n -and ($n -ne $env:COMPUTERNAME)) { step "machine name -> $n"; Rename-Computer -NewName $n -Force -ErrorAction SilentlyContinue }
+  if ($n -and ($n -ne $env:COMPUTERNAME)) {
+    step "machine name -> $n"
+    try { Rename-Computer -NewName $n -Force -ErrorAction Stop } catch { step "rename FAILED: $_ (base keeps the old name)" }
+  }
 }
 # License key (Machines page): the server picks it by this machine's IP and hands it out once, right after a PXE
 # boot (403 = none).

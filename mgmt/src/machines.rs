@@ -15,7 +15,6 @@ use crate::SharedState;
 pub fn routes() -> Router<SharedState> {
     Router::new()
         .route("/api/machines", get(list).post(add))
-        .route("/api/machines/assign", post(assign))
         .route("/api/machines/group", post(set_group))
 }
 
@@ -104,19 +103,4 @@ async fn add(
     let id = st.db.add_machine(&m.mac, m.ip.as_deref(), m.hostname.as_deref()).map_err(|e| (StatusCode::BAD_REQUEST, e))?;
     tracing::info!("machine registered - mac {} - ip {} - hostname {}", m.mac, m.ip.as_deref().unwrap_or("-"), m.hostname.as_deref().unwrap_or("-"));
     Ok(Json(serde_json::json!({"ok": true, "id": id})))
-}
-
-#[derive(Deserialize)]
-struct Assign {
-    machine_id: i64,
-    image_id: i64,
-}
-
-async fn assign(
-    State(st): State<SharedState>,
-    Json(b): Json<Assign>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    st.db.assign_image(b.machine_id, b.image_id).map_err(|e| (StatusCode::BAD_REQUEST, e))?;
-    tracing::info!("machine {} assigned image {}", b.machine_id, b.image_id);
-    Ok(ok())
 }

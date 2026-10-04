@@ -446,13 +446,6 @@ impl Db for Sqlite {
         Ok(c.last_insert_rowid())
     }
 
-    fn assign_image(&self, machine_id: i64, image_id: i64) -> DbResult<()> {
-        self.c()
-            .execute("UPDATE machines SET image_id=?1 WHERE id=?2", [image_id, machine_id])
-            .map(|_| ())
-            .map_err(e)
-    }
-
     fn leases(&self) -> DbResult<Vec<Lease>> {
         let c = self.c();
         let mut s = c.prepare("SELECT mac,ip,hostname,expires,source FROM leases").map_err(e)?;
@@ -557,7 +550,7 @@ mod tests {
         assert!(db.image(a).unwrap().is_none());
 
         let m = db.add_machine("aa:bb:cc:dd:ee:01", Some("10.0.0.50"), Some("PC01")).unwrap();
-        db.assign_image(m, b).unwrap();
+        db.set_machine_image(m, Some(b)).unwrap();
         assert_eq!(db.machines().unwrap()[0].image_id, Some(b));
 
         // License: armed → taken once → re-armed → taken again; the key never reaches JSON.

@@ -626,14 +626,15 @@ pub async fn start(st: &SharedState) -> Result<String, String> {
     // succeed do we stop the old listeners — a rejected config never leaves the café with no DHCP/TFTP.
     let dhcp = if full { Some(bind(67, true)?) } else { None };
     let tftp = bind(69, false)?;
-    let old: Vec<_> = std::mem::take(&mut *st.net.lock().unwrap());
+    let mut handles = vec![tokio::spawn(crate::tftp::serve(tftp, cfg.server, cfg.iface.clone()))];
+    handles.extend(dhcp.map(|d| tokio::spawn(serve(d, 67, st.clone()))));
+    // Swap in ONE step: whatever was running (also the listeners of an Apply that ran at the same time) is stopped,
+    // so two Applies can never leave an extra listener behind with an old config.
+    let old = std::mem::replace(&mut *st.net.lock().unwrap(), handles);
     for h in old {
         h.abort();
         let _ = h.await;
     }
-    let mut handles = vec![tokio::spawn(crate::tftp::serve(tftp, cfg.server, cfg.iface.clone()))];
-    handles.extend(dhcp.map(|d| tokio::spawn(serve(d, 67, st.clone()))));
-    st.net.lock().unwrap().extend(handles);
     let on = if cfg.iface.is_empty() { "all interfaces" } else { &cfg.iface };
     Ok(if full {
         format!("DHCP {}-{} on {on} (server {}), TFTP :69", cfg.start, cfg.end, cfg.server)

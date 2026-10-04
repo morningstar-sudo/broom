@@ -52,6 +52,22 @@ pub(crate) fn free_bytes(path: &Path) -> u64 {
     (s.f_bavail as u64).saturating_mul(s.f_frsize as u64)
 }
 
+/// Refuse a big write up front when the filesystem of `dir` can't take `need` bytes + 1 GiB (instead of failing hours
+/// later on a full disk, which also starves the DB and every other job). Unknown free space → allowed.
+pub(crate) fn need_space(dir: &Path, need: u64, what: &str) -> Result<(), String> {
+    let free = free_bytes(dir);
+    let want = need.saturating_add(1 << 30);
+    if free != 0 && free < want {
+        return Err(format!(
+            "{what} needs ~{:.1} GB free in {}, only {:.1} GB",
+            want as f64 / 1e9,
+            dir.display(),
+            free as f64 / 1e9
+        ));
+    }
+    Ok(())
+}
+
 /// Does the img fit in RAM for zram: needs avail >= img + reserve. avail=0 (unreadable) → allow.
 fn zram_fits(img: u64, avail: u64, reserve: u64) -> bool {
     avail == 0 || img.saturating_add(reserve) <= avail

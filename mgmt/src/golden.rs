@@ -149,6 +149,9 @@ fn golden_from(dir: &Path, dest: &Path) -> Result<(), String> {
         if sz > MAX_GOLDEN {
             return Err(format!("golden virtual size {sz} bytes is above the {MAX_GOLDEN} limit"));
         }
+        // The raw holds about the data stored in the vmdk files (zero grains stay holes).
+        let data: u64 = walk(dir).iter().filter(|p| ext(p) == "vmdk").filter_map(|p| std::fs::metadata(p).ok()).map(|m| m.len()).sum();
+        crate::publish::need_space(dest.parent().unwrap_or(dir), data, "converting the vmdk")?;
         tracing::info!("golden: converting {}", v.display());
         crate::vmdk::to_raw(&v, dest)
     } else if let Some(r) = raw {

@@ -39,7 +39,7 @@ struct MachineStatus {
     not_reset: Option<u64>,
 }
 
-/// Machines = registered (machines table) + discovered via DHCP (leases table, dhcp.rs).
+/// Machines = registered (machines table) + discovered via DHCP (leases table, dhcp.rs) or a PXE boot (pxe_ip).
 async fn status(State(st): State<SharedState>) -> Json<Vec<MachineStatus>> {
     // (ip, hostname, registered) by mac.
     let mut map: HashMap<String, (Option<String>, Option<String>, bool)> = HashMap::new();
@@ -61,6 +61,12 @@ async fn status(State(st): State<SharedState>) -> Json<Vec<MachineStatus>> {
                 }
             })
             .or_insert((ip, host, false));
+    }
+
+    // 3. Seen PXE-booting (boot menu choice) — how new machines show up when the LAN's own DHCP serves them.
+    let seen = st.pxe_ip.lock().unwrap().clone();
+    for (mac, ip) in seen {
+        map.entry(mac).and_modify(|e| { if e.0.is_none() { e.0 = Some(ip.clone()); } }).or_insert((Some(ip), None, false));
     }
 
     // PARALLEL ping (JoinSet + spawn_blocking): 30 offline machines waiting 1 s in sequence = ~30 s
@@ -175,8 +181,8 @@ struct WakeBody {
     mac: String,
 }
 
-async fn wake(Json(b): Json<WakeBody>) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    wol::wake(&b.mac).map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+async fn wake(State(st): State<SharedState>, Json(b): Json<WakeBody>) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    wol::wake(&*st.db, &b.mac).map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
     tracing::info!(mac = %b.mac, "wake-on-LAN sent");
     Ok(Json(serde_json::json!({"ok": true})))
 }

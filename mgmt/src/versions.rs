@@ -162,11 +162,11 @@ fn snapshot_at(root: &Path, img: &Path, name: &str, label: &str) -> Result<(Mani
             None => chunks.push(ZERO.to_string()),
             Some(h) => {
                 let p = chunk_path(root, &h);
-                if !p.exists() {
+                // Reused only when the stored chunk has the right length: a chunk cut short by a power loss under its
+                // final name would otherwise poison every version that shares it.
+                if std::fs::metadata(&p).map(|m| m.len()).ok() != Some(buf.len() as u64) {
                     std::fs::create_dir_all(p.parent().unwrap()).map_err(e("mkdir chunks"))?;
-                    let tmp = p.with_extension("tmp");
-                    std::fs::write(&tmp, &buf).map_err(e("write chunk"))?;
-                    std::fs::rename(&tmp, &p).map_err(e("store chunk"))?;
+                    write_durable(&p, &buf).map_err(e("store chunk"))?;
                     new += 1;
                 }
                 chunks.push(h);
@@ -178,10 +178,18 @@ fn snapshot_at(root: &Path, img: &Path, name: &str, label: &str) -> Result<(Mani
     let n = list_at(root, name, None).first().and_then(|m| m.version[1..].parse::<u64>().ok()).unwrap_or(0) + 1;
     let created = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
     let m = Manifest { version: format!("v{n}"), label: label.to_string(), created, size, chunk_size: CHUNK, chunks, diff: None };
-    let tmp = dir.join(format!("{}.json.tmp", m.version));
-    std::fs::write(&tmp, serde_json::to_vec(&m).unwrap()).map_err(e("write manifest"))?;
-    std::fs::rename(&tmp, dir.join(format!("{}.json", m.version))).map_err(e("store manifest"))?;
+    write_durable(&dir.join(format!("{}.json", m.version)), &serde_json::to_vec(&m).unwrap()).map_err(e("store manifest"))?;
     Ok((Manifest { chunks: Vec::new(), ..m }, new))
+}
+
+/// Write `data` as `p`: a temp file, flushed to disk, then renamed — after a power loss `p` is either whole or absent.
+fn write_durable(p: &Path, data: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    let tmp = p.with_extension("tmp");
+    let mut f = File::create(&tmp)?;
+    f.write_all(data)?;
+    f.sync_all()?;
+    std::fs::rename(&tmp, p)
 }
 
 fn load(root: &Path, name: &str, version: &str) -> Result<Manifest, String> {
@@ -213,7 +221,7 @@ fn clone_at(root: &Path, from: &str, version: &str, to: &str, label: &str) -> Re
     }
     std::fs::create_dir_all(&dir).map_err(e("mkdir manifests"))?;
     let m = Manifest { version: "v1".into(), label: label.to_string(), ..m };
-    std::fs::write(dir.join("v1.json"), serde_json::to_vec(&m).unwrap()).map_err(e("write manifest"))
+    write_durable(&dir.join("v1.json"), &serde_json::to_vec(&m).unwrap()).map_err(e("write manifest"))
 }
 
 /// `version` → a new file `dst` (export), image.img untouched.
@@ -279,6 +287,11 @@ fn gc(root: &Path) -> Result<usize, String> {
     let mut used = std::collections::HashSet::new();
     for img in std::fs::read_dir(root.join("manifests")).into_iter().flatten().flatten() {
         for mf in std::fs::read_dir(img.path()).into_iter().flatten().flatten() {
+            // Only manifests (a leftover vN.json.tmp of an interrupted snapshot is not one); an unreadable manifest
+            // still stops gc — its chunks may be in use.
+            if mf.path().extension().is_none_or(|x| x != "json") {
+                continue;
+            }
             let m: Manifest = serde_json::from_slice(&std::fs::read(mf.path()).map_err(e("read manifest"))?)
                 .map_err(e(&mf.path().display().to_string()))?;
             used.extend(m.chunks);
@@ -302,6 +315,26 @@ mod tests {
 
     fn hash_file(p: &Path) -> String {
         blake3::hash(&std::fs::read(p).unwrap()).to_hex().to_string()
+    }
+
+    #[test]
+    fn power_loss_leftovers() {
+        let d = std::env::temp_dir().join("broom_versions_leftovers");
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let (root, img) = (d.join("storage"), d.join("image.img"));
+        std::fs::write(&img, vec![7u8; 1000]).unwrap();
+        let (v1, _) = snapshot_at(&root, &img, "img", "").unwrap();
+        // A chunk cut short under its final name → the next snapshot stores it again instead of reusing it.
+        let h = load(&root, "img", &v1.version).unwrap().chunks[0].clone();
+        std::fs::write(chunk_path(&root, &h), b"").unwrap();
+        assert_eq!(snapshot_at(&root, &img, "img", "").unwrap().1, 1);
+        assert_eq!(std::fs::metadata(chunk_path(&root, &h)).unwrap().len(), 1000);
+        // A manifest left half-written as .tmp doesn't stop gc (nor shows up as a version).
+        std::fs::write(manifest_dir(&root, "img").join("v3.tmp"), b"{").unwrap();
+        assert!(gc(&root).is_ok());
+        assert_eq!(list_at(&root, "img", None).len(), 2);
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]

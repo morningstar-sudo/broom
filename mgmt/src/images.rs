@@ -70,8 +70,9 @@ struct NewImage {
     cache_mode: Option<String>,
 }
 
+/// Image / package name: letters, digits, `_`, `-`, at most 64 (the boot menu passes it on as is, /boot/start keeps 64).
 pub(crate) fn valid_name(name: &str) -> bool {
-    !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    !name.is_empty() && name.len() <= 64 && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
 }
 
 async fn create(
@@ -79,7 +80,7 @@ async fn create(
     Json(b): Json<NewImage>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     if !valid_name(&b.name) {
-        return Err((StatusCode::BAD_REQUEST, "name may only contain letters/digits/_/-".into()));
+        return Err((StatusCode::BAD_REQUEST, "name: 1-64 letters/digits/_/-".into()));
     }
     if b.os != "linux" && b.os != "windows" {
         return Err((StatusCode::BAD_REQUEST, "os must be 'linux' or 'windows'".into()));
@@ -252,7 +253,7 @@ struct FromVersionBody {
 async fn from_version(State(st): State<SharedState>, Json(b): Json<FromVersionBody>) -> Result<Json<serde_json::Value>, ApiError> {
     let src = st.db.image(b.id).map_err(ise)?.ok_or((StatusCode::NOT_FOUND, format!("image {} not found", b.id)))?;
     if !valid_name(&b.name) {
-        return Err((StatusCode::BAD_REQUEST, "name may only contain letters/digits/_/-".into()));
+        return Err((StatusCode::BAD_REQUEST, "name: 1-64 letters/digits/_/-".into()));
     }
     let id = st
         .db
@@ -373,7 +374,7 @@ struct UploadName {
 /// Check the image can take an upload now: exists (it has the os) + no job running on it.
 fn upload_ready(st: &SharedState, name: &str) -> Result<(), ApiError> {
     if !valid_name(name) {
-        return Err((StatusCode::BAD_REQUEST, "name may only contain letters/digits/_/-".into()));
+        return Err((StatusCode::BAD_REQUEST, "name: 1-64 letters/digits/_/-".into()));
     }
     if st.db.image_by_name(name).map_err(ise)?.is_none() {
         return Err((StatusCode::BAD_REQUEST, "create the image first (POST /api/images), then upload".into()));
@@ -478,26 +479,30 @@ fn spawn_publish(st: &SharedState, name: String, upload: Option<std::path::PathB
             crate::golden::prepare_golden(&dir, &crate::images_dir().join(name).join("image.img"))?;
             st.db.set_active_version(name_id(st, name)?, None)?; // new golden = no version yet
         }
-        let msg = crate::publish::run_publish(st, name, steps)?;
+        let published = crate::publish::run_publish(st, name, steps);
         if !first {
-            return Ok(msg);
+            return published;
         }
-        // First golden of this image → keep it as v1: there is always a version to roll back to.
-        // Clients can boot already; a failed snapshot only gets a warning.
+        // First golden of this image → keep it as v1: there is always a version to roll back to — also when the
+        // publish failed (a later Publish has no upload left to take it from). A failed snapshot only gets a warning.
         steps.go("snapshot v1");
         let first_snap = {
             let _g = st.versions_lock.lock().unwrap_or_else(|p| p.into_inner());
             crate::versions::snapshot(name, "first upload")
         };
-        match first_snap {
+        let saved = match first_snap {
             Ok((m, _)) => {
                 st.db.set_active_version(name_id(st, name)?, Some(&m.version))?;
-                Ok(format!("{msg}; saved as {}", m.version))
+                format!("saved as {}", m.version)
             }
             Err(e) => {
                 tracing::warn!("image {name}: snapshot v1 failed: {e}");
-                Ok(format!("{msg}; ⚠ snapshot v1 failed: {e}"))
+                format!("⚠ snapshot v1 failed: {e}")
             }
+        };
+        match published {
+            Ok(msg) => Ok(format!("{msg}; {saved}")),
+            Err(e) => Err(format!("{e} (upload {saved})")),
         }
     })
 }
@@ -575,11 +580,15 @@ async fn set_cache_mode(
         return Err((StatusCode::BAD_REQUEST, "mode must be disk|zram".into()));
     }
     let name = name_of(&st, b.id)?;
-    st.db.set_cache_mode(b.id, &b.mode).map_err(ise)?;
-    tracing::info!("image {name}: cache mode → {}", b.mode);
-    // Republish in the BACKGROUND so backing/target follow the new cache_mode (zram dd of the img can take long).
-    // publish_iscsi falls back zram→disk by itself (DB updated) on RAM overflow → the image doesn't get stuck.
-    spawn_publish(&st, name, None)?;
+    // Changed INSIDE the job, then republished in the background so backing/target follow it (zram dd of the img can
+    // take long): with another job running this is refused (409) and the mode stays as it was — never a new mode in
+    // the DB without the publish that applies it. publish_iscsi falls back zram→disk by itself on RAM overflow.
+    let (id, mode) = (b.id, b.mode);
+    spawn_job(&st, name, "publish", move |st, name, steps| {
+        st.db.set_cache_mode(id, &mode)?;
+        tracing::info!("image {name}: cache mode → {mode}");
+        crate::publish::run_publish(st, name, steps)
+    })?;
     Ok(Json(serde_json::json!({"ok": true, "async": true})))
 }
 
