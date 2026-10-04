@@ -305,42 +305,93 @@ mod tests {
         let _ = std::fs::remove_file(child);
     }
 
-    /// Stage disk choice (cut from STAGE_SCRIPT, fake /sys/block): a registered machine with ONE internal disk is
-    /// partitioned by itself; USB disks never count; anything else asks — Enter / an unknown name = reboot untouched;
-    /// an existing BROOMWIN is reused without asking.
+    /// Stage disk choice (cut from STAGE_SCRIPT, fake /sys/block with GPT partition names): a registered machine with
+    /// ONE internal disk is partitioned by itself; USB disks never count; anything else asks — Enter / an unknown name
+    /// = reboot untouched. The Broom SSD is known by its partition names: Windows' layout is reused, one laid out by a
+    /// Linux boot only gets formatted, an older Linux-only layout is laid out again; a late disk is looked for.
     #[test]
     fn stage_disk_choice() {
         let s = super::STAGE_SCRIPT;
         let part = &s[s.find("part(){").unwrap()..s.find("# end disk choice").unwrap()];
-        let run = |name: &str, disks: &[(&str, bool)], reg: &str, answer: &str, broomwin: &str| {
+        // disks: name ("+" suffix = shows up only after the stage's pause), usb, partition names ("" = none) and
+        // whether p2 already holds the BROOMWIN filesystem.
+        let run = |name: &str, disks: &[(&str, bool, &[&str], bool)], reg: &str, answer: &str| {
             let d = std::env::temp_dir().join(format!("broom_t_disk_{name}"));
             let _ = std::fs::remove_dir_all(&d);
             std::fs::create_dir_all(d.join("block")).unwrap();
-            for (n, usb) in disks {
+            let mut ntfs = Vec::new();
+            for (n, usb, parts, formatted) in disks {
+                let (n, late) = n.strip_suffix('+').map_or((*n, false), |n| (n, true));
                 let dev = d.join(if *usb { "devices/pci0/usb1/1-1" } else { "devices/pci0/ata1" }).join(n);
                 std::fs::create_dir_all(dev.join("device")).unwrap();
                 std::fs::write(dev.join("removable"), "0\n").unwrap(); // USB disks often say 0 too
                 std::fs::write(dev.join("size"), "500118192\n").unwrap();
                 std::fs::write(dev.join("device/model"), "TestDisk\n").unwrap();
-                std::os::unix::fs::symlink(&dev, d.join("block").join(n)).unwrap();
+                for (i, pname) in parts.iter().enumerate() {
+                    std::fs::create_dir_all(dev.join(format!("{n}{}", i + 1))).unwrap();
+                    std::fs::write(dev.join(format!("{n}{}/uevent", i + 1)), format!("DEVTYPE=partition\nPARTN={}\nPARTNAME={pname}\n", i + 1)).unwrap();
+                }
+                if *formatted {
+                    ntfs.push(format!("/dev/{n}2"));
+                }
+                if late {
+                    std::fs::write(d.join("late"), format!("ln -s {} {}\n", dev.display(), d.join("block").join(n).display())).unwrap();
+                } else {
+                    std::os::unix::fs::symlink(&dev, d.join("block").join(n)).unwrap();
+                }
             }
             std::fs::write(d.join("answer"), format!("{answer}\n")).unwrap();
+            let lbl = format!("lbl(){{ case \" {} \" in *\" $1 \"*) echo BROOMWIN;; esac; }}", ntfs.join(" "));
             let body = part
-                .replace("lbl(){ blkid -s LABEL -o value \"$1\" 2>/dev/null; }", &format!("lbl(){{ [ \"$1\" = \"/dev/{broomwin}2\" ] && echo BROOMWIN; }}"))
+                .replace("sleep 5;", &format!("[ -f {0}/late ] && sh {0}/late;", d.display()))
+                .replace("lbl(){ blkid -s LABEL -o value \"$1\" 2>/dev/null; }", &lbl)
                 .replace("SYSB=/sys/block; CON=/dev/console", &format!("SYSB={}/block; CON=/dev/null", d.display()))
                 .replace("read -r ans < $CON", &format!("read -r ans < {}/answer", d.display()));
-            let sh = format!("REG={reg}\nlog(){{ :; }}; die(){{ echo DIE; exit; }}; restart(){{ echo RESTART; exit; }}\n{body}\necho \"DISK $disk $NEWDISK\"");
+            let sh = format!("REG={reg}; LX=50\nlog(){{ :; }}; die(){{ echo DIE; exit; }}; restart(){{ echo RESTART; exit; }}\n{body}\necho \"DISK $disk ${{NEWDISK:--}} ${{FORMAT:--}}\"");
             let o = stage_sh().args(["-c", &sh]).output().unwrap();
             let _ = std::fs::remove_dir_all(&d);
             String::from_utf8_lossy(&o.stdout).trim().to_string()
         };
-        assert_eq!(run("a", &[("sda", false), ("sdc", true)], "1", "", "-"), "DISK sda 1", "registered, one internal disk (USB ignored)");
-        assert_eq!(run("b", &[("sda", false)], "", "", "-"), "RESTART", "unknown machine + Enter → untouched");
-        assert_eq!(run("c", &[("sda", false)], "", "sda", "-"), "DISK sda 1", "unknown machine, typed");
-        assert_eq!(run("d", &[("sda", false), ("sdb", false)], "1", "sdb", "-"), "DISK sdb 1", "two disks → asked");
-        assert_eq!(run("e", &[("sda", false), ("sdb", false)], "1", "sdz", "-"), "RESTART", "not one of the listed disks");
-        assert_eq!(run("f", &[("sda", false), ("sdb", false)], "", "", "sdb"), "DISK sdb", "existing BROOMWIN reused, no question");
-        assert_eq!(run("g", &[("sdc", true)], "1", "", "-"), "DIE", "only a USB disk → no local disk");
+        const NONE: &[&str] = &[];
+        const WIN: &[&str] = &["BROOMEFI", "BROOMWIN"];
+        const ALL: &[&str] = &["BROOMEFI", "BROOMWIN", "broomwb", "broomcache"];
+        const OLD_LINUX: &[&str] = &["broomwb", "broomcache"];
+        const OTHER: &[&str] = &["EFI system partition", "Basic data partition"];
+        assert_eq!(run("a", &[("sda", false, NONE, false), ("sdc", true, NONE, false)], "1", ""), "DISK sda 1 -", "registered, one internal disk (USB ignored)");
+        assert_eq!(run("b", &[("sda", false, NONE, false)], "", ""), "RESTART", "unknown machine + Enter → untouched");
+        assert_eq!(run("c", &[("sda", false, NONE, false)], "", "sda"), "DISK sda 1 -", "unknown machine, typed");
+        assert_eq!(run("d", &[("sda", false, NONE, false), ("sdb", false, NONE, false)], "1", "sdb"), "DISK sdb 1 -", "two disks → asked");
+        assert_eq!(run("e", &[("sda", false, NONE, false), ("sdb", false, NONE, false)], "1", "sdz"), "RESTART", "not one of the listed disks");
+        assert_eq!(run("f", &[("sda", false, OTHER, false), ("sdb", false, WIN, true)], "", ""), "DISK sdb - -", "Windows layout reused, no question");
+        assert_eq!(run("g", &[("sdc", true, NONE, false)], "1", ""), "DIE", "only a USB disk → no local disk");
+        assert_eq!(run("h", &[("sda", false, NONE, false), ("sdb+", false, WIN, true)], "1", ""), "DISK sdb - -", "late Broom SSD found on the second look");
+        assert_eq!(run("i", &[("sda", false, NONE, false), ("sdb+", false, NONE, false)], "1", ""), "RESTART", "a second disk appeared → asked, not wiped");
+        // Shared with the Linux side.
+        assert_eq!(run("j", &[("sda", false, OTHER, false), ("sdb", false, ALL, false)], "", ""), "DISK sdb - 1", "laid out by Linux → only formatted");
+        assert_eq!(run("k", &[("sda", false, ALL, true)], "1", ""), "DISK sda - -", "shared layout, Windows part ready");
+        assert_eq!(run("l", &[("sda", false, OTHER, false), ("sdb", false, OLD_LINUX, false)], "", ""), "DISK sdb 1 -", "older Linux-only layout → laid out again, no question");
+    }
+
+    /// The Broom SSD layout: Windows gets what the Linux share leaves; no Linux share (or < 32 GB left for Windows)
+    /// → two partitions only.
+    #[test]
+    fn stage_ssd_layout() {
+        let s = super::STAGE_SCRIPT;
+        let f = &s[s.find("layout(){").unwrap()..s.find("\nscan\n").unwrap()];
+        let run = |sectors: u64, lx: u32| {
+            let d = std::env::temp_dir().join(format!("broom_t_layout_{sectors}_{lx}"));
+            std::fs::create_dir_all(d.join("sda")).unwrap();
+            std::fs::write(d.join("sda/size"), format!("{sectors}\n")).unwrap();
+            let o = stage_sh().args(["-c", &format!("SYSB={}; LX={lx}\n{f}\nlayout sda", d.display())]).output().unwrap();
+            let _ = std::fs::remove_dir_all(&d);
+            String::from_utf8_lossy(&o.stdout).to_string()
+        };
+        let gib = 2097152u64; // sectors
+        let both = run(500 * gib, 55);
+        assert!(both.contains("size=444GiB, type=EBD0") && both.contains("size=30GiB, name=broomwb") && both.ends_with("name=broomcache\n"), "{both}");
+        let win = run(500 * gib, 0);
+        assert!(!win.contains("broomwb") && win.lines().count() == 3, "{win}");
+        assert!(!run(80 * gib, 55).contains("broomwb"), "80 GB disk: Windows would get < 32 GB → no Linux part");
     }
 
     /// Stage vs server golden.sha256 before downloading (cut from STAGE_SCRIPT, wget mocked by a list of answers,
@@ -584,6 +635,79 @@ mod tests {
         assert_eq!(run(false), ("OK".into(), true, true, true));
         let (out, _, sum_ok, old_gone) = run(true);
         assert_eq!((out.as_str(), sum_ok, old_gone), ("DIE", false, true), "short golden never accepted");
+    }
+
+    /// Image folders (cut from STAGE_SCRIPT, wget mocked): the booting image's set comes to the top of broom\, the
+    /// previous one is parked in img.<name>\ (its unfinished session dropped); parked images the server no longer
+    /// lists (or of another version) are removed — none when the server doesn't answer; a pre-folders disk keeps its
+    /// top set as this image's.
+    #[test]
+    fn stage_image_folders() {
+        let s = super::STAGE_SCRIPT;
+        let part = &s[s.find("# 0. Every Windows image").unwrap()..s.find("# 1. Golden hash mismatch").unwrap()];
+        let run = |tag: &str, files: &[(&str, &str)], name: &str, list: Option<&str>| {
+            let d = std::env::temp_dir().join(format!("broom_t_folders_{tag}"));
+            let _ = std::fs::remove_dir_all(&d);
+            for (f, v) in files {
+                let p = d.join("b").join(f);
+                std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+                std::fs::write(p, v).unwrap();
+            }
+            std::fs::create_dir_all(d.join("b")).unwrap();
+            let wget = match list {
+                Some(l) => format!("wget(){{ printf '{l}' > \"$3\"; }}"),
+                None => "wget(){ return 4; }".into(),
+            };
+            let sh = format!(
+                "B={d}/b; NAME={name}; SRV=x\nlog(){{ :; }}; configure_networking(){{ :; }}; {wget}\n{body}",
+                d = d.display(),
+                body = part.replace("/run/broom-cache-list", &format!("{}/list", d.display()))
+            );
+            assert!(stage_sh().args(["-c", &sh]).status().unwrap().success());
+            let rd = |f: &str| std::fs::read_to_string(d.join("b").join(f)).ok();
+            let out = (rd("golden.vhdx"), rd("img.win10/golden.vhdx"), rd("img.old/golden.vhdx"), rd("child.vhdx"), rd("active.txt"));
+            let _ = std::fs::remove_dir_all(&d);
+            out
+        };
+        let s = |v: &str| Some(v.to_string());
+        // A disk from before image folders: its top set is taken as this image's.
+        assert_eq!(run("old", &[("golden.vhdx", "W11")], "win11", None), (s("W11"), None, None, None, s("win11\n")));
+        // win10 at the top, win11 parked → swapped; win10's last session dropped.
+        let swap = [
+            ("active.txt", "win10\n"), ("golden.vhdx", "W10"), ("golden.sha256", "h10"), ("child.vhdx", "session"),
+            ("img.win11/golden.vhdx", "W11"), ("img.win11/golden.sha256", "h11"), ("img.old/golden.vhdx", "OLD"), ("img.old/golden.sha256", "h0"),
+        ];
+        assert_eq!(run("swap", &swap, "win11", None), (s("W11"), s("W10"), s("OLD"), None, s("win11\n")), "no answer → nothing removed");
+        // The server lists win10 (same version) but no longer "old" → old removed, win10 kept.
+        assert_eq!(run("prune", &swap, "win11", Some("win10 h10\\nwin11 h11\\n")), (s("W11"), s("W10"), None, None, s("win11\n")));
+        // win10 republished meanwhile (other hash) → its parked copy is useless → removed.
+        assert_eq!(run("stale", &swap, "win11", Some("win10 hNEW\\nwin11 h11\\n")).1, None);
+    }
+
+    /// Short of space for the golden (df mocked: room only once 2 parked images are gone) → parked images removed, the
+    /// one unused the longest first; nothing left to remove → die.
+    #[test]
+    fn stage_room_evicts_oldest_parked() {
+        let s = super::STAGE_SCRIPT;
+        let part = &s[s.find("  gb(){").unwrap()..s.find("  # $f.ok = file fully downloaded").unwrap()];
+        let d = std::env::temp_dir().join("broom_t_room");
+        let _ = std::fs::remove_dir_all(&d);
+        for (n, parked) in [("b", "1700000200"), ("c", "1700000300"), ("a", "1700000100")] {
+            std::fs::create_dir_all(d.join(format!("img.{n}"))).unwrap();
+            std::fs::write(d.join(format!("img.{n}/.parked")), format!("{parked}\n")).unwrap();
+        }
+        let sh = format!(
+            "B={d}; D={d}/dl; W={d}; size=1000\nlog(){{ :; }}; die(){{ echo DIE; exit; }}\n\
+             df(){{ n=$(ls -d {d}/img.* 2>/dev/null | wc -l); [ $n -le 1 ] && a=9999999 || a=1; printf 'h\\nx 0 0 %s 0 /\\n' $a; }}\n{part}\necho OK",
+            d = d.display()
+        );
+        let o = stage_sh().args(["-c", &sh]).output().unwrap();
+        assert_eq!(String::from_utf8_lossy(&o.stdout).trim(), "OK");
+        assert!(!d.join("img.a").exists() && !d.join("img.b").exists() && d.join("img.c").exists(), "oldest two gone");
+        std::fs::remove_dir_all(d.join("img.c")).unwrap();
+        let sh2 = sh.replace("[ $n -le 1 ]", "false");
+        assert_eq!(String::from_utf8_lossy(&stage_sh().args(["-c", &sh2]).output().unwrap().stdout).trim(), "DIE");
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     /// Real HTTPS download (GitHub release → redirect to its CDN): cargo test download_https -- --ignored

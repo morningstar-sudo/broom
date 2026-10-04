@@ -188,6 +188,7 @@ fn is_public(method: &axum::http::Method, path: &str) -> bool {
     const OPEN: &[&str] = &[
         "/boot.ipxe",
         "/boot/start",
+        "/api/cache-list",
         "/api/drivers/for",
         "/api/license",
         "/api/license/result",

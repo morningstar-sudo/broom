@@ -83,7 +83,7 @@ fn descriptor(path: &Path) -> Result<String, String> {
         if h.desc_off == 0 || h.desc_size == 0 || h.desc_size > 2048 {
             return Err(format!("{} is a data extent, not the disk — upload the .vmdk descriptor (or the whole VM folder)", path.display()));
         }
-        rd(&f, h.desc_off * SECTOR, (h.desc_size * SECTOR) as usize)?
+        rd(&f, h.desc_off.checked_mul(SECTOR).ok_or("corrupt VMDK header")?, (h.desc_size * SECTOR) as usize)?
     } else if len <= 64 * 1024 {
         rd(&f, 0, len as usize)?
     } else {
@@ -156,7 +156,7 @@ pub fn to_raw(path: &Path, dest: &Path) -> Result<(), String> {
         let n = e.sectors * SECTOR;
         match (&e.kind, &e.file) {
             (Kind::Sparse, Some(p)) => sparse_to(p, n, &out, base)?,
-            (Kind::Flat(start), Some(p)) => flat_to(p, start * SECTOR, n, &out, base)?,
+            (Kind::Flat(start), Some(p)) => flat_to(p, start.checked_mul(SECTOR).ok_or("VMDK extent offset overflows")?, n, &out, base)?,
             _ => {} // ZERO: stays a hole
         }
         base += n;
@@ -198,10 +198,15 @@ fn sparse_to(p: &Path, n: u64, out: &File, base: u64) -> Result<(), String> {
         return Err(format!("{}: unexpected VMDK grain layout", p.display()));
     }
     let gbytes = h.grain * SECTOR;
-    let cap = (h.capacity * SECTOR).min(n);
+    let cap = h.capacity.saturating_mul(SECTOR).min(n);
     let ngr = cap.div_ceil(gbytes);
     let ngt = ngr.div_ceil(h.gtes);
-    let gd = rd(&f, h.gd_off * SECTOR, (ngt * 4) as usize)?;
+    // The grain directory is read whole into RAM: a header promising more of it than the file holds is corrupt (a
+    // tiny crafted upload would otherwise ask for a multi-GB buffer and abort the whole server).
+    let flen = f.metadata().map_err(|e| e.to_string())?.len();
+    let gd_len = ngt.checked_mul(4).filter(|&l| l <= flen).ok_or_else(|| format!("{}: corrupt VMDK (grain directory larger than the file)", p.display()))?;
+    let gd_at = h.gd_off.checked_mul(SECTOR).ok_or_else(|| format!("{}: corrupt VMDK header", p.display()))?;
+    let gd = rd(&f, gd_at, gd_len as usize)?;
     let compressed = h.flags & COMPRESSED_GRAINS != 0;
     // One grain table (its grains land at fixed raw offsets) per task, in parallel.
     let tables: Vec<(u64, u64)> = (0..ngt).map(|g| (g, u32le(&gd, g as usize * 4) as u64)).filter(|&(_, s)| s != 0).collect();
@@ -369,6 +374,28 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         d
+    }
+
+    /// A 1 KB crafted extent claiming 4 TiB with 1-sector grains and 1-entry tables (a 32 GiB grain directory) is
+    /// refused — not a giant allocation that aborts the server. Absurd offsets don't overflow either.
+    #[test]
+    fn crafted_header_refused() {
+        let d = dir("crafted");
+        let mut h = vec![0u8; 1024];
+        h[..4].copy_from_slice(b"KDMV");
+        h[12..20].copy_from_slice(&((4u64 << 40) / SECTOR).to_le_bytes()); // capacity
+        h[20..28].copy_from_slice(&1u64.to_le_bytes()); // grain
+        h[44..48].copy_from_slice(&1u32.to_le_bytes()); // gtes
+        h[56..64].copy_from_slice(&1u64.to_le_bytes()); // gd_off
+        std::fs::write(d.join("x.vmdk"), &h).unwrap();
+        let out = File::create(d.join("out.raw")).unwrap();
+        let e = super::sparse_to(&d.join("x.vmdk"), 4 << 40, &out, 0).unwrap_err();
+        assert!(e.contains("grain directory larger"), "{e}");
+        h[12..20].copy_from_slice(&8u64.to_le_bytes());
+        h[56..64].copy_from_slice(&u64::MAX.to_le_bytes());
+        std::fs::write(d.join("x.vmdk"), &h).unwrap();
+        assert!(super::sparse_to(&d.join("x.vmdk"), 4096, &out, 0).unwrap_err().contains("corrupt VMDK header"));
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     /// Every VMDK layout VMware/ESXi/OVA produce (made here by qemu-img) reads back to the exact raw bytes.

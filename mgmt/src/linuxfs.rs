@@ -194,32 +194,40 @@ fn lvm_pv(f: &File, start: u64) -> Option<(String, String)> {
     f.read_exact_at(&mut head, start).ok()?;
     // Label in one of the first 4 sectors: "LABELONE" … type "LVM2 001" at +24, pv header at +offset_xl.
     let s = (0..4).map(|n| n * 512).find(|&s| &head[s..s + 8] == b"LABELONE" && &head[s + 24..s + 32] == b"LVM2 001")?;
-    let le64 = |b: &[u8], o: usize| u64::from_le_bytes(b[o..o + 8].try_into().unwrap());
-    let pvh = s + u32::from_le_bytes(head[s + 20..s + 24].try_into().ok()?) as usize;
-    let uuid = String::from_utf8_lossy(&head[pvh..pvh + 32]).into_owned();
+    // Every offset below comes from the uploaded golden → bounds-checked (None = not a usable PV, never a panic).
+    let get = |b: &[u8], o: usize, n: usize| b.get(o..o.checked_add(n)?).map(<[u8]>::to_vec);
+    let le64 = |b: &[u8], o: usize| get(b, o, 8).map(|x| u64::from_le_bytes(x.try_into().unwrap()));
+    let pvh = s.checked_add(u32::from_le_bytes(get(&head, s + 20, 4)?.try_into().ok()?) as usize)?;
+    let uuid = String::from_utf8_lossy(&get(&head, pvh, 32)?).into_owned();
     // After uuid + device_size: data-area list (offset,size)… ended by 0,0, then metadata-area list.
     let mut o = pvh + 40;
-    while le64(&head, o) != 0 {
+    while le64(&head, o)? != 0 {
         o += 16;
     }
     o += 16;
-    let (mda_off, mda_size) = (le64(&head, o), le64(&head, o + 8));
+    let (mda_off, mda_size) = (le64(&head, o)?, le64(&head, o + 8)?);
     if mda_off == 0 {
         return None;
     }
     // mda header: magic at +4, raw_locn[0] (offset, size) at +40, relative to the metadata area.
+    let mda = start.checked_add(mda_off)?;
     let mut mh = [0u8; 512];
-    f.read_exact_at(&mut mh, start + mda_off).ok()?;
+    f.read_exact_at(&mut mh, mda).ok()?;
     if &mh[4..20] != b" LVM2 x[5A%r0N*>" {
         return None;
     }
-    let (off, size) = (le64(&mh, 40), le64(&mh, 48) as usize);
+    let (off, size) = (le64(&mh, 40)?, le64(&mh, 48)?);
+    // VG metadata text is a few KB: a bigger claim is not a real PV (and must not size a buffer).
+    if size > 1 << 20 || off > mda_size {
+        return None;
+    }
+    let size = size as usize;
     // Circular buffer: text may wrap back to just after the 512-byte header.
     let mut text = vec![0u8; size];
     let first = size.min((mda_size - off) as usize);
-    f.read_exact_at(&mut text[..first], start + mda_off + off).ok()?;
+    f.read_exact_at(&mut text[..first], mda.checked_add(off)?).ok()?;
     if first < size {
-        f.read_exact_at(&mut text[first..], start + mda_off + 512).ok()?;
+        f.read_exact_at(&mut text[first..], mda + 512).ok()?;
     }
     Some((uuid, String::from_utf8_lossy(&text).trim_end_matches('\0').to_string()))
 }
@@ -357,6 +365,29 @@ pub fn extract_boot(raw: &str, dst: &str) -> Result<Boot, String> {
 mod tests {
     use super::*;
     use std::process::Command;
+
+    /// A crafted LVM label (pv header offset past the sector, a huge metadata size) → None, no panic / no giant buffer.
+    #[test]
+    fn crafted_lvm_label_refused() {
+        let p = std::env::temp_dir().join("broom_t_lvm_crafted");
+        let mut b = vec![0u8; 8192];
+        b[512..520].copy_from_slice(b"LABELONE");
+        b[536..544].copy_from_slice(b"LVM2 001");
+        b[532..536].copy_from_slice(&5000u32.to_le_bytes()); // offset_xl beyond the 2 KB read
+        std::fs::write(&p, &b).unwrap();
+        assert!(lvm_pv(&File::open(&p).unwrap(), 0).is_none());
+        // Plausible label, metadata area claiming 1 TB of text.
+        b[532..536].copy_from_slice(&32u32.to_le_bytes());
+        let pvh = 512 + 32;
+        b[pvh + 56..pvh + 64].copy_from_slice(&4096u64.to_le_bytes()); // mda offset (after an empty data-area list)
+        b[pvh + 64..pvh + 72].copy_from_slice(&4096u64.to_le_bytes()); // mda size
+        b[4096 + 4..4096 + 20].copy_from_slice(b" LVM2 x[5A%r0N*>");
+        b[4096 + 40..4096 + 48].copy_from_slice(&512u64.to_le_bytes());
+        b[4096 + 48..4096 + 56].copy_from_slice(&(1u64 << 40).to_le_bytes());
+        std::fs::write(&p, &b).unwrap();
+        assert!(lvm_pv(&File::open(&p).unwrap(), 0).is_none());
+        let _ = std::fs::remove_file(&p);
+    }
 
     #[test]
     fn version_order() {

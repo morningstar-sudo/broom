@@ -176,7 +176,7 @@ pub fn publish(st: &SharedState, id: i64, name: &str, steps: &mut crate::publish
     std::fs::write(format!("{out}/files.sha256"), sums).map_err(|e| format!("files.sha256: {e}"))?;
     std::fs::write(&sum_file, &hash).map_err(|e| format!("golden.sha256: {e}"))?;
     let bs = format!(
-        "kernel http://{ip}/tftp/broom-stage/vmlinuz initrd=stage.img ip=dhcp BOOTIF=01-${{mac:hexhyp}} broom.name={name} broom.hash={hash} broom.srv={ip} broom.host=${{broom-host}} broom.lic=${{broom-lic}} broom.reg=${{broom-reg}} broom.base=${{broom-base}} broom.strict=${{broom-strict}}\n\
+        "kernel http://{ip}/tftp/broom-stage/vmlinuz initrd=stage.img ip=dhcp BOOTIF=01-${{mac:hexhyp}} broom.name={name} broom.hash={hash} broom.srv={ip} broom.host=${{broom-host}} broom.lic=${{broom-lic}} broom.reg=${{broom-reg}} broom.base=${{broom-base}} broom.strict=${{broom-strict}} broom.lxgb=${{broom-lxgb}}\n\
          initrd http://{ip}/tftp/broom-stage/stage.img\n\
          boot"
     );
@@ -247,14 +247,16 @@ fn build_golden(raw: &str, out: &str, name: &str, steps: &mut crate::publish::St
     const MB: u64 = 1024 * 1024;
     let total = std::fs::metadata(raw).map_err(|e| e.to_string())?.len();
     let end = start + size;
+    // Only the tables are rewritten — the NTFS data of the Windows partition stays as it is. FIRST, before any hole:
+    // once the table shows a single partition the disk counts as trimmed, so a publish cut off during the holes
+    // below never re-saves the (by then zeroed) boot partitions over the kept ones — it just punches again.
+    crate::disk::write_single_gpt(raw, start, size).map_err(|e| format!("golden single partition: {e}"))?;
     // Keep the first 1MB (primary GPT) + the last 1MB (backup GPT).
     for (off, len) in [(MB, start.saturating_sub(MB)), (end, total.saturating_sub(MB).saturating_sub(end))] {
         if len > 0 {
             punch_hole(raw, off, len)?;
         }
     }
-    // Only the tables are rewritten — the NTFS data of the Windows partition stays as it is.
-    crate::disk::write_single_gpt(raw, start, size).map_err(|e| format!("golden single partition: {e}"))?;
 
     // 3. Mount read-write: check the boot-start disk drivers (set by the prep) + silent OOBE + current broom-done /
     //    bootorder scripts + take the EFI bundle.

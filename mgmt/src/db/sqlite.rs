@@ -27,7 +27,8 @@ const SCHEMA: &str = r#"
         hash        TEXT,                    -- sha256 of the golden (version check for the SSD cache)
         cache_mode  TEXT NOT NULL DEFAULT 'disk', -- where the golden is kept: 'disk' | 'zram'
         active_version TEXT,                 -- versions.rs version image.img equals (NULL = none)
-        base_mode   INTEGER NOT NULL DEFAULT 0 -- Windows: 1 = first logon waits in BASE MODE (technician), 0 = auto-commit
+        base_mode   INTEGER NOT NULL DEFAULT 0, -- Windows: 1 = first logon waits in BASE MODE (technician), 0 = auto-commit
+        use_ssd     INTEGER NOT NULL DEFAULT 1  -- Linux: 1 = cache + writes on the machine's SSD, 0 = SSD untouched (RAM only)
     );
 
     CREATE TABLE IF NOT EXISTS machines(
@@ -92,7 +93,7 @@ const SCHEMA: &str = r#"
     INSERT OR IGNORE INTO config(key,value) VALUES('ltsp_password','123456');
 "#;
 
-const IMAGE_COLS: &str = "id,name,os,is_default,boot_script,hash,cache_mode,active_version,base_mode";
+const IMAGE_COLS: &str = "id,name,os,is_default,boot_script,hash,cache_mode,active_version,base_mode,use_ssd";
 
 fn image_row(r: &Row) -> rusqlite::Result<Image> {
     Ok(Image {
@@ -105,6 +106,7 @@ fn image_row(r: &Row) -> rusqlite::Result<Image> {
         cache_mode: r.get(6)?,
         active_version: r.get(7)?,
         base_mode: r.get::<_, i64>(8)? == 1,
+        use_ssd: r.get::<_, i64>(9)? == 1,
     })
 }
 
@@ -137,6 +139,7 @@ impl Sqlite {
         let _ = c.execute("ALTER TABLE images ADD COLUMN cache_mode TEXT NOT NULL DEFAULT 'disk'", []);
         let _ = c.execute("ALTER TABLE images ADD COLUMN active_version TEXT", []);
         let _ = c.execute("ALTER TABLE images ADD COLUMN base_mode INTEGER NOT NULL DEFAULT 0", []);
+        let _ = c.execute("ALTER TABLE images ADD COLUMN use_ssd INTEGER NOT NULL DEFAULT 1", []);
         let _ = c.execute("ALTER TABLE images DROP COLUMN dataset", []); // ZFS versioning removed
         let _ = c.execute("ALTER TABLE machines ADD COLUMN license_key TEXT", []);
         let _ = c.execute("ALTER TABLE machines ADD COLUMN license_state TEXT", []);
@@ -252,6 +255,13 @@ impl Db for Sqlite {
     fn set_base_mode(&self, id: i64, on: bool) -> DbResult<()> {
         self.c()
             .execute("UPDATE images SET base_mode=?1 WHERE id=?2", params![on as i64, id])
+            .map(|_| ())
+            .map_err(e)
+    }
+
+    fn set_use_ssd(&self, id: i64, on: bool) -> DbResult<()> {
+        self.c()
+            .execute("UPDATE images SET use_ssd=?1 WHERE id=?2", params![on as i64, id])
             .map(|_| ())
             .map_err(e)
     }
@@ -540,6 +550,9 @@ mod tests {
         assert!(!ia.base_mode, "base mode off by default (first logon commits base by itself)");
         db.set_base_mode(a, true).unwrap();
         assert!(db.image(a).unwrap().unwrap().base_mode);
+        assert!(ia.use_ssd, "SSD on by default (cache + writes on the machine's SSD)");
+        db.set_use_ssd(a, false).unwrap();
+        assert!(!db.image(a).unwrap().unwrap().use_ssd);
         db.delete_image(a).unwrap();
         assert!(db.image(a).unwrap().is_none());
 

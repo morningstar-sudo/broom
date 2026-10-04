@@ -21,6 +21,9 @@ pub struct Image {
     pub cache_mode: String,
     /// Windows: first logon waits in BASE MODE (a technician sets up apps, then restarts) instead of committing base.
     pub base_mode: bool,
+    /// Linux: cache the golden + keep the session's writes on the machine's SSD (false = SSD untouched, RAM only).
+    /// Windows always uses the SSD (it boots from a VHDX on it).
+    pub use_ssd: bool,
 }
 
 pub struct NewImage<'a> {
@@ -106,6 +109,7 @@ pub trait Db: Send + Sync {
     fn set_cache_mode(&self, id: i64, mode: &str) -> DbResult<()>;
     /// Windows: the first logon on each machine waits in BASE MODE for a technician (true) or commits base at once.
     fn set_base_mode(&self, id: i64, on: bool) -> DbResult<()>;
+    fn set_use_ssd(&self, id: i64, on: bool) -> DbResult<()>;
     fn set_active_version(&self, id: i64, version: Option<&str>) -> DbResult<()>;
 
     // --- machines ---

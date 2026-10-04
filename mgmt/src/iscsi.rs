@@ -62,6 +62,13 @@ impl Lio {
         Ok(Lio { root })
     }
 
+    /// The live tree only if LIO is already up (no modprobe / mount): for checks and clean-ups — no LIO means no
+    /// target and no client. Cheap enough for a periodic pass.
+    pub fn existing() -> Option<Lio> {
+        let root = Path::new(CONFIGFS).join("target");
+        root.join("core").is_dir().then_some(Lio { root })
+    }
+
     #[cfg(test)]
     fn at(root: &Path) -> Lio {
         Lio { root: root.to_path_buf() }

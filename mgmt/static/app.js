@@ -239,7 +239,7 @@ async function loadImages(){
        <td class="row">
          <button class="ghost" onclick="setDefault(${i.id})">Default</button>
          <button class="ghost" onclick="toggleCache(${i.id},'${esc(i.cache_mode||'disk')}','${esc(i.name)}')">${(i.cache_mode==='zram')?'→disk':'→zram'}</button>
-         ${i.os==='windows'?`<button class="ghost" onclick="toggleBase(${i.id},${!i.base_mode})" title="BASE MODE: the first logon on each machine waits for a technician to set up apps, then restart (saved for every boot). Off: base is saved by itself.">${i.base_mode?'Base mode: ON':'Base mode: off'}</button>`:''}
+         ${i.os==='windows'?`<button class="ghost" onclick="toggleBase(${i.id},${!i.base_mode})" title="BASE MODE: the first logon on each machine waits for a technician to set up apps, then restart (saved for every boot). Off: base is saved by itself.">${i.base_mode?'Base mode: ON':'Base mode: off'}</button>`:`<button class="ghost" onclick="toggleSsd(${i.id},${!i.use_ssd})" title="On: the golden is cached and the session's writes go to the machine's SSD (reset every boot). Off (one-time): nothing touches the SSD — golden over the network, writes in RAM, gone at power-off.">${i.use_ssd?'SSD: on':'SSD: off (one-time)'}</button>`}
          <button class="ghost" onclick="republish(${i.id},'${esc(i.name)}')">Republish</button>
          <button class="ghost" onclick="showVersions(${i.id},'${esc(i.name)}','${esc(i.os)}')">Versions</button>
          <button class="ghost" onclick="exportImage(${i.id},'${esc(i.name)}',null)" title="download as a VMware VM (.vmx + .vmdk) to edit the golden">Export</button>
@@ -257,6 +257,9 @@ async function toggleBase(id,on){
   if(on&&!confirm('BASE MODE: every machine that builds its base (first boot, new golden, rename, drivers) will wait on the desktop until someone restarts it — whatever is done before that restart is kept for good. Turn on?'))return;
   const el=document.getElementById('img_status');
   try{await j('/api/images/base-mode',mk({id,on}));loadImages();}catch(e){el.textContent=' ✗ '+e.message;}}
+async function toggleSsd(id,on){
+  const el=document.getElementById('img_status');
+  try{await j('/api/images/ssd',mk({id,on}));loadImages();}catch(e){el.textContent=' ✗ '+e.message;}}
 // One-time link for the Windows prep script (it carries the guest password): valid once, for an hour.
 async function prepCmd(){const el=document.getElementById('prep_cmd');
   try{const r=await j('/api/prep-token',{method:'POST'});

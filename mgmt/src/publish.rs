@@ -254,7 +254,7 @@ fn publish_iscsi_staged(
     //    once the new boot script is saved (a client may still boot the old one until then).
     let iqn = export_target(st, name, &cache_mode, &backing)?;
 
-    // 4. iPXE boot_script. The initrd hook reads broom.name/hash/size/reg from the cmdline.
+    // 4. iPXE boot_script. The initrd hook reads broom.name/hash/size/srv/reg/lxgb/ssd from the cmdline.
     // sanhook = iPXE attaches iSCSI via iBFT (does not boot the LUN); initrd open-iscsi reads the iBFT →
     // /dev/sda golden RO → root=UUID mounted RO; overlayroot (baked into the golden) overlays it onto the
     // SSD writeback (reset every boot). ip=dhcp gives the initrd a network.
@@ -266,7 +266,7 @@ fn publish_iscsi_staged(
     let size = std::fs::metadata(img_abs).map_err(|e| e.to_string())?.len();
     let bs = format!(
         "sanhook iscsi:{ip}::::{iqn} || shell\n\
-         kernel http://{ip}/tftp/broom/{name}/vmlinuz initrd=initrd.img ip=dhcp root=UUID={root_uuid} ro fsck.mode=skip overlayroot=device:dev=/dev/disk/by-label/broomwb,recurse=0 broom.name={name} broom.hash={hash} broom.size={size} broom.reg=${{broom-reg}}\n\
+         kernel http://{ip}/tftp/broom/{name}/vmlinuz initrd=initrd.img ip=dhcp root=UUID={root_uuid} ro fsck.mode=skip overlayroot=device:dev=/dev/disk/by-label/broomwb,recurse=0 broom.name={name} broom.hash={hash} broom.size={size} broom.srv={ip} broom.reg=${{broom-reg}} broom.lxgb=${{broom-lxgb}} broom.ssd=${{broom-ssd}}\n\
          initrd http://{ip}/tftp/broom/{name}/initrd.img\n\
          boot"
     );
@@ -416,21 +416,21 @@ fn drop_targets(st: &SharedState, lio: &crate::iscsi::Lio, name: &str, keep: Opt
 /// Drop every superseded generation of this image's target that no client uses any more. After each publish and
 /// periodically (monitor.rs): a busy lab never has a moment with no client at all.
 pub(crate) fn gc_superseded(st: &SharedState, name: &str) {
-    if let Ok(lio) = crate::iscsi::Lio::system() {
+    if let Some(lio) = crate::iscsi::Lio::existing() {
         drop_targets(st, &lio, name, Some(&iqn_of(st, name)), true);
     }
 }
 
 /// Every target of this image, in use or not (rollback rewrites the file a disk-cache target serves).
 pub(crate) fn drop_all_targets(st: &SharedState, name: &str) {
-    if let Ok(lio) = crate::iscsi::Lio::system() {
+    if let Some(lio) = crate::iscsi::Lio::existing() {
         drop_targets(st, &lio, name, None, false);
     }
 }
 
 /// A client is logged in to some generation of this image's target. No LIO at all → nobody can be.
 pub(crate) fn image_in_use(st: &SharedState, name: &str) -> bool {
-    let Ok(lio) = crate::iscsi::Lio::system() else { return false };
+    let Some(lio) = crate::iscsi::Lio::existing() else { return false };
     let prefix = format!("{}:{name}.g", st.db.get_config("iqn_base", "iqn.2026-01.local.broom"));
     lio.list_iqns().iter().any(|iqn| iqn.starts_with(&prefix) && lio.has_sessions(iqn))
 }

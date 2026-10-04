@@ -25,6 +25,8 @@ pub fn routes() -> Router<SharedState> {
         .route("/api/images/boot-script", post(set_boot_script))
         .route("/api/images/cache-mode", post(set_cache_mode))
         .route("/api/images/base-mode", post(set_base_mode))
+        .route("/api/images/ssd", post(set_use_ssd))
+        .route("/api/cache-list", get(cache_list))
         .route("/api/prep-token", post(prep_token))
         .route("/api/images/job", get(job_status))
         .route("/broom-prep", get(broom_prep))
@@ -605,6 +607,40 @@ async fn set_base_mode(State(st): State<SharedState>, Json(b): Json<BaseModeBody
     Ok(Json(serde_json::json!({"ok": true})))
 }
 
+/// GET /api/cache-list (public: Windows stage + Linux cache script, every boot) → "name hash" per image a machine may
+/// keep on its SSD: published, and using the SSD (Windows always). A cached image not listed, or with another hash
+/// (deleted, SSD switched off, republished), is removed on the machine.
+async fn cache_list(State(st): State<SharedState>) -> Result<String, ApiError> {
+    Ok(cache_lines(&st.db.images().map_err(ise)?))
+}
+
+fn cache_lines(images: &[crate::db::Image]) -> String {
+    images
+        .iter()
+        .filter(|i| i.use_ssd || i.os == "windows")
+        .filter_map(|i| i.hash.as_deref().map(|h| format!("{} {h}\n", i.name)))
+        .collect()
+}
+
+#[derive(Deserialize)]
+struct SsdBody {
+    id: i64,
+    on: bool,
+}
+
+/// POST /api/images/ssd {id, on} — Linux: cache the golden + keep the session's writes on the machine's SSD (on), or
+/// leave the SSD untouched (off: golden over the network, writes in RAM). Windows boots from a VHDX on the SSD → always
+/// on. Read by /boot/start → no republish needed.
+async fn set_use_ssd(State(st): State<SharedState>, Json(b): Json<SsdBody>) -> Result<Json<serde_json::Value>, ApiError> {
+    let img = st.db.image(b.id).map_err(ise)?.ok_or((StatusCode::NOT_FOUND, format!("image {} not found", b.id)))?;
+    if img.os == "windows" && !b.on {
+        return Err((StatusCode::BAD_REQUEST, "Windows images always use the SSD (they boot from a VHDX on it)".into()));
+    }
+    st.db.set_use_ssd(b.id, b.on).map_err(ise)?;
+    tracing::info!("image {}: SSD {}", img.name, if b.on { "on (cache + writes on the SSD)" } else { "off (SSD untouched, RAM only)" });
+    Ok(Json(serde_json::json!({"ok": true})))
+}
+
 /// One-time links for /broom-prep-win: token → expiry. The script carries the guest password, so it is not public.
 static PREP_TOKENS: std::sync::LazyLock<std::sync::Mutex<HashMap<String, u64>>> = std::sync::LazyLock::new(Default::default);
 const PREP_TOKEN_SECS: u64 = 3600;
@@ -643,6 +679,21 @@ async fn broom_prep_win(State(st): State<SharedState>, Query(q): Query<HashMap<S
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn cache_list_lines() {
+        let img = |name: &str, os: &str, hash: Option<&str>, use_ssd: bool| crate::db::Image {
+            id: 0, name: name.into(), os: os.into(), active_version: None, is_default: false, boot_script: None,
+            hash: hash.map(Into::into), cache_mode: "disk".into(), base_mode: false, use_ssd,
+        };
+        let list = [
+            img("win11", "windows", Some("aa"), false), // Windows always uses the SSD
+            img("ubuntu", "linux", Some("bb"), true),
+            img("kiosk", "linux", Some("cc"), false), // SSD off → not cached
+            img("draft", "linux", None, true),        // not published
+        ];
+        assert_eq!(super::cache_lines(&list), "win11 aa\nubuntu bb\n");
+    }
+
     #[test]
     fn prep_token_once_and_expires() {
         let mut t = std::collections::HashMap::from([("aaa".to_string(), 2000u64), ("old".to_string(), 500u64)]);

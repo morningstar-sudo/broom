@@ -59,13 +59,30 @@ Then open `http://<server-ip>/`:
     - **Send hostname** (on) — option 12 = the machine's name on the Machines page.
     - **Rapid Commit** (off) — RFC 4039: a client that asks for it gets the address in 2 packets instead of 4.
       UEFI PXE and iPXE never ask, so it rarely changes boot time.
-- Client/boot endpoints (`/boot*`, `/tftp`, license and driver fetch) stay open — a PXE client can't log in.
+- Client/boot endpoints (`/boot*`, `/tftp`, license, driver and cache-list fetch) stay open — a PXE client can't log in.
 
 **Client machines:** UEFI, Secure Boot **off**, **PXE first** in the boot order (required for the reset-on-boot).
 **Register them** (Machines page) before their first Windows boot: the stage partitions the SSD by itself only on a
 registered machine with exactly one internal disk. An unknown machine (or one with several disks) asks on its
 screen which disk to wipe — type its name, or press Enter to leave the disks alone. Linux images on such a machine
 keep their writes in RAM (zram) instead of touching a disk.
+
+**One Broom SSD per machine, shared by Windows and Linux images** (other disks stay normal disks):
+`p1 BROOMEFI 512M | p2 BROOMWIN (Windows) | p3 broomwb 30G + p4 broomcache (Linux)`. Whichever OS boots first lays
+it out; the other only formats its own partitions, so switching images never wipes the disk. Every image a machine
+boots keeps its copy there, so switching back is instant: Windows images in `broom\img.<image>\` (the one booting
+sits at the top of `broom\`), Linux images as `<image>.img` in broomcache. On every boot the machine asks the server
+which images it may keep (`/api/cache-list`) and removes the others (deleted, set to not use the SSD, republished);
+when space runs out, the copy unused the longest goes.
+
+**SSD on/off per Linux image** (Images page): off = "one-time" — nothing touches the SSD, the golden is read over the
+network and the session's writes stay in RAM. Windows images always use the SSD (they boot from a VHDX on it).
+
+The Linux part is sized from the Linux goldens that use the SSD (30 GB writeback + their total + 5 GB); with none,
+Windows gets the whole disk. The split is set when the disk is laid out: a disk laid out by Windows before any Linux
+image existed is laid out again once on its first Linux boot (the Windows bases are rebuilt), and Linux goldens that
+later outgrow their part evict each other (or boot over iSCSI). To re-split, wipe the disk (`wipefs -a`) and boot
+again.
 
 ### Run as a service
 

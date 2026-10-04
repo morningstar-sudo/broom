@@ -20,11 +20,11 @@ getfile(){
   if [ -x /broom/bin/wget ]; then /broom/bin/wget -q --show-progress --progress=bar:force:noscroll "$@"
   else wget "$@"; fi
 }
-NAME=""; HASH=""; SRV=""; HOST=""; LIC=""; MAC=""; REG=""; BASE=""; STRICT=""
+NAME=""; HASH=""; SRV=""; HOST=""; LIC=""; MAC=""; REG=""; BASE=""; STRICT=""; LX=""
 for a in $(cat /proc/cmdline); do
   case "$a" in broom.name=*) NAME=${a#*=};; broom.hash=*) HASH=${a#*=};; broom.srv=*) SRV=${a#*=};;
     broom.host=*) HOST=${a#*=};; broom.lic=*) LIC=${a#*=};; BOOTIF=01-*) MAC=$(echo "${a#BOOTIF=01-}" | tr - :);;
-    broom.reg=*) REG=${a#*=};; broom.base=*) BASE=${a#*=};; broom.strict=*) STRICT=${a#*=};; esac
+    broom.reg=*) REG=${a#*=};; broom.base=*) BASE=${a#*=};; broom.strict=*) STRICT=${a#*=};; broom.lxgb=*) LX=${a#*=};; esac
 done
 [ -n "$NAME" ] && [ -n "$HASH" ] && [ -n "$SRV" ] || die "missing broom.name/hash/srv on cmdline"
 for m in ntfs3 vfat nls_cp437 nls_iso8859_1 nls_utf8 efivarfs; do modprobe $m 2>/dev/null; done
@@ -34,15 +34,42 @@ udevadm settle 2>/dev/null
 part(){ case "$1" in *[0-9]) echo "/dev/${1}p$2";; *) echo "/dev/$1$2";; esac; }
 lbl(){ blkid -s LABEL -o value "$1" 2>/dev/null; }
 SYSB=/sys/block; CON=/dev/console
-disks=""
-for d in $SYSB/*; do
-  n=${d##*/}
-  case "$n" in loop*|ram*|dm-*|sr*|nbd*|md*|fd*|zram*) continue;; esac
-  [ "$(cat $d/removable 2>/dev/null)" = 1 ] && continue
-  case "$(readlink -f $d)" in */usb*) continue;; esac
-  [ "$(cat $d/size 2>/dev/null || echo 0)" -gt 0 ] || continue
-  disks="$disks $n"
-done
+scan(){
+  disks=""
+  for d in $SYSB/*; do
+    n=${d##*/}
+    case "$n" in loop*|ram*|dm-*|sr*|nbd*|md*|fd*|zram*) continue;; esac
+    [ "$(cat $d/removable 2>/dev/null)" = 1 ] && continue
+    case "$(readlink -f $d)" in */usb*) continue;; esac
+    [ "$(cat $d/size 2>/dev/null || echo 0)" -gt 0 ] || continue
+    disks="$disks $n"
+  done
+}
+# The Broom SSD — ONE disk for Windows and Linux images alike (other disks stay normal disks), known by its GPT
+# partition names (read from sysfs: no tool needed, the Linux side does the same):
+#   p1 BROOMEFI 512M | p2 BROOMWIN (Windows) | p3 broomwb 30G + p4 broomcache (Linux, only when LX > 0)
+# LX = GB kept for the Linux side, sized by the server from its Linux goldens (broom.lxgb; 0 = no Linux image).
+case "$LX" in ''|*[!0-9]*) LX=0;; esac
+pn(){ p=$(part $1 $2); sed -n 's/^PARTNAME=//p' $SYSB/$1/${p##*/}/uevent 2>/dev/null; }
+broomdisk(){
+  for n in $disks; do
+    for p in $SYSB/$n/$n*; do
+      case "$(sed -n 's/^PARTNAME=//p' $p/uevent 2>/dev/null)" in BROOMEFI|BROOMWIN|broomwb|broomcache) echo $n; return;; esac
+    done
+  done
+}
+# sfdisk script of that layout for disk $1: Windows gets what LX leaves; under 32 GB left → no Linux part.
+layout(){
+  gb=$(( $(cat $SYSB/$1/size) / 2097152 )); lx=$LX
+  [ $((gb - 1 - lx)) -ge 32 ] || lx=0
+  printf 'label: gpt\nsize=512MiB, type=U, name=BROOMEFI\n'
+  if [ $lx -gt 0 ]; then
+    printf 'size=%sGiB, type=EBD0A0A2-B9E5-4433-87C0-68B6B72699C7, name=BROOMWIN, attrs="GUID:63"\nsize=30GiB, name=broomwb\nname=broomcache\n' $((gb - 1 - lx))
+  else
+    printf 'type=EBD0A0A2-B9E5-4433-87C0-68B6B72699C7, name=BROOMWIN, attrs="GUID:63"\n'
+  fi
+}
+scan
 # Never guess which disk to wipe: an unknown machine (not on the Machines page — anyone can PXE-boot) or one with
 # several disks asks on its screen. Prints the disk typed, nothing for Enter / anything else.
 ask_disk(){
@@ -55,12 +82,23 @@ ask_disk(){
   read -r ans < $CON
   for n in "$@"; do [ "$ans" = "$n" ] && { echo "$n"; return; }; done
 }
-disk=""; NEWDISK=""
-for n in $disks; do [ "$(lbl $(part $n 2))" = BROOMWIN ] && { disk=$n; break; }; done
+disk=$(broomdisk); NEWDISK=""; FORMAT=""; one=""
+set -- $disks
+if [ -z "$disk" ] && [ "$REG" = 1 ] && [ $# -eq 1 ]; then
+  # The single disk would be wiped without asking — but a disk that shows up late (slow controller, async probe)
+  # could be the Broom SSD, making this one the wrong choice. Look again after a pause: still that one disk → go.
+  one=$1; sleep 5; udevadm settle 2>/dev/null; scan; disk=$(broomdisk)
+fi
+if [ -n "$disk" ]; then
+  # p1/p2 not Windows' = a Linux-only layout of an older version → laid out again (only broom data on it).
+  # Laid out by a Linux boot → Windows' partitions are there, just not formatted yet.
+  if [ "$(pn $disk 1)" != BROOMEFI ] || [ "$(pn $disk 2)" != BROOMWIN ]; then NEWDISK=1
+  elif [ "$(lbl $(part $disk 2))" != BROOMWIN ]; then FORMAT=1; fi
+fi
 if [ -z "$disk" ]; then
   set -- $disks
   [ $# -gt 0 ] || die "no local disk found"
-  if [ "$REG" = 1 ] && [ $# -eq 1 ]; then
+  if [ "$REG" = 1 ] && [ $# -eq 1 ] && [ "$1" = "$one" ]; then
     disk=$1
   else
     disk=$(ask_disk "$@")
@@ -70,11 +108,14 @@ if [ -z "$disk" ]; then
 fi
 # end disk choice
 if [ -n "$NEWDISK" ]; then
-  log "partitioning /dev/$disk for the first time (WIPES the disk)"
-  printf 'label: gpt\nsize=512MiB, type=U, name=BROOMEFI\ntype=EBD0A0A2-B9E5-4433-87C0-68B6B72699C7, name=BROOMWIN, attrs="GUID:63"\n' \
-    | sfdisk -q --wipe always --wipe-partitions always /dev/$disk >/dev/null || die "sfdisk /dev/$disk"
+  log "partitioning /dev/$disk as the Broom SSD (WIPES the disk; Linux part: ${LX} GB)"
+  layout $disk | sfdisk -q --wipe always --wipe-partitions always /dev/$disk >/dev/null || die "sfdisk /dev/$disk"
   udevadm settle 2>/dev/null
   i=0; while [ ! -b "$(part $disk 2)" ] && [ $i -lt 10 ]; do sleep 1; i=$((i+1)); done
+  FORMAT=1
+fi
+# Windows' partitions only — the Linux side formats its own.
+if [ -n "$FORMAT" ]; then
   mkfs.fat -F32 -n BROOMEFI "$(part $disk 1)" >/dev/null || die "mkfs.fat"
   mkntfs -Q -F -L BROOMWIN "$(part $disk 2)" >/dev/null || die "mkntfs"
 fi
@@ -95,6 +136,40 @@ if mnt discard || mnt force,discard; then log "BROOMWIN: discard mount (freed sp
 elif mnt rw || mnt force; then log "BROOMWIN: plain mount (the disk takes no TRIM)"
 else die "mount ntfs3 $(part $disk 2)"; fi
 mkdir -p $B
+
+# 0. Every Windows image this machine boots keeps its files on BROOMWIN: the one booting now at the top of broom\ —
+#    where the boot loader (\broom\child.vhdx) and broom-done look — the others parked in broom\img.<image>\ (image
+#    names have no dot). Parking is a rename on the same volume (instant) and the VHDX parent links are relative, so a
+#    set works in either place. active.txt = the image at the top; every step can simply run again after a power cut.
+#    img.<image>/.parked = when it was parked = its last use (the oldest goes first when space runs out).
+IMGSET="golden.vhdx golden.sha256 base.vhdx base.host base.lic base.drv base-template.vhdx child-template.vhdx child-template.off efi.tar.gz"
+cd $B
+act=$(cat active.txt 2>/dev/null)
+case "$act" in ''|*[!A-Za-z0-9_-]*) act=$NAME;; esac   # a disk from before image folders: the top set is this image's
+if [ "$act" != "$NAME" ]; then
+  log "image $act parked, $NAME to the top"
+  rm -f child.vhdx first.pending base.ok   # the last session / an unfinished base build of the parked image
+  mkdir -p "img.$act"
+  for f in $IMGSET dl-*; do [ -e "$f" ] && mv "$f" "img.$act/"; done
+  date +%s > "img.$act/.parked"
+  echo "$NAME" > active.txt; sync
+fi
+if [ -d "img.$NAME" ]; then
+  for f in "img.$NAME"/*; do [ -e "$f" ] && mv "$f" .; done
+  rm -f "img.$NAME/.parked"; rmdir "img.$NAME" 2>/dev/null
+fi
+echo "$NAME" > active.txt
+# Parked images the server no longer lets this machine keep (deleted / republished: "name hash" lines) → removed.
+# No answer → kept.
+configure_networking
+if wget -q -O /run/broom-cache-list "http://$SRV/api/cache-list" 2>/dev/null; then
+  for p in img.*; do
+    [ -d "$p" ] || continue
+    grep -qxF "${p#img.} $(cat $p/golden.sha256 2>/dev/null)" /run/broom-cache-list \
+      || { rm -rf "$p"; log "image ${p#img.} removed from this disk (no longer cached here / other version)"; }
+  done
+fi
+cd /
 
 # 1. Golden hash mismatch → download the whole golden again. No delta: one sequential write into free space (nothing
 #    to compare, the file stays unfragmented). The old golden + base/child go first: they belong to the old version
@@ -126,9 +201,24 @@ if [ "$(cat $B/golden.sha256 2>/dev/null)" != "$HASH" ]; then
   case "$size" in ''|*[!0-9]*) die "server has no golden.size for $NAME (published by an older version) -> Publish again, then reboot";; esac
   gb(){ echo "$1" | awk '{ printf "%.1f GB", $1 / 1073741824 }'; }
   fsize(){ ls -ln "$1" 2>/dev/null | awk '{ print $5 }'; }
-  have=$(fsize $D/golden.vhdx); avail=$(df -Pk $W | tail -1 | awk '{ print $4 }')
-  awk -v a="$avail" -v h="${have:-0}" -v s="$size" 'BEGIN { exit !(a * 1024 + h >= s + 1073741824) }' \
-    || die "not enough space on BROOMWIN: the golden needs $(gb $size) + 1 GB -> a bigger disk or a smaller image"
+  room(){
+    have=$(fsize $D/golden.vhdx); avail=$(df -Pk $W | tail -1 | awk '{ print $4 }')
+    awk -v a="$avail" -v h="${have:-0}" -v s="$size" 'BEGIN { exit !(a * 1024 + h >= s + 1073741824) }'
+  }
+  # Short of space → parked images go, the one unused the longest first (smallest .parked; busybox ls can't sort).
+  oldest(){
+    old=""; t=""
+    for p in $B/img.*; do
+      [ -d "$p" ] || continue
+      v=$(cat $p/.parked 2>/dev/null); case "$v" in ''|*[!0-9]*) v=0;; esac
+      if [ -z "$t" ] || [ "$v" -lt "$t" ]; then t=$v; old=$p; fi
+    done
+  }
+  until room; do
+    oldest
+    [ -n "$old" ] || die "not enough space on BROOMWIN: the golden needs $(gb $size) + 1 GB -> a bigger disk or a smaller image"
+    rm -rf "$old"; log "image ${old##*/img.} removed from this disk (unused the longest) to make room"
+  done
   # $f.ok = file fully downloaded (power loss midway → next boot skips finished files, resumes the partial one).
   # Only -c -O: works with both busybox and GNU wget. -c failing (e.g. 416 when the file is complete but not yet .ok)
   # → download again from scratch.

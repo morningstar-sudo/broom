@@ -303,6 +303,25 @@ async fn main() {
                 }
             }
         });
+        // Superseded iSCSI generations (+ their zram RAM) go as soon as their last client logs out — a busy lab never
+        // has a moment with no client at all, and a publish only cleans up what is idle at that moment. Images with
+        // a running job are skipped (their old generation is still in the boot script until the publish saves it).
+        let st = state.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+                let st = st.clone();
+                let _ = tokio::task::spawn_blocking(move || {
+                    for img in st.db.images().unwrap_or_default().into_iter().filter(|i| i.os == "linux") {
+                        let busy = st.jobs.lock().unwrap().get(&img.name).is_some_and(|s| s.starts_with('⏳'));
+                        if !busy {
+                            publish::gc_superseded(&st, &img.name);
+                        }
+                    }
+                })
+                .await;
+            }
+        });
     }
 
     let app = Router::new()
