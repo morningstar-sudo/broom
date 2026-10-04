@@ -13,7 +13,6 @@ pub fn routes() -> Router<SharedState> {
         .route("/api/config/timeout", post(set_timeout))
         .route("/api/config/zram-reserve", post(set_zram_reserve))
         .route("/api/dhcp", get(get_dhcp).post(set_dhcp))
-        .route("/api/dhcp/apply", post(apply_dhcp))
         .route("/api/cafe-user", get(get_cafe_user).post(set_cafe_user))
 }
 
@@ -269,12 +268,6 @@ async fn set_dhcp(
         // Secure Boot clients need the shim from the stage bundle → fetch it now if it isn't there (background).
         tokio::task::spawn_blocking(crate::publish::prepare_stage);
     }
-    restart(&st).await
-}
-
-/// Restart the DHCP/TFTP listeners with the current config. (Machine bindings need no restart:
-/// every DHCP request reads them from the DB.)
-async fn apply_dhcp(State(st): State<SharedState>) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     restart(&st).await
 }
 

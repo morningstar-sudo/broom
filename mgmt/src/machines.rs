@@ -3,19 +3,18 @@
 use axum::{
     extract::State,
     http::StatusCode,
-    routing::{get, post},
+    routing::post,
     Json, Router,
 };
 use serde::Deserialize;
 
-use crate::api::{ise, ok, ApiError};
+use crate::api::{ise, ApiError};
 use crate::db::Machine;
 use crate::SharedState;
 
 pub fn routes() -> Router<SharedState> {
     Router::new()
-        .route("/api/machines", get(list).post(add))
-        .route("/api/machines/group", post(set_group))
+        .route("/api/machines", post(add)) // Register (Machines + Devices pages)
 }
 
 pub(crate) fn who(m: &Machine) -> String {
@@ -24,28 +23,6 @@ pub(crate) fn who(m: &Machine) -> String {
 
 pub(crate) fn machine_by_id(st: &SharedState, id: i64) -> Result<Machine, ApiError> {
     st.db.machines().map_err(ise)?.into_iter().find(|m| m.id == id).ok_or((StatusCode::NOT_FOUND, format!("machine {id} not found")))
-}
-
-#[derive(Deserialize)]
-struct GroupBody {
-    id: i64,
-    grp: String,
-}
-
-/// POST /api/machines/group {id, grp} — free-text group (driver packages can target it); empty = none.
-async fn set_group(State(st): State<SharedState>, Json(b): Json<GroupBody>) -> Result<Json<serde_json::Value>, ApiError> {
-    let m = machine_by_id(&st, b.id)?;
-    let grp = b.grp.trim();
-    if !grp.is_empty() && !crate::drivers::group_ok(grp) {
-        return Err((StatusCode::BAD_REQUEST, "group: letters/digits/_/-, max 32".into()));
-    }
-    st.db.set_machine_group(m.id, (!grp.is_empty()).then_some(grp)).map_err(ise)?;
-    tracing::info!("{} group set to {}", who(&m), if grp.is_empty() { "-" } else { grp });
-    Ok(ok())
-}
-
-async fn list(State(st): State<SharedState>) -> Result<Json<Vec<Machine>>, ApiError> {
-    Ok(Json(st.db.machines().map_err(ise)?))
 }
 
 pub(crate) const HOSTNAME_RULE: &str =

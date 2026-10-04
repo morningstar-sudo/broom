@@ -104,8 +104,14 @@ pub(crate) fn refresh_shim() {
     let Some(src) = src else {
         return tracing::warn!("no shim: the stage bundle is not installed (see the 'stage bundle' log line) and no shim-signed package → Secure Boot clients cannot boot the kernels");
     };
+    // Copied next to it, then renamed over it: a client downloading the shim meanwhile never gets a half-written file.
     let dir = crate::tftp_dir().join("shim");
-    if let Err(e) = std::fs::create_dir_all(&dir).and_then(|_| std::fs::copy(src, dir.join("shimx64.efi"))) {
+    let tmp = dir.join("shimx64.efi.tmp");
+    let r = std::fs::create_dir_all(&dir)
+        .and_then(|_| std::fs::copy(src, &tmp))
+        .and_then(|_| std::fs::rename(&tmp, dir.join("shimx64.efi")));
+    if let Err(e) = r {
+        let _ = std::fs::remove_file(&tmp);
         tracing::warn!("copy {src} → {}: {e}", dir.display());
     }
 }

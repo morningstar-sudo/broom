@@ -10,8 +10,11 @@ let curPage=null;
 async function showPage(p){
   document.querySelectorAll('nav a').forEach(x=>x.classList.toggle('active',x.dataset.page===p));
   if(fragCache[p]===undefined){
-    try{fragCache[p]=await (await fetch('/ui/'+p)).text();}
-    catch(e){fragCache[p]='<p class="hint">failed to load page '+p+'</p>';}
+    try{const r=await fetch('/ui/'+p);
+      if(r.status===401){location.replace('/login');return;} // session expired: never cache the "login required" text
+      if(!r.ok)throw new Error(r.status);
+      fragCache[p]=await r.text();}
+    catch(e){document.getElementById('main').innerHTML='<p class="hint">failed to load page '+p+'</p>';return;}
   }
   document.getElementById('main').innerHTML=fragCache[p];
   curPage=p;

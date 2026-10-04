@@ -84,12 +84,14 @@ if (-not [IO.File]::Exists($v.Path + 'broom\basemode.txt')) {
 }
 # BASE MODE (ticked on the image): nothing restarts by itself. The technician sets up what must survive the reset on
 # THIS machine (e.g. FACEIT AC: open it, it wants one restart through its own RESTART button), then restarts -> that
-# restart commits base. Nobody there -> the next restart / power-off commits it, whoever used the machine meanwhile.
+# restart commits base. Nobody there -> the next clean restart / shutdown commits it, whoever used the machine
+# meanwhile. A hard power-off does NOT (the VHDX is left dirty -> base is built again, the setup is lost).
 step 'BASE MODE: set up apps now (e.g. open FACEIT AC), then RESTART - that restart saves base for every boot'
 $msg = "BASE MODE - this machine is building its base.`n`n" +
   "Everything done now is KEPT on this machine after every reset.`n`n" +
   "1. Open FACEIT AC (or other apps) and set them up.`n" +
   "2. Restart (FACEIT's RESTART button, or Start > Restart).`n`n" +
-  "That restart saves the base. Afterwards every boot resets to it."
+  "That restart saves the base. Afterwards every boot resets to it.`n`n" +
+  "Do NOT switch the power off or hold the power button: that loses the setup."
 # 0x40 information icon + 0x1000 system modal (stays on top of the desktop).
 try { (New-Object -ComObject WScript.Shell).Popup($msg, 0, 'Broom - BASE MODE', 0x1040) | Out-Null } catch { }

@@ -405,9 +405,7 @@ fn full_reply(req: &Packet, mt: u8, ip: Ipv4Addr, mac: &str, k: Kind, cfg: &Cfg,
 
 /// Decide the answer to one request. Pure (no sockets, no DB; debug logging only), so the protocol logic is unit-tested.
 /// Handle one DHCP packet: hand out IPs + boot info.
-/// `from`/`port` are unused (kept for the packet-router signature).
-pub fn handle(req: &Packet, from: SocketAddrV4, port: u16, cfg: &Cfg, st: &Store) -> Outcome {
-    let _ = (from, port);
+pub fn handle(req: &Packet, cfg: &Cfg, st: &Store) -> Outcome {
     let mut out = Outcome { reply: None, lease: LeaseOp::None, log: String::new(), warn: false };
     let Some(mt) = req.opt(53).and_then(|v| v.first().copied()) else {
         return out;
@@ -584,7 +582,7 @@ async fn serve(sock: tokio::net::UdpSocket, port: u16, st: SharedState) {
                 continue;
             }
         };
-        let (SocketAddr::V4(from), Some(req)) = (from, parse(&buf[..n])) else {
+        let (SocketAddr::V4(_), Some(req)) = (from, parse(&buf[..n])) else {
             continue;
         };
         // The SQLite reads/writes of one packet run on a blocking thread, not on a runtime worker: a DHCP flood then
@@ -592,7 +590,7 @@ async fn serve(sock: tokio::net::UdpSocket, port: u16, st: SharedState) {
         let st2 = st.clone();
         let reply = tokio::task::spawn_blocking(move || {
             let cfg = Cfg::load(&*st2.db).ok()?;
-            let out = handle(&req, from, port, &cfg, &Store::load(&*st2.db, now()));
+            let out = handle(&req, &cfg, &Store::load(&*st2.db, now()));
             if !out.log.is_empty() {
                 if out.warn {
                     tracing::warn!("{}", out.log);
@@ -720,7 +718,6 @@ mod tests {
         p
     }
 
-    const FROM: SocketAddrV4 = SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 68);
     const MACS: &str = "34:5a:60:7b:2b:1d";
 
     #[test]
@@ -735,7 +732,7 @@ mod tests {
 
     #[test]
     fn full_offer_first_free_ip_and_pxe_bootfile() {
-        let out = handle(&req(DISCOVER, &[]), FROM, 67, &cfg(), &store());
+        let out = handle(&req(DISCOVER, &[]), &cfg(), &store());
         let (p, dest) = out.reply.unwrap();
         assert_eq!(dest, Dest::Broadcast);
         assert_eq!(p.opt(53), Some(&[OFFER][..]));
@@ -749,20 +746,20 @@ mod tests {
     #[test]
     fn secure_boot_switch_picks_signed_ipxe() {
         let sb = Cfg { sb: true, ..cfg() };
-        let (p, _) = handle(&req(DISCOVER, &[]), FROM, 67, &sb, &store()).reply.unwrap();
+        let (p, _) = handle(&req(DISCOVER, &[]), &sb, &store()).reply.unwrap();
         assert_eq!(p.file, "sb/snponly-shim.efi", "UEFI PXE → Microsoft-signed iPXE shim");
         // iPXE itself (option 175) still gets the menu URL, whichever iPXE it is.
-        let (p, _) = handle(&req(DISCOVER, &[(175, &[1])]), FROM, 67, &sb, &store()).reply.unwrap();
+        let (p, _) = handle(&req(DISCOVER, &[(175, &[1])]), &sb, &store()).reply.unwrap();
         assert!(p.file.starts_with("http://10.0.0.12/boot.ipxe"));
     }
 
     #[test]
     fn ipxe_gets_menu_url() {
-        let out = handle(&req(DISCOVER, &[(175, &[1])]), FROM, 67, &cfg(), &store());
+        let out = handle(&req(DISCOVER, &[(175, &[1])]), &cfg(), &store());
         let p = out.reply.unwrap().0;
         assert_eq!(p.file, "http://10.0.0.12/boot.ipxe?mac=${net0/mac}&ip=${net0/ip}");
         assert_eq!(p.opt(175), Some(&[0xb0, 1, 1][..])); // no-pxedhcp: don't wait for ProxyDHCP
-        let plain = handle(&req(DISCOVER, &[]), FROM, 67, &cfg(), &store()).reply.unwrap().0;
+        let plain = handle(&req(DISCOVER, &[]), &cfg(), &store()).reply.unwrap().0;
         assert_eq!(plain.opt(175), None);
     }
 
@@ -770,7 +767,7 @@ mod tests {
     fn binding_wins_and_sends_hostname() {
         let mut st = store();
         st.bindings.insert(MACS.into(), (Ipv4Addr::new(10, 0, 0, 50), Some("PC01".into())));
-        let (p, _) = handle(&req(DISCOVER, &[]), FROM, 67, &cfg(), &st).reply.unwrap();
+        let (p, _) = handle(&req(DISCOVER, &[]), &cfg(), &st).reply.unwrap();
         assert_eq!(p.yiaddr, Ipv4Addr::new(10, 0, 0, 50));
         assert_eq!(p.opt(12), Some(&b"PC01"[..]));
     }
@@ -780,18 +777,18 @@ mod tests {
         let mut st = store();
         st.leases.insert("aa:aa:aa:aa:aa:aa".into(), (Ipv4Addr::new(10, 0, 0, 100), 2000)); // active
         st.bindings.insert("bb:bb:bb:bb:bb:bb".into(), (Ipv4Addr::new(10, 0, 0, 101), None));
-        let (p, _) = handle(&req(DISCOVER, &[]), FROM, 67, &cfg(), &st).reply.unwrap();
+        let (p, _) = handle(&req(DISCOVER, &[]), &cfg(), &st).reply.unwrap();
         assert_eq!(p.yiaddr, Ipv4Addr::new(10, 0, 0, 102));
         // Expired lease of another machine → its IP is free again.
         st.leases.insert("aa:aa:aa:aa:aa:aa".into(), (Ipv4Addr::new(10, 0, 0, 100), 500));
-        let (p, _) = handle(&req(DISCOVER, &[]), FROM, 67, &cfg(), &st).reply.unwrap();
+        let (p, _) = handle(&req(DISCOVER, &[]), &cfg(), &st).reply.unwrap();
         assert_eq!(p.yiaddr, Ipv4Addr::new(10, 0, 0, 100));
         // Pool full → no offer.
         let mut st = store();
         for (i, m) in ["a", "b", "c"].iter().enumerate() {
             st.leases.insert(m.to_string(), (Ipv4Addr::new(10, 0, 0, 100 + i as u8), 2000));
         }
-        assert!(handle(&req(DISCOVER, &[]), FROM, 67, &cfg(), &st).reply.is_none());
+        assert!(handle(&req(DISCOVER, &[]), &cfg(), &st).reply.is_none());
     }
 
     #[test]
@@ -803,37 +800,37 @@ mod tests {
             st
         };
         // DECLINE only when this MAC holds the in-range IP (and opt 54 is us or absent).
-        assert!(matches!(handle(&req(DECLINE, &[(50, &ip.octets())]), FROM, 67, &cfg(), &store()).lease, LeaseOp::None));
-        assert!(matches!(handle(&req(DECLINE, &[(50, &ip.octets())]), FROM, 67, &cfg(), &held()).lease, LeaseOp::Set { .. }));
+        assert!(matches!(handle(&req(DECLINE, &[(50, &ip.octets())]), &cfg(), &store()).lease, LeaseOp::None));
+        assert!(matches!(handle(&req(DECLINE, &[(50, &ip.octets())]), &cfg(), &held()).lease, LeaseOp::Set { .. }));
         let outrange = Ipv4Addr::new(192, 168, 1, 1);
         let mut st = store();
         st.leases.insert(MACS.into(), (outrange, 5000));
-        assert!(matches!(handle(&req(DECLINE, &[(50, &outrange.octets())]), FROM, 67, &cfg(), &st).lease, LeaseOp::None));
+        assert!(matches!(handle(&req(DECLINE, &[(50, &outrange.octets())]), &cfg(), &st).lease, LeaseOp::None));
         // RELEASE only when ciaddr == the held IP.
         let mut r = req(RELEASE, &[]);
         r.ciaddr = ip;
-        assert!(matches!(handle(&r, FROM, 67, &cfg(), &held()).lease, LeaseOp::Remove(_)));
+        assert!(matches!(handle(&r, &cfg(), &held()).lease, LeaseOp::Remove(_)));
         let mut r2 = req(RELEASE, &[]);
         r2.ciaddr = Ipv4Addr::new(10, 0, 0, 200);
-        assert!(matches!(handle(&r2, FROM, 67, &cfg(), &held()).lease, LeaseOp::None));
+        assert!(matches!(handle(&r2, &cfg(), &held()).lease, LeaseOp::None));
         // DISCOVER must not shorten a longer lease this MAC already has.
         let mut st = store();
         st.leases.insert(MACS.into(), (ip, 9000));
-        assert!(matches!(handle(&req(DISCOVER, &[]), FROM, 67, &cfg(), &st).lease, LeaseOp::Set { expires: 9000, .. }));
+        assert!(matches!(handle(&req(DISCOVER, &[]), &cfg(), &st).lease, LeaseOp::Set { expires: 9000, .. }));
     }
 
     #[test]
     fn request_ack_nak_and_other_server() {
-        let ok = handle(&req(REQUEST, &[(50, &[10, 0, 0, 101])]), FROM, 67, &cfg(), &store());
+        let ok = handle(&req(REQUEST, &[(50, &[10, 0, 0, 101])]), &cfg(), &store());
         let (p, _) = ok.reply.unwrap();
         assert_eq!((p.opt(53), p.yiaddr), (Some(&[ACK][..]), Ipv4Addr::new(10, 0, 0, 101)));
         assert!(matches!(ok.lease, LeaseOp::Set { expires: 4600, .. }));
         // A client we know (it has a lease here) asking for a wrong IP → NAK.
         let mut known = store();
         known.leases.insert(MACS.into(), (Ipv4Addr::new(10, 0, 0, 100), 5000));
-        let bad = handle(&req(REQUEST, &[(50, &[192, 168, 1, 5])]), FROM, 67, &cfg(), &known);
+        let bad = handle(&req(REQUEST, &[(50, &[192, 168, 1, 5])]), &cfg(), &known);
         assert_eq!(bad.reply.unwrap().0.opt(53), Some(&[NAK][..]));
-        let other = handle(&req(REQUEST, &[(50, &[10, 0, 0, 101]), (54, &[10, 0, 0, 9])]), FROM, 67, &cfg(), &store());
+        let other = handle(&req(REQUEST, &[(50, &[10, 0, 0, 101]), (54, &[10, 0, 0, 9])]), &cfg(), &store());
         assert!(other.reply.is_none());
     }
 
@@ -841,11 +838,11 @@ mod tests {
     /// with ANOTHER DHCP server → never NAK it off the LAN.
     #[test]
     fn foreign_client_is_not_naked() {
-        let out = handle(&req(REQUEST, &[(50, &[192, 168, 1, 5])]), FROM, 67, &cfg(), &store());
+        let out = handle(&req(REQUEST, &[(50, &[192, 168, 1, 5])]), &cfg(), &store());
         assert!(out.reply.is_none() && matches!(out.lease, LeaseOp::None));
         let mut renewing = req(REQUEST, &[]);
         renewing.ciaddr = Ipv4Addr::new(192, 168, 1, 5);
-        assert!(handle(&renewing, FROM, 67, &cfg(), &store()).reply.is_none());
+        assert!(handle(&renewing, &cfg(), &store()).reply.is_none());
     }
 
     /// Static IP still leased to another MAC → the bound machine gets a pool IP for now (warned), not a duplicate.
@@ -855,12 +852,12 @@ mod tests {
         let bound = Ipv4Addr::new(10, 0, 0, 50);
         st.bindings.insert(MACS.into(), (bound, Some("PC01".into())));
         st.leases.insert("aa:aa:aa:aa:aa:aa".into(), (bound, 2000)); // live
-        let out = handle(&req(DISCOVER, &[]), FROM, 67, &cfg(), &st);
+        let out = handle(&req(DISCOVER, &[]), &cfg(), &st);
         assert_eq!(out.reply.unwrap().0.yiaddr, Ipv4Addr::new(10, 0, 0, 100));
         assert!(out.warn && out.log.contains("still leased to aa:aa:aa:aa:aa:aa"));
         assert!(!allowed(MACS, bound, &cfg(), &st), "no ACK for the held static IP");
         st.leases.insert("aa:aa:aa:aa:aa:aa".into(), (bound, 500)); // expired
-        assert_eq!(handle(&req(DISCOVER, &[]), FROM, 67, &cfg(), &st).reply.unwrap().0.yiaddr, bound);
+        assert_eq!(handle(&req(DISCOVER, &[]), &cfg(), &st).reply.unwrap().0.yiaddr, bound);
         assert!(!allowed(MACS, Ipv4Addr::new(10, 0, 0, 100), &cfg(), &st), "once free: only the binding");
     }
 
@@ -869,7 +866,7 @@ mod tests {
         let mut st = store();
         let bound = Ipv4Addr::new(10, 0, 0, 50);
         st.bindings.insert(MACS.into(), (bound, Some("PC01".into())));
-        let out = handle(&req(DECLINE, &[(50, &bound.octets())]), FROM, 67, &cfg(), &st);
+        let out = handle(&req(DECLINE, &[(50, &bound.octets())]), &cfg(), &st);
         assert!(out.warn && out.log.contains("PC01 declined 10.0.0.50") && matches!(out.lease, LeaseOp::None));
     }
 
@@ -883,31 +880,31 @@ mod tests {
         };
         // Rapid Commit: only when enabled AND the client asks (option 80) → ACK + option 80 + full lease.
         let rc = with(&|o| o.rapid_commit = true);
-        let out = handle(&req(DISCOVER, &[(80, &[])]), FROM, 67, &rc, &store());
+        let out = handle(&req(DISCOVER, &[(80, &[])]), &rc, &store());
         let p = out.reply.unwrap().0;
         assert_eq!((p.opt(53), p.opt(80)), (Some(&[ACK][..]), Some(&[][..])));
         assert!(matches!(out.lease, LeaseOp::Set { expires: 4600, .. }) && out.log.contains("rapid commit"));
-        assert_eq!(handle(&req(DISCOVER, &[]), FROM, 67, &rc, &store()).reply.unwrap().0.opt(53), Some(&[OFFER][..]), "client didn't ask");
-        assert_eq!(handle(&req(DISCOVER, &[(80, &[])]), FROM, 67, &cfg(), &store()).reply.unwrap().0.opt(53), Some(&[OFFER][..]), "off by default");
+        assert_eq!(handle(&req(DISCOVER, &[]), &rc, &store()).reply.unwrap().0.opt(53), Some(&[OFFER][..]), "client didn't ask");
+        assert_eq!(handle(&req(DISCOVER, &[(80, &[])]), &cfg(), &store()).reply.unwrap().0.opt(53), Some(&[OFFER][..]), "off by default");
         // iPXE fast off → no option 175.
         let ipxe = req(DISCOVER, &[(175, &[1])]);
-        assert!(handle(&ipxe, FROM, 67, &with(&|o| o.ipxe_fast = false), &store()).reply.unwrap().0.opt(175).is_none());
+        assert!(handle(&ipxe, &with(&|o| o.ipxe_fast = false), &store()).reply.unwrap().0.opt(175).is_none());
         // Hostname off → no option 12 even for a bound machine.
         let mut bound = store();
         bound.bindings.insert(MACS.into(), (Ipv4Addr::new(10, 0, 0, 50), Some("PC01".into())));
-        assert!(handle(&req(DISCOVER, &[]), FROM, 67, &with(&|o| o.send_hostname = false), &bound).reply.unwrap().0.opt(12).is_none());
+        assert!(handle(&req(DISCOVER, &[]), &with(&|o| o.send_hostname = false), &bound).reply.unwrap().0.opt(12).is_none());
         // Not authoritative → a known client asking for a wrong IP gets no NAK.
         let mut known = store();
         known.leases.insert(MACS.into(), (Ipv4Addr::new(10, 0, 0, 100), 5000));
         let quiet = with(&|o| o.authoritative = false);
-        assert!(handle(&req(REQUEST, &[(50, &[192, 168, 1, 5])]), FROM, 67, &quiet, &known).reply.is_none());
+        assert!(handle(&req(REQUEST, &[(50, &[192, 168, 1, 5])]), &quiet, &known).reply.is_none());
     }
 
     #[test]
     fn relayed_packets_ignored() {
         let mut r = req(DISCOVER, &[]);
         r.giaddr = Ipv4Addr::new(10, 9, 0, 1);
-        let out = handle(&r, FROM, 67, &cfg(), &store());
+        let out = handle(&r, &cfg(), &store());
         assert!(out.reply.is_none() && matches!(out.lease, LeaseOp::None));
     }
 

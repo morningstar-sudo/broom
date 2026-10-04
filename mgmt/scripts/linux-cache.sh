@@ -18,7 +18,16 @@ mkdir -p /games && mount --bind $C/games /games && chmod 1777 $C/games
 # Every image this machine uses keeps its own copy (<name>.img + <name>.sha256; the .sha256 mtime = last use).
 # Every boot the server says which ones may stay ("name hash" per line): a copy not listed (image deleted or set to not
 # use the SSD) or of another version is removed. No answer → keep them all. The copy running now is never touched.
-if [ -n "$SRV" ] && list=$(wget -q -T 10 -O - "http://$SRV/api/cache-list" 2>/dev/null); then
+# On a cache HIT the initramfs never brought the network up, and this service starts early → give it up to a minute.
+cache_list(){
+  i=0
+  while [ $i -lt 12 ]; do
+    wget -q -T 5 -O - "http://$SRV/api/cache-list" 2>/dev/null && return 0
+    i=$((i + 1)); sleep 5
+  done
+  return 1
+}
+if [ -n "$SRV" ] && command -v wget >/dev/null && list=$(cache_list); then
   for f in $C/*.sha256; do
     [ -f "$f" ] || continue; n=${f##*/}; n=${n%.sha256}
     [ "$n" = "$NAME" ] && [ "$MODE" = hit ] && continue

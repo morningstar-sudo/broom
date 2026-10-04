@@ -15,15 +15,11 @@ const OACK: u16 = 6;
 const MAX_BLKSIZE: usize = 1468;
 const RETRIES: usize = 5;
 
-pub async fn serve(sock: UdpSocket, server: Ipv4Addr, iface: String) {
-    serve_inner(sock, server, iface).await
-}
-
 /// Transfers at once. Each holds a socket for up to ~10 s (retries): a flood of (spoofed) RRQs must not use up the
 /// process's file descriptors (HTTP and everything else would fail). A room booting at once stays far below it.
 const MAX_TRANSFERS: usize = 64;
 
-async fn serve_inner(sock: UdpSocket, server: Ipv4Addr, iface: String) {
+pub async fn serve(sock: UdpSocket, server: Ipv4Addr, iface: String) {
     let slots = std::sync::Arc::new(tokio::sync::Semaphore::new(MAX_TRANSFERS));
     let mut buf = [0u8; 1500];
     loop {
@@ -192,7 +188,7 @@ mod tests {
     async fn server() -> SocketAddr {
         let sock = UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let addr = sock.local_addr().unwrap();
-        tokio::spawn(serve_inner(sock, Ipv4Addr::LOCALHOST, String::new()));
+        tokio::spawn(serve(sock, Ipv4Addr::LOCALHOST, String::new()));
         addr
     }
 

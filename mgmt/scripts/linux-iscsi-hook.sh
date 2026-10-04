@@ -27,7 +27,9 @@ for d in /sys/block/*; do
   localdisks="$localdisks $n"
 done
 log "local disks: ${localdisks:-(none)} | image=$NAME"
-has_label(){ [ "$(blkid -s LABEL -o value "$1" 2>/dev/null)" = "$2" ]; }
+# ext4 label of $1 = $2, read from the superblock itself (s_volume_name at 1024+120): no blkid needed — a busybox
+# blkid (no -s/-o) would read as "no label" and the kept cache would be formatted on every boot.
+has_label(){ [ "$(dd if="$1" bs=1 skip=1144 count=16 2>/dev/null | tr -d '\000')" = "$2" ]; }
 
 # GPT partition name of a sysfs partition dir, and the device of the partition named $2 on disk $1 (no tool needed).
 pname(){ sed -n 's/^PARTNAME=//p' "$1/uevent" 2>/dev/null; }

@@ -123,17 +123,22 @@ fn clean_leftovers() {
         }
     };
     // images/<name>/image.img.new (convert), tftp/broom-win/<name>/golden.vhdx.tmp (publish).
+    // (upload/ itself is kept: an upload refused by its publish waits there for a retry; its unzip/ is a convert temp.)
     for e in std::fs::read_dir(images_dir()).into_iter().flatten().flatten() {
         rm(&e.path().join("image.img.new"));
+        rm(&e.path().join("upload").join("unzip"));
     }
+    each(&tftp_dir().join("broom-drivers"), &|n| !n.ends_with(".tmp")); // driver archive being written
     for e in std::fs::read_dir(tftp_dir().join("broom-win")).into_iter().flatten().flatten() {
         rm(&e.path().join("golden.vhdx.tmp"));
     }
     // tftp/broom/<name>.new|.old (Linux publish swap); tftp/broom-stage.new-*|.old-* (stage bundle install).
     each(&tftp_dir().join("broom"), &|n| !(n.ends_with(".new") || n.ends_with(".old")));
     each(tftp_dir(), &|n| !(n.starts_with("broom-stage.new") || n.starts_with("broom-stage.old")));
-    // work/: bundle downloads, half-built exports.
-    each(&work_dir(), &|n| !(n.starts_with("broom-stage-") && n.ends_with(".tar.gz")));
+    // work/: bundle downloads, driver upload/extract dirs, the stage build's initramfs config, half-built exports.
+    each(&work_dir(), &|n| {
+        !((n.starts_with("broom-stage-") && n.ends_with(".tar.gz")) || n.starts_with("drvup.") || n.starts_with("drvex.") || n == "stage-conf")
+    });
     each(&work_dir().join("export"), &|n| !n.ends_with(".new"));
 }
 

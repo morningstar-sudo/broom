@@ -116,7 +116,7 @@ mod tests {
             let sh = format!(
                 "cd {d}; PATH={d}/bin:$PATH; WB_GB=30; REG={reg}; LX={lx}; SSD={ssd}; localdisks=\"{disks}\"\nlog(){{ echo \"$*\" >> log; }}\n\
                  losetup(){{ :; }}; udevadm(){{ :; }}; sleep(){{ :; }}\n\
-                 blkid(){{ case \" {fmt} \" in *\" $5 \"*) echo broomcache;; esac; }}\n\
+                 has_label(){{ case \" {fmt} \" in *\" $1 \"*) [ \"$2\" = broomcache ];; *) false;; esac; }}\n\
                  sfdisk(){{ for a; do :; done; n=${{a##*/}}; cat > sfdisk.$n; rm -rf {sys}/$n/$n[0-9]*; i=0\n\
                    sed -n 's/.*name=\\([A-Za-z]*\\).*/\\1/p' sfdisk.$n | while read p; do i=$((i+1)); mkdir -p {sys}/$n/$n$i; echo PARTNAME=$p > {sys}/$n/$n$i/uevent; done; }}\n\
                  {body}\necho \"WB=$wb CACHE=$cache\"",
@@ -125,7 +125,8 @@ mod tests {
                 disks = names.join(" "),
                 fmt = formatted.join(" "),
                 sys = sys.display(),
-                body = block.replace("/sys/block/", &format!("{}/", sys.display()))
+                // the script's has_label (reads a real superblock) is replaced by the mock above
+                body = block.split_once('\n').unwrap().1.replace("/sys/block/", &format!("{}/", sys.display()))
             );
             let o = std::process::Command::new("sh").args(["-c", &sh]).output().unwrap();
             let rd = |f: &str| std::fs::read_to_string(d.join(f)).unwrap_or_default();

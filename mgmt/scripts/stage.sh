@@ -10,14 +10,15 @@ log(){ echo "broom: $*"; echo "$*" >> /run/broom-stage.log; }
 die(){ panic "broom stage ERROR: $*"; }
 restart(){ log "$*"; sleep 2; reboot -f 2>/dev/null || echo b > /proc/sysrq-trigger; sleep 30; }
 # GNU wget copied by the hook, called by path: the initramfs busybox wget has no --post-file / -T (the driver list
-# needs them) and must never be picked instead.
-if [ -x /broom/bin/wget ]; then wget(){ /broom/bin/wget "$@"; }
+# needs them) and must never be picked instead. Its defaults wait 15 min per read and retry 20 times — a stalled server
+# must not hang the stage that long: 30 s, 3 tries (an -T given by the caller still wins).
+if [ -x /broom/bin/wget ]; then wget(){ /broom/bin/wget -T 30 -t 3 "$@"; }
 else log "WARNING: no GNU wget in the stage (publish again) -> drivers skipped"; fi
 # Whole-file download showing ONLY a progress bar (file name, %, bytes, speed, ETA) — no URL / connecting / headers /
 # "saved" text. GNU wget: -q hides everything, --show-progress brings the bar back; bar:force because the initramfs
 # console is not always seen as a tty; noscroll keeps the name still. Busybox wget: already just its own bar.
 getfile(){
-  if [ -x /broom/bin/wget ]; then /broom/bin/wget -q --show-progress --progress=bar:force:noscroll "$@"
+  if [ -x /broom/bin/wget ]; then /broom/bin/wget -T 30 -t 3 -q --show-progress --progress=bar:force:noscroll "$@"
   else wget "$@"; fi
 }
 NAME=""; HASH=""; SRV=""; HOST=""; LIC=""; MAC=""; REG=""; BASE=""; STRICT=""; LX=""; WB=""
