@@ -13,7 +13,6 @@
 // The overlay/iSCSI hook inside the initrd is the most fragile part: after changing it, boot a real client
 // (SSD cache hit and miss) before releasing.
 use std::path::Path;
-use std::process::Command;
 
 /// Extract vmlinuz + initrd.img from the golden → <home>/tftp/broom/<name>/, inject the broom hook into the
 /// initrd. Returns the root UUID. Blocking.
@@ -255,32 +254,22 @@ fi
 /// Append one cpio.gz (overrides local-top/iscsi = attach golden + SSD writeback; + /etc/overlayroot.conf)
 /// to the end of the initrd → the kernel concatenates cpios, the later one overrides the golden's.
 fn inject_initrd(initrd: &str, name: &str) -> Result<(), String> {
-    let work = crate::work_dir().join(format!("inject-{name}")).to_string_lossy().into_owned();
-    let _ = std::fs::remove_dir_all(&work);
-    std::fs::create_dir_all(format!("{work}/scripts/local-top")).map_err(|e| e.to_string())?;
-    std::fs::create_dir_all(format!("{work}/etc")).map_err(|e| e.to_string())?;
+    use crate::archive::Entry;
+    use std::io::Write;
     // OVERRIDE scripts/local-top/iscsi (already in ORDER → surely runs). Does both attach + writeback.
-    let iscsi_hook = format!("{work}/scripts/local-top/iscsi");
-    std::fs::write(&iscsi_hook, BROOM_ISCSI).map_err(|e| e.to_string())?;
-    std::fs::write(format!("{work}/scripts/broom-cache.sh"), CACHE_SCRIPT)
-        .map_err(|e| e.to_string())?;
-    std::fs::write(format!("{work}/etc/overlayroot.conf"), OVERLAYROOT_CONF)
-        .map_err(|e| e.to_string())?;
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&iscsi_hook, std::fs::Permissions::from_mode(0o755));
-    }
-    // cd work → cpio newc gzip → append to the initrd (absolute path).
-    let sh = format!(
-        "cd '{work}' && find . -mindepth 1 -print0 | cpio --null -o -H newc 2>/dev/null | gzip -9 >> '{initrd}'"
-    );
-    let ok = Command::new("sh").arg("-c").arg(&sh).status().map(|s| s.success()).unwrap_or(false);
-    let _ = std::fs::remove_dir_all(&work);
-    if ok {
-        Ok(())
-    } else {
-        Err("inject_initrd: appending the cpio failed (cpio/gzip missing?)".into())
-    }
+    let cpio = crate::archive::cpio_gz(&[
+        Entry { path: "scripts", mode: 0o040755, data: &[] },
+        Entry { path: "scripts/local-top", mode: 0o040755, data: &[] },
+        Entry { path: "scripts/local-top/iscsi", mode: 0o100755, data: BROOM_ISCSI.as_bytes() },
+        Entry { path: "scripts/broom-cache.sh", mode: 0o100644, data: CACHE_SCRIPT.as_bytes() },
+        Entry { path: "etc", mode: 0o040755, data: &[] },
+        Entry { path: "etc/overlayroot.conf", mode: 0o100644, data: OVERLAYROOT_CONF.as_bytes() },
+    ]);
+    std::fs::OpenOptions::new()
+        .append(true)
+        .open(initrd)
+        .and_then(|mut f| f.write_all(&cpio))
+        .map_err(|e| format!("inject_initrd {name}: append to {initrd}: {e}"))
 }
 
 /// Script RUN INSIDE THE GOLDEN VM: installs open-iscsi + overlayroot + update-initramfs (packages only;

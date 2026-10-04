@@ -1,10 +1,12 @@
 // main.rs — bootrom mgmt app (Rust/axum). One binary, runs on the Linux server.
 // Modules: boot (iPXE menu), images (+versions, publish), monitor (+wol), machines/devices, dhcp/tftp/iscsi, auth.
+mod archive;
 mod auth;
 mod boot;
 mod db;
 mod devices;
 mod dhcp;
+mod disk;
 mod drivers;
 mod export;
 mod images;

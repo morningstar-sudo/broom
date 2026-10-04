@@ -615,22 +615,15 @@ pub fn build_stage() -> Result<bool, String> {
 }
 
 /// NTFS/basic-data partitions, LARGEST first. (start, size) in bytes.
-fn ntfs_parts(sfdisk_json: &str) -> Result<Vec<(u64, u64)>, String> {
-    let v: serde_json::Value = serde_json::from_str(sfdisk_json).map_err(|e| e.to_string())?;
-    let t = &v["partitiontable"];
-    let ss = t["sectorsize"].as_u64().unwrap_or(512);
-    let mut parts: Vec<(u64, u64)> = t["partitions"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter(|p| {
-            let ty = p["type"].as_str().unwrap_or("").to_ascii_uppercase();
-            ty == "EBD0A0A2-B9E5-4433-87C0-68B6B72699C7" || ty == "7"
-        })
-        .filter_map(|p| Some((p["start"].as_u64()? * ss, p["size"].as_u64()? * ss)))
+fn ntfs_parts(t: &crate::disk::Table) -> Vec<(u64, u64)> {
+    let mut parts: Vec<(u64, u64)> = t
+        .parts
+        .iter()
+        .filter(|p| p.kind.eq_ignore_ascii_case(crate::disk::BASIC_DATA) || p.kind == "7")
+        .map(|p| (p.start, p.size))
         .collect();
     parts.sort_by(|a, b| b.1.cmp(&a.1));
-    Ok(parts)
+    parts
 }
 
 /// Mount partition [start, start+size) of a raw file (loop), run f(mnt), always unmount + detach the loop.
@@ -652,14 +645,20 @@ fn with_part<T>(
     // Mount left over from an interrupted publish (mgmt restarted midway) → unmount everything first.
     while run("umount", &[mnt]).is_ok() {}
     let opt = if ro { "ro" } else { "rw" };
-    let r = run("mount", &["-t", "ntfs-3g", "-o", opt, &dev, mnt])
-        .or_else(|_| run("mount", &["-t", "ntfs3", "-o", opt, &dev, mnt]))
+    // The kernel's ntfs3 driver (no ntfs-3g package). It refuses a dirty volume → same hint as a read-only mount.
+    let r = run("mount", &["-t", "ntfs3", "-o", opt, &dev, mnt])
+        .map_err(|e| {
+            format!(
+                "mount the Windows partition (ntfs3): {e} — if the kernel has ntfs3, Windows was not shut down cleanly \
+                 (hibernated, Fast Startup or forced power-off): boot the VM, run the prep command again, let it power off"
+            )
+        })
         .and_then(|_| {
-            // ntfs-3g silently falls back to read-only when Windows didn't shut down cleanly → say so up front.
+            // A read-only fallback must not pass as success: probe a write first.
             let probe = format!("{mnt}/.broom-rw");
             let r = if !ro && std::fs::write(&probe, b"").is_err() {
                 Err("Windows partition mounted read-only: Windows was not shut down cleanly (hibernated, Fast Startup or \
-                     forced power-off) — boot the VM, run broom-prep-win again and let it power off by itself, then upload"
+                     forced power-off) — boot the VM, run the prep command again and let it power off by itself, then upload"
                     .into())
             } else {
                 let _ = std::fs::remove_file(&probe);
@@ -675,7 +674,7 @@ fn with_part<T>(
 /// The partition that CONTAINS Windows (has the SYSTEM hive) — mounts each NTFS partition read-only, largest first.
 /// No guessing by size: picking the wrong one would let the later in-place edits wreck image.img.
 fn find_windows(raw: &str, mnt: &str) -> Result<(u64, u64), String> {
-    let parts = ntfs_parts(&run("sfdisk", &["-J", raw])?)?;
+    let parts = ntfs_parts(&crate::disk::read(raw)?.ok_or("golden has no partition table")?);
     let mut seen = Vec::new();
     for p in &parts {
         let probe = with_part(raw, *p, mnt, true, |m| {
@@ -827,22 +826,13 @@ fn build_golden(raw: &str, out: &str, name: &str, steps: &mut crate::publish::St
             punch_hole(raw, off, len)?;
         }
     }
-    let layout = format!(
-        "label: gpt\nstart={}, size={}, type=EBD0A0A2-B9E5-4433-87C0-68B6B72699C7\n",
-        start / 512,
-        size / 512
-    );
-    // --wipe* never: do NOT erase the NTFS signature of the Windows partition whose data we keep.
-    let sh = format!(
-        "printf '{}' | sfdisk -q --wipe never --wipe-partitions never '{raw}'",
-        layout.replace('\n', "\\n")
-    );
-    run("sh", &["-c", &sh]).map_err(|e| format!("sfdisk golden single partition: {e}"))?;
+    // Only the tables are rewritten — the NTFS data of the Windows partition stays as it is.
+    crate::disk::write_single_gpt(raw, start, size).map_err(|e| format!("golden single partition: {e}"))?;
 
     // 3. Mount read-write: enable boot-start disk drivers + silent OOBE + new broom-done + take the EFI bundle.
     steps.go("registry + EFI");
     let drivers = with_part(raw, (start, size), &mnt, false, |m| {
-        let mut drv = enable_boot_storage(m)?;
+        let mut drv = boot_storage_done(m)?;
         if silent_oobe(m)? {
             drv.push_str("; OOBE runs silently (SkipMachineOOBE)");
         }
@@ -852,7 +842,7 @@ fn build_golden(raw: &str, out: &str, name: &str, steps: &mut crate::publish::St
         if !Path::new(&format!("{m}/broom/efi/EFI/Microsoft/Boot/BCD")).exists() {
             return Err("golden is missing C:\\broom\\efi\\EFI\\Microsoft\\Boot\\BCD — run broom-prep-win in the VM before sysprep".into());
         }
-        run("tar", &["-czf", &format!("{out}/efi.tar.gz"), "-C", &format!("{m}/broom/efi"), "EFI"])?;
+        crate::archive::tar_gz(Path::new(&format!("{m}/broom/efi")), Path::new(&format!("{out}/efi.tar.gz")))?;
         Ok(drv)
     })?;
 
@@ -931,34 +921,17 @@ const BOOT_STORAGE: &[&str] = &[
     "amdsata", "amdsbs", "amdxata", "nvraid", "nvstor", "pvscsi",
 ];
 
-/// Edit the SYSTEM hive offline (hivexregedit): Start=0 + StartOverride\0=0 for drivers in
-/// BOOT_STORAGE that EXIST in the image (no empty service keys created). Returns the enabled list.
-/// ControlSet001 only (a sysprepped image always uses set 1).
-fn enable_boot_storage(mnt: &str) -> Result<String, String> {
-    let hive = format!("{mnt}/Windows/System32/config/SYSTEM");
-    if !Path::new(&hive).exists() {
-        // Include the root listing of the mounted partition to tell a wrong/empty mount from a case mismatch.
-        let top: Vec<String> = std::fs::read_dir(mnt)
-            .map(|rd| rd.flatten().take(20).map(|e| e.file_name().to_string_lossy().to_string()).collect())
-            .unwrap_or_default();
-        return Err(format!("hive {hive} not found — partition root: [{}]", top.join(", ")));
+/// The prep script set Start=0 + StartOverride\0=0 for the BOOT_STORAGE drivers this Windows has, right after
+/// sysprep generalized it, and listed them in C:\broom\boot-storage.ok. A golden prepped by an older version (the
+/// server used to edit the hive itself) lacks that marker → it would not boot on other controllers → refuse.
+fn boot_storage_done(mnt: &str) -> Result<String, String> {
+    let f = format!("{mnt}/broom/boot-storage.ok");
+    match std::fs::read_to_string(&f) {
+        Ok(s) => Ok(s.trim().to_string()),
+        Err(_) => Err("this golden was prepared by an older version (C:\\broom\\boot-storage.ok missing) — boot the VM, \
+                       run the Windows prep command again (Images page), let it power off, then upload"
+            .into()),
     }
-    let on: Vec<&str> = BOOT_STORAGE
-        .iter()
-        .copied()
-        .filter(|d| run("hivexregedit", &["--export", &hive, &format!("\\ControlSet001\\Services\\{d}")]).is_ok())
-        .collect();
-    let mut reg = String::from("Windows Registry Editor Version 5.00\n\n");
-    for d in &on {
-        let k = format!("HKEY_LOCAL_MACHINE\\SYSTEM\\ControlSet001\\Services\\{d}");
-        reg.push_str(&format!("[{k}]\n\"Start\"=dword:00000000\n\n[{k}\\StartOverride]\n\"0\"=dword:00000000\n\n"));
-    }
-    let file = format!("{mnt}.reg");
-    std::fs::write(&file, reg).map_err(|e| e.to_string())?;
-    let r = run("hivexregedit", &["--merge", "--prefix", "HKEY_LOCAL_MACHINE\\SYSTEM", &hive, &file]);
-    let _ = std::fs::remove_file(&file);
-    r.map_err(|e| format!("disk driver registry edit: {e}"))?;
-    Ok(on.join(","))
 }
 
 /// XML escape for values embedded in unattend.
@@ -1110,9 +1083,28 @@ Write-Host '>>> Clearing event logs + TRIM of the free space...' -ForegroundColo
 foreach ($l in (wevtutil el)) { wevtutil cl "$l" 2>&1 | Out-Null }
 Optimize-Volume -DriveLetter $env:SystemDrive[0] -ReTrim -ErrorAction SilentlyContinue
 
-# 7. Sysprep → power off the VM. Errors: see C:\Windows\System32\Sysprep\Panther\setupact.log.
-Write-Host '>>> Sysprep... the VM will POWER OFF. Then upload the .vmdk file on the web (OS = windows).' -ForegroundColor Green
-& "$env:SystemRoot\System32\Sysprep\sysprep.exe" /generalize /oobe /shutdown /unattend:"$B\unattend.xml"
+# 7. Sysprep (generalize, then return here) → boot-start disk drivers → power off the VM.
+#    Errors: see C:\Windows\System32\Sysprep\Panther\setupact.log.
+$ErrorActionPreference = 'Stop'
+Write-Host '>>> Sysprep... the VM will POWER OFF by itself. Then upload it on the web (OS = windows).' -ForegroundColor Green
+$tag = "$env:SystemRoot\System32\Sysprep\Sysprep_succeeded.tag"
+Remove-Item $tag -ErrorAction SilentlyContinue
+Start-Process -Wait "$env:SystemRoot\System32\Sysprep\sysprep.exe" -ArgumentList '/generalize', '/oobe', '/quit', "/unattend:$B\unattend.xml"
+if (-not (Test-Path $tag)) { throw 'sysprep failed - see C:\Windows\System32\Sysprep\Panther\setupact.log' }
+# Windows' OWN storage drivers (SATA/NVMe/RAID) start at boot on ANY client controller: native VHD boot needs the
+# SSD controller's driver before anything else runs. Set AFTER generalize (it would reset them), drivers this Windows
+# has only. Per-machine drivers (NIC, GPU...) come from the Drivers page when each machine builds its base.
+$on = @()
+foreach ($d in @(__BOOT_STORAGE__)) {
+  $k = "HKLM\SYSTEM\CurrentControlSet\Services\$d"
+  if (Test-Path "Registry::$k") {
+    reg add $k /v Start /t REG_DWORD /d 0 /f | Out-Null
+    reg add "$k\StartOverride" /v 0 /t REG_DWORD /d 0 /f | Out-Null
+    $on += $d
+  }
+}
+Set-Content -Encoding ascii "$B\boot-storage.ok" ($on -join ',')
+Stop-Computer -Force
 "#;
 
 /// First logon (when base.vhdx is created on each machine): write base.ok to BROOMWIN, then restart at once → the stage
@@ -1311,10 +1303,17 @@ pub fn prep_script(db: &dyn Db) -> String {
     // The values sit inside unattend.xml (XML-escaped) AND inside a PowerShell here-string (`$`/backtick would be
     // expanded). set_cafe_user already rejects those characters; escaping here too covers an old stored value.
     let esc = |s: &str| xml(s).replace('`', "``").replace('$', "`$");
+    fill_prep(&esc(&user), &esc(&pass))
+}
+
+/// PREP_WIN with its placeholders filled (user/password already escaped).
+fn fill_prep(user: &str, pass: &str) -> String {
+    let drivers = BOOT_STORAGE.iter().map(|d| format!("'{d}'")).collect::<Vec<_>>().join(", ");
     PREP_WIN
         .replace("__BROOM_DONE__", BROOM_DONE)
-        .replace("__USER__", &esc(&user))
-        .replace("__PASS__", &esc(&pass))
+        .replace("__BOOT_STORAGE__", &drivers)
+        .replace("__USER__", user)
+        .replace("__PASS__", pass)
 }
 
 /// Overwrite broom-done.ps1 in the golden (a golden prepped with an old version still gets the new logic).
@@ -1676,14 +1675,15 @@ mod tests {
 
     #[test]
     fn prep_win_filled() {
-        let s = super::PREP_WIN
-            .replace("__BROOM_DONE__", super::BROOM_DONE)
-            .replace("__USER__", "guest")
-            .replace("__PASS__", "1");
+        let s = super::fill_prep("guest", "1");
         assert!(!s.contains("__"), "placeholder left unreplaced");
         assert!(super::BROOM_DONE.is_ascii(), "broom-done is written with -Encoding ascii");
         assert!(super::BROOM_BOOTORDER.is_ascii());
         assert!(s.contains("WriteAllText"));
+        // Boot-start disk drivers: set by the prep AFTER sysprep generalized (/quit, not /shutdown), then power off.
+        assert!(s.contains("@('storahci', 'stornvme', "));
+        let (sp, reg, off) = (s.find("'/quit'").unwrap(), s.find("reg add $k /v Start").unwrap(), s.find("Stop-Computer -Force").unwrap());
+        assert!(sp < reg && reg < off && s.contains("boot-storage.ok"));
     }
 
     #[test]
@@ -1698,17 +1698,23 @@ mod tests {
 
     #[test]
     fn ntfs_parts_order() {
+        use crate::disk::{Part, Table};
+        let part = |s: u64, n: u64, k: &str| Part { start: s * 512, size: n * 512, kind: k.into() };
         // UEFI VM: ESP, MSR, C:, Recovery (other types) → only C: is basic data.
-        let j = r#"{"partitiontable":{"label":"gpt","sectorsize":512,"partitions":[
-          {"node":"d1","start":2048,"size":204800,"type":"C12A7328-F81F-11D2-BA4B-00A0C93EC93B"},
-          {"node":"d2","start":206848,"size":32768,"type":"E3C9E316-0B5C-4DB8-817D-F92DF00215AE"},
-          {"node":"d3","start":239616,"size":124000000,"type":"EBD0A0A2-B9E5-4433-87C0-68B6B72699C7"},
-          {"node":"d4","start":124239616,"size":1000000,"type":"DE94BBA4-06D1-4D40-A16A-BFD50179D6AC"}]}}"#;
-        assert_eq!(super::ntfs_parts(j).unwrap(), vec![(239616 * 512, 124000000 * 512)]);
+        let t = Table {
+            gpt: true,
+            sector: 512,
+            parts: vec![
+                part(2048, 204800, "C12A7328-F81F-11D2-BA4B-00A0C93EC93B"),
+                part(206848, 32768, "E3C9E316-0B5C-4DB8-817D-F92DF00215AE"),
+                part(239616, 124000000, "EBD0A0A2-B9E5-4433-87C0-68B6B72699C7"),
+                part(124239616, 1000000, "DE94BBA4-06D1-4D40-A16A-BFD50179D6AC"),
+            ],
+        };
+        assert_eq!(super::ntfs_parts(&t), vec![(239616 * 512, 124000000 * 512)]);
         // MBR (BIOS VM): type "7", largest first.
-        let j = r#"{"partitiontable":{"label":"dos","partitions":[
-          {"node":"d1","start":2048,"size":100000,"type":"7"},{"node":"d2","start":102048,"size":9000000,"type":"7"}]}}"#;
-        let p = super::ntfs_parts(j).unwrap();
+        let t = Table { gpt: false, sector: 512, parts: vec![part(2048, 100000, "7"), part(102048, 9000000, "7")] };
+        let p = super::ntfs_parts(&t);
         assert_eq!((p[0].0, p[1].0), (102048 * 512, 2048 * 512));
     }
 }

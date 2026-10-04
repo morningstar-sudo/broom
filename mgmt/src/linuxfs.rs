@@ -36,19 +36,11 @@ impl Ext4Read for Region {
 /// (start, size) in bytes of every partition; a disk without a partition table = one volume.
 fn partitions(raw: &str) -> Result<Vec<(u64, u64)>, String> {
     let size = std::fs::metadata(raw).map_err(|e| format!("{raw}: {e}"))?.len();
-    let o = std::process::Command::new("sfdisk").args(["-J", raw]).output().map_err(|e| format!("sfdisk: {e}"))?;
-    if !o.status.success() {
-        return Ok(vec![(0, size)]);
-    }
-    let v: serde_json::Value = serde_json::from_slice(&o.stdout).map_err(|e| e.to_string())?;
-    let t = &v["partitiontable"];
-    let ss = t["sectorsize"].as_u64().unwrap_or(512);
-    Ok(t["partitions"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter_map(|p| Some((p["start"].as_u64()? * ss, p["size"].as_u64()? * ss)))
-        .collect())
+    // Unreadable / no table → treat the whole image as one volume (as `sfdisk -J` failing did).
+    Ok(match crate::disk::read(raw) {
+        Ok(Some(t)) => t.parts.iter().map(|p| (p.start, p.size)).collect(),
+        _ => vec![(0, size)],
+    })
 }
 
 // ---- LVM2 (on-disk label + text metadata) ----

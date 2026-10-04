@@ -7,10 +7,10 @@
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
+use crate::disk::Table;
 use crate::winstage::run;
 use crate::SharedState;
 
-const ESP: &str = "C12A7328-F81F-11D2-BA4B-00A0C93EC93B";
 
 /// What the upload had outside the Windows partition: head.raw = [0, start), tail.raw = [start+size, total).
 #[derive(Serialize, Deserialize, Debug, PartialEq)]
@@ -30,28 +30,24 @@ pub(crate) fn export_dir(name: &str) -> PathBuf {
     crate::work_dir().join("export").join(name)
 }
 
-/// sfdisk -J → (already trimmed by publish = GPT with exactly one partition, firmware the disk boots with).
-fn layout(sfdisk_json: &str) -> Result<(bool, &'static str), String> {
-    let v: serde_json::Value = serde_json::from_str(sfdisk_json).map_err(|e| format!("partition table: {e}"))?;
-    let t = &v["partitiontable"];
-    let parts = t["partitions"].as_array().map(|a| a.as_slice()).unwrap_or(&[]);
-    let gpt = t["label"] == "gpt";
+/// Partition table → (already trimmed by publish = GPT with exactly one partition, firmware the disk boots with).
+fn layout(t: &Table) -> (bool, &'static str) {
     // ESP: GPT type GUID, or MBR type ef.
-    let esp = parts.iter().any(|p| p["type"].as_str().is_some_and(|ty| ty.eq_ignore_ascii_case(ESP) || ty == "ef"));
-    Ok((gpt && parts.len() == 1, if esp { "efi" } else { "bios" }))
+    let esp = t.parts.iter().any(|p| p.kind.eq_ignore_ascii_case(crate::disk::ESP) || p.kind == "ef");
+    (t.gpt && t.parts.len() == 1, if esp { "efi" } else { "bios" })
 }
 
 /// The single partition (start, size) in bytes of a trimmed golden, None if it has not exactly one.
-fn single_part(sfdisk_json: &str) -> Option<(u64, u64)> {
-    let v: serde_json::Value = serde_json::from_str(sfdisk_json).ok()?;
-    let t = &v["partitiontable"];
-    let ss = t["sectorsize"].as_u64().unwrap_or(512);
-    match t["partitions"].as_array()?.as_slice() {
-        [p] => Some((p["start"].as_u64()? * ss, p["size"].as_u64()? * ss)),
+fn single_part(t: &Table) -> Option<(u64, u64)> {
+    match t.parts.as_slice() {
+        [p] => Some((p.start, p.size)),
         _ => None,
     }
 }
 
+fn table(p: &Path) -> Result<Table, String> {
+    crate::disk::read(&p.to_string_lossy())?.ok_or_else(|| format!("{}: no partition table", p.display()))
+}
 /// Copy [off, off+len) of `src` into a new sparse file `dst` (all-zero MB blocks stay holes).
 fn copy_region(src: &Path, off: u64, len: u64, dst: &Path) -> Result<(), String> {
     use std::os::unix::fs::FileExt;
@@ -74,7 +70,7 @@ fn copy_region(src: &Path, off: u64, len: u64, dst: &Path) -> Result<(), String>
 /// Called by winstage::build_golden right BEFORE it trims image.img: keep the partition table + every partition
 /// but Windows (start, size). An already-trimmed image.img (published before) keeps the orig/ of its upload.
 pub(crate) fn keep_boot_regions(raw: &Path, name: &str, (start, size): (u64, u64)) -> Result<(), String> {
-    let (trimmed, firmware) = layout(&run("sfdisk", &["-J", &raw.to_string_lossy()])?)?;
+    let (trimmed, firmware) = layout(&table(raw)?);
     if trimmed {
         return Ok(());
     }
@@ -132,7 +128,7 @@ fn build(st: &SharedState, name: &str, os: &str, version: Option<&str>, out: &Pa
         }
     };
     let s = src.to_string_lossy();
-    let json = run("sfdisk", &["-J", &s])?;
+    let t = table(&src)?;
     let vmdk = out.join(format!("{name}.vmdk"));
     let v = vmdk.to_string_lossy();
     steps.go("convert → vmdk");
@@ -143,7 +139,7 @@ fn build(st: &SharedState, name: &str, os: &str, version: Option<&str>, out: &Pa
             .and_then(|b| serde_json::from_slice(&b).ok())
             .ok_or("this Windows image was published before export existed (its boot partitions are gone) — upload the VM again, then export")?;
         let total = std::fs::metadata(&src).map_err(|e| e.to_string())?.len();
-        if single_part(&json) != Some((o.start, o.size)) || total != o.total {
+        if single_part(&t) != Some((o.start, o.size)) || total != o.total {
             return Err("this version comes from another upload (different disk layout) — its boot partitions were not kept".into());
         }
         // qemu-img concatenates its sources: head + the Windows partition of the golden + tail, in one pass.
@@ -164,7 +160,7 @@ fn build(st: &SharedState, name: &str, os: &str, version: Option<&str>, out: &Pa
         o.firmware
     } else {
         run("qemu-img", &["convert", "-m", "16", "-f", "raw", "-O", "vmdk", "-o", "subformat=monolithicSparse", &s, &v])?;
-        layout(&json)?.1.to_string()
+        layout(&t).1.to_string()
     };
     std::fs::write(out.join(format!("{name}.vmx")), vmx(name, os, &firmware)).map_err(|e| e.to_string())?;
     std::fs::write(out.join("version"), version.unwrap_or("current")).map_err(|e| e.to_string())?;
@@ -209,18 +205,20 @@ mod tests {
 
     #[test]
     fn layout_and_single_partition() {
-        let gpt = |parts: &str| format!(r#"{{"partitiontable":{{"label":"gpt","sectorsize":512,"partitions":[{parts}]}}}}"#);
-        let esp = r#"{"start":2048,"size":204800,"type":"C12A7328-F81F-11D2-BA4B-00A0C93EC93B"}"#;
-        let win = r#"{"start":239616,"size":1000000,"type":"EBD0A0A2-B9E5-4433-87C0-68B6B72699C7"}"#;
+        use crate::disk::Part;
+        let part = |s: u64, n: u64, k: &str| Part { start: s * 512, size: n * 512, kind: k.into() };
+        let gpt = |parts: Vec<Part>| Table { gpt: true, sector: 512, parts };
+        let esp = part(2048, 204800, "C12A7328-F81F-11D2-BA4B-00A0C93EC93B");
+        let win = part(239616, 1000000, "EBD0A0A2-B9E5-4433-87C0-68B6B72699C7");
         // Fresh UEFI upload: several partitions with an ESP → not trimmed, efi.
-        assert_eq!(layout(&gpt(&format!("{esp},{win}"))).unwrap(), (false, "efi"));
+        assert_eq!(layout(&gpt(vec![esp.clone(), win.clone()])), (false, "efi"));
         // After publish: one GPT partition → trimmed.
-        assert_eq!(layout(&gpt(win)).unwrap().0, true);
-        assert_eq!(single_part(&gpt(win)), Some((239616 * 512, 1000000 * 512)));
-        assert_eq!(single_part(&gpt(&format!("{esp},{win}"))), None);
+        assert!(layout(&gpt(vec![win.clone()])).0);
+        assert_eq!(single_part(&gpt(vec![win.clone()])), Some((239616 * 512, 1000000 * 512)));
+        assert_eq!(single_part(&gpt(vec![esp, win])), None);
         // Legacy BIOS (MBR, System Reserved + Windows): not trimmed even with one partition, bios.
-        let dos = r#"{"partitiontable":{"label":"dos","partitions":[{"start":2048,"size":100,"type":"7"}]}}"#;
-        assert_eq!(layout(dos).unwrap(), (false, "bios"));
+        let dos = Table { gpt: false, sector: 512, parts: vec![part(2048, 100, "7")] };
+        assert_eq!(layout(&dos), (false, "bios"));
     }
 
     #[test]

@@ -132,12 +132,14 @@ dependencies = [
 
 [[package]]
 name = "bootrom-mgmt"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "argon2",
  "axum",
  "blake3",
+ "crc32fast",
  "ext4-view",
+ "flate2",
  "futures-util",
  "libc",
  "rusqlite",
