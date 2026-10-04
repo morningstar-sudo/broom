@@ -4,7 +4,6 @@ use std::process::Command;
 
 /// (binary, apt package, purpose) — shared source for preflight + setup.
 pub const BINS: &[(&str, &str, &str)] = &[
-    ("qemu-img", "qemu-utils", "convert vmdk → raw img golden"),
     // Tools copied into the Windows client stage initrd.
     ("sfdisk", "fdisk", "partition the client SSD (copied into the Windows stage initrd)"),
     ("mkntfs", "ntfs-3g", "format the client SSD as NTFS (stage)"),
@@ -64,7 +63,7 @@ pub fn run() -> Result<(), Report> {
     let mut other: Vec<String> = Vec::new();
 
     if !is_root() {
-        other.push("must run as root (DHCP :67 / TFTP :69 / HTTP :80, iSCSI, zram, qemu-img)".into());
+        other.push("must run as root (DHCP :67 / TFTP :69 / HTTP :80, iSCSI, zram, loop mounts)".into());
     }
 
     if pkgs.is_empty() && other.is_empty() {

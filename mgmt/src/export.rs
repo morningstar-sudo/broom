@@ -8,7 +8,6 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
 use crate::disk::Table;
-use crate::winstage::run;
 use crate::SharedState;
 
 
@@ -127,10 +126,8 @@ fn build(st: &SharedState, name: &str, os: &str, version: Option<&str>, out: &Pa
             p
         }
     };
-    let s = src.to_string_lossy();
     let t = table(&src)?;
     let vmdk = out.join(format!("{name}.vmdk"));
-    let v = vmdk.to_string_lossy();
     steps.go("convert → vmdk");
     let firmware = if os == "windows" {
         let d = orig_dir(name);
@@ -142,24 +139,16 @@ fn build(st: &SharedState, name: &str, os: &str, version: Option<&str>, out: &Pa
         if single_part(&t) != Some((o.start, o.size)) || total != o.total {
             return Err("this version comes from another upload (different disk layout) — its boot partitions were not kept".into());
         }
-        // qemu-img concatenates its sources: head + the Windows partition of the golden + tail, in one pass.
-        fn q(p: &Path) -> String {
-            p.to_string_lossy().replace(',', ",,") // option-string escaping
-        }
-        let mut srcs = vec![
-            format!("driver=raw,file.filename={}", q(&d.join("head.raw"))),
-            format!("driver=raw,offset={},size={},file.filename={}", o.start, o.size, q(&src)),
-        ];
+        // One disk again: head + the Windows partition of the golden + tail, in one pass.
+        let (head, tail) = (d.join("head.raw"), d.join("tail.raw"));
+        let mut parts: Vec<(&Path, u64, Option<u64>)> = vec![(&head, 0, None), (&src, o.start, Some(o.size))];
         if o.total > o.start + o.size {
-            srcs.push(format!("driver=raw,file.filename={}", q(&d.join("tail.raw"))));
+            parts.push((&tail, 0, None));
         }
-        let mut args = vec!["convert", "-m", "16", "-O", "vmdk", "-o", "subformat=monolithicSparse", "--image-opts"];
-        args.extend(srcs.iter().map(String::as_str));
-        args.push(&*v);
-        run("qemu-img", &args)?;
+        crate::vmdk::write_sparse(&crate::disk::Source::new(&parts)?, &vmdk)?;
         o.firmware
     } else {
-        run("qemu-img", &["convert", "-m", "16", "-f", "raw", "-O", "vmdk", "-o", "subformat=monolithicSparse", &s, &v])?;
+        crate::vmdk::write_sparse(&crate::disk::Source::file(&src)?, &vmdk)?;
         layout(&t).1.to_string()
     };
     std::fs::write(out.join(format!("{name}.vmx")), vmx(name, os, &firmware)).map_err(|e| e.to_string())?;
@@ -182,8 +171,8 @@ pub(crate) fn export_info(name: &str) -> serde_json::Value {
     serde_json::json!({"version": ver, "size": m.len(), "created": created})
 }
 
-/// Plain VMware Workstation VM around the exported disk. SATA boots under BIOS and EFI alike (publish enabled
-/// storahci as boot-start); guestOS windows9-64 = "Windows 10 and later" — windows11-64 insists on a TPM.
+/// Plain VMware Workstation VM around the exported disk. SATA boots under BIOS and EFI alike (the Windows prep
+/// set storahci to boot-start); guestOS windows9-64 = "Windows 10 and later" — windows11-64 insists on a TPM.
 fn vmx(name: &str, os: &str, firmware: &str) -> String {
     let guest = if os == "windows" { "windows9-64" } else { "ubuntu-64" };
     let fw = if firmware == "efi" { "firmware = \"efi\"\n" } else { "" };

@@ -13,8 +13,9 @@ Everything is **one static binary** — no dnsmasq, tftpd, targetcli or extra se
 - **Image versions** — snapshot / rollback, deduplicated in 4 MB chunks (no ZFS)
 - **Linux goldens read in-process** — ext4 + LVM, no libguestfs
 
-Publishing shells out to a few stable tools (`qemu-img`, `hivex`, `initramfs-tools`, `ntfs-3g`,
-`sfdisk`, …); the first run installs them automatically.
+VMDK/VHDX conversion, partition tables and archives are done in-process too (no qemu-img, sfdisk, cpio, tar,
+hivex). Only the Windows client stage is still built from server packages (`initramfs-tools`, `ntfs-3g`,
+`dosfstools`, `efibootmgr`, `fdisk`, `wget`, `zstd`); the first run installs them automatically.
 
 ## How it works
 
