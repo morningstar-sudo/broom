@@ -1,6 +1,6 @@
 [package]
 name = "bootrom-mgmt"
-version = "0.5.1"
+version = "0.5.2"
 edition = "2024"
 description = "Diskless boot server: DHCP, TFTP, iPXE, iSCSI and a web admin in one binary"
 
@@ -25,6 +25,8 @@ tracing-subscriber = "0.3.23"   # log output (RUST_LOG=level)
 ext4-view = "1.0.0"   # read ext4 inside Linux goldens (replaces libguestfs)
 zip = { version = "8.6.0", default-features = false, features = ["deflate"] }   # golden .zip upload (replaces unzip)
 zstd = "0.14.0"   # delta chunks sent compressed to the Windows stage (api/golden-chunk)
+flate2 = { version = "1.1.10", default-features = false, features = ["zlib-rs"] }   # gzip for initrd cpio + tar.gz (archive.rs)
+crc32fast = "1.5.2"   # GPT checksums (disk.rs)
 argon2 = { version = "0.5.3", features = ["std"] }   # admin password hashing (auth.rs)
 
 [profile.release]

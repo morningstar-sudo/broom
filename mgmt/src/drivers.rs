@@ -130,17 +130,9 @@ fn process(name: &str) -> Result<(String, u64, Vec<String>, usize), String> {
         let tar = tar_path(name);
         std::fs::create_dir_all(tar.parent().unwrap()).map_err(|e| e.to_string())?;
         let tmp = tar.with_extension("tmp");
-        let ok = std::process::Command::new("tar")
-            .arg("-czf")
-            .arg(&tmp)
-            .arg("-C")
-            .arg(&ex)
-            .arg(".")
-            .status()
-            .is_ok_and(|s| s.success());
-        if !ok {
+        if let Err(e) = crate::archive::tar_gz(&ex, &tmp) {
             let _ = std::fs::remove_file(&tmp);
-            return Err("tar -czf failed".to_string());
+            return Err(format!("packing the driver: {e}"));
         }
         std::fs::rename(&tmp, &tar).map_err(|e| e.to_string())?;
         let sha = crate::publish::file_hash(&tar.to_string_lossy()).ok_or("sha256 of the package failed")?;

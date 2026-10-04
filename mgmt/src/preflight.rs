@@ -5,16 +5,14 @@ use std::process::Command;
 /// (binary, apt package, purpose) — shared source for preflight + setup.
 pub const BINS: &[(&str, &str, &str)] = &[
     ("qemu-img", "qemu-utils", "convert vmdk → raw img golden"),
-    // Golden partitions + tools embedded into the Windows client stage initrd.
-    ("sfdisk", "fdisk", "read golden partition tables (Linux + Windows) + partition the client SSD (stage)"),
-    ("cpio", "cpio", "append the broom hook to Linux golden initrds"),
-    ("mkntfs", "ntfs-3g", "format the client SSD as NTFS (stage) + read the Windows golden"),
+    // Tools copied into the Windows client stage initrd.
+    ("sfdisk", "fdisk", "partition the client SSD (copied into the Windows stage initrd)"),
+    ("mkntfs", "ntfs-3g", "format the client SSD as NTFS (stage)"),
     ("mkfs.fat", "dosfstools", "format the client SSD ESP (stage)"),
     ("efibootmgr", "efibootmgr", "BootNext into Windows on the client SSD (stage)"),
     ("mkinitramfs", "initramfs-tools", "build the Windows stage initrd"),
     ("wget", "wget", "client stage downloads golden.vhdx"),
     ("zstd", "zstd", "client stage decompresses delta golden chunks"),
-    ("hivexregedit", "libwin-hivex-perl", "enable boot-start disk drivers in the Windows golden registry"),
 ];
 
 fn has_bin(name: &str) -> bool {
