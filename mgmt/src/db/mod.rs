@@ -37,7 +37,8 @@ pub struct Machine {
     pub ip: Option<String>,
     pub hostname: Option<String>,
     pub image_id: Option<i64>,
-    /// Windows retail product key. Never serialized (the web admin has no login) — see `license_tail`.
+    /// Windows retail product key. Never serialized with the row (the web shows `license_tail`); only the logged-in
+    /// admin's status / machine-detail calls include it.
     #[serde(skip)]
     pub license_key: Option<String>,
     /// Last 5 characters of the key, for the web.
@@ -71,7 +72,7 @@ pub struct Driver {
     pub created: i64,
 }
 
-/// DHCP lease (dhcp.rs). source "full" = handed out by us; "proxy" = PXE client seen in proxy mode.
+/// DHCP lease (dhcp.rs). source "full" = handed out by us ("proxy" only in DBs from old versions).
 #[derive(Clone, Debug, PartialEq)]
 pub struct Lease {
     pub mac: String,

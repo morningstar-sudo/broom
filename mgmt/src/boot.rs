@@ -68,8 +68,8 @@ fn secure_boot(st: &SharedState) -> bool {
 }
 
 /// Under Secure Boot, iPXE boots the Canonical-signed Ubuntu kernel (Windows stage or Linux golden) through Ubuntu's
-/// Microsoft-signed shim (publish::refresh_shim → tftp/shim/). None when the switch is off or no shim was collected
-/// yet (Publish once with shim-signed installed).
+/// Microsoft-signed shim (from the stage bundle, publish::refresh_shim → tftp/shim/). None when the switch is off or
+/// no shim is there yet (publish once: a Windows image, or a Linux one with the switch on, fetches the bundle).
 fn shim_line(st: &SharedState, img: &crate::db::Image) -> Option<String> {
     if !secure_boot(st) {
         return None;
@@ -294,8 +294,8 @@ mod tests {
         assert!(s.contains("item --key s shell [S] iPXE shell (no image yet"));
     }
 
-    /// Official signed iPXE (Secure Boot) has no menu-hint/footer → the same info as `item --gap` lines, after the
-    /// images (so number keys still map to images), still ASCII.
+    /// Official signed iPXE (Secure Boot) has no menu-hint/footer → the same info as `item --gap` lines, above the
+    /// images (number keys still map to images), still ASCII.
     #[test]
     fn menu_secure_boot_footer_as_gap_lines() {
         let s = menu_script(&[img("win-11", true)], 5, Some("PC05"), None, true, true);

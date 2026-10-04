@@ -7,7 +7,8 @@ function step($m) {
   try { [IO.File]::AppendAllText($lf, ('{0:yyyy-MM-dd HH:mm:ss} {1}' -f (Get-Date), $m) + "`r`n") } catch { }
 }
 step 'building base for this machine (once) - wait for the BASE MODE message'
-# SYSTEM task (stored in base.vhdx -> present every boot): keep Windows AFTER PXE in BootOrder, PXE first.
+# SYSTEM task (stored in base.vhdx -> present every boot): keep Windows AFTER PXE in BootOrder, PXE first (strict
+# reset: Windows entries out of BootOrder, boot loader removed from the ESP); also reports each boot to the server.
 step 'boot order task (PXE first)'
 $s = "$env:SystemRoot\Setup\Scripts\broom-bootorder.ps1"
 $a = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument "-NoProfile -ExecutionPolicy Bypass -File $s"
@@ -37,7 +38,8 @@ if ([IO.File]::Exists($h)) {
   $n = [IO.File]::ReadAllText($h).Trim()
   if ($n -and ($n -ne $env:COMPUTERNAME)) { step "machine name -> $n"; Rename-Computer -NewName $n -Force -ErrorAction SilentlyContinue }
 }
-# License key (Machines page): the server picks it by this machine's IP and hands it out once (403 = none).
+# License key (Machines page): the server picks it by this machine's IP and hands it out once, right after a PXE
+# boot (403 = none).
 # slmgr /cpky afterwards: the key is not left readable in the registry. Never blocks building base.
 $sf = $v.Path + 'broom\srv.txt'
 if ([IO.File]::Exists($sf)) {

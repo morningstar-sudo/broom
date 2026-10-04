@@ -98,10 +98,10 @@ mkdir -p $B
 
 # Delta golden update: turn $1 (old golden, $2 = its manifest) into the new golden ($3 = its manifest) IN PLACE,
 # then rename it to $4. Only the 4 MB chunks the old copy lacks come from $5 (the server's /api/golden-chunk?name=X,
-# zstd-compressed). Manifest = "size N" + one
-# line per chunk (sha256 | zero). A new VHDX block early in the disk shifts later ones → those chunks exist in the
-# old copy at another offset ("moved"): phase 1 saves every moved chunk (sha256-checked) to a spare dir BEFORE
-# anything is overwritten; phase 2 writes moved chunks from there, downloads the missing ones, zeroes zero ones.
+# zstd-compressed). Manifest = "size N" + one line per chunk (sha256 | zero). A new VHDX block early in the disk
+# shifts later ones → those chunks exist in the old copy at another offset ("moved"): phase 1 saves every moved chunk
+# (sha256-checked) to a spare dir BEFORE anything is overwritten; phase 2 writes moved chunks from there, downloads
+# the missing ones, zeroes zero ones.
 # Unchanged chunks are only read + checked → disk IO ≈ size + 2×moved + downloaded instead of a whole download.
 # A moved chunk that fails its check is downloaded instead; interrupted → the next run re-plans from the manifests
 # and the checks catch overwritten sources. Returns 1 → the caller does a full download.
@@ -442,7 +442,8 @@ sync; umount $E
 
 # 4. "Broom Windows" entry (SSD) comes after PXE in BootOrder: PXE (first) always runs the stage to check for a new
 #    image + reset; the SSD is only for booting Windows — the stage enters it via BootNext, and if the server/PXE
-#    does not answer the firmware falls through to the SSD (boots, but that session is NOT reset/updated).
+#    does not answer the firmware falls through to the SSD (boots, but that session is NOT reset/updated) — unless
+#    strict reset is on (Network page): then no Windows entry stays in BootOrder at all (see below).
 mount -t efivarfs efivarfs /sys/firmware/efi/efivars 2>/dev/null
 pu=$(blkid -s PARTUUID -o value "$(part $disk 1)")
 bootnum(){ efibootmgr -v | grep "$1" | grep -i "$pu" | sed -n 's/^Boot\([0-9A-Fa-f]\{4\}\).*/\1/p' | head -1; }
@@ -456,7 +457,7 @@ fi
 [ -n "$n" ] || die "Broom Windows entry not found"
 # FORCE the order: PXE → Broom Windows → Windows Boot Manager (+ other bootmgfw entries) → other network → rest.
 # Windows pulls "Windows Boot Manager" to the top on every boot → fixed here + by the BroomBootOrder task
-# inside Windows, which restores broom\bootorder.txt by number. Broom Windows always stays in the order
+# inside Windows, which restores broom\bootorder.txt by number. Without strict reset, Broom Windows stays in the order
 # (server down still boots, that session is not reset).
 all=$(efibootmgr -v)
 # printf, NOT echo: dash/ash echo interprets "\b" in "\Boot\bootmgfw.efi" → no match.

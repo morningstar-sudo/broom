@@ -1,5 +1,6 @@
 // main.rs — bootrom mgmt app (Rust/axum). One binary, runs on the Linux server.
-// Modules: boot (iPXE menu), images (+versions, publish), monitor (+wol), machines/devices, dhcp/tftp/iscsi, auth.
+// Modules: boot (iPXE menu), dhcp/tftp/iscsi (network boot), images + golden/chunks/versions/export (images), publish
+// (Linux) + winstage (Windows), machines/devices/license/settings (web API), auth, disk/archive/vmdk/vhdx (formats).
 mod api;
 mod archive;
 mod auth;
@@ -183,7 +184,7 @@ pub struct AppState {
     /// Bounds concurrent golden-chunk reads (each reads+hashes 4 MB on a blocking thread). Caps the blocking-pool
     /// / disk cost of a flood of chunk requests from the (public) /api/golden-chunk endpoint.
     pub chunk_sem: tokio::sync::Semaphore,
-    /// mac → unix time of its last menu choice (/boot/start): the machine went through PXE (→ stage / iSCSI boot).
+    /// mac → unix time of its last PXE boot (menu choice /boot/start, or the Windows stage's driver query): see saw_pxe.
     pub pxe_seen: Mutex<std::collections::HashMap<String, u64>>,
     /// mac → unix time Windows reported a boot WITHOUT a PXE boot just before (session not reset). Cleared by the
     /// next PXE boot. Shown on the Machines page.
@@ -289,7 +290,8 @@ async fn main() {
             Ok(s) => info!("{s}"),
             Err(e) => error!("DHCP/TFTP not started: {e} (fix it on the Network page → Apply)"),
         }
-        // Ubuntu shim for Secure Boot clients (official iPXE) → tftp/shim/, so the switch works without a Publish.
+        // Secure Boot shim (from the stage bundle, else the server's shim-signed) → tftp/shim/, so the switch works
+        // without a Publish.
         publish::refresh_shim();
         // configfs targets + zram are lost on server reboot → re-export / rebuild (background, zram is slow).
         let st = state.clone();
@@ -340,7 +342,7 @@ async fn main() {
         .with_state(state);
 
     info!("bootrom-mgmt v{VERSION} serving on http://{addr}");
-    // ConnectInfo: /api/license picks a machine by the peer IP (machines.rs).
+    // ConnectInfo: /api/license and /api/booted identify the machine by the peer IP (license.rs).
     if let Err(e) = axum::serve(listener, app.into_make_service_with_connect_info::<std::net::SocketAddr>()).await {
         error!("http server stopped: {e}");
     }

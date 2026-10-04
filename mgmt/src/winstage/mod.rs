@@ -1,8 +1,8 @@
 // winstage/mod.rs — Windows diskless, design B: native VHDX boot from the client SSD.
 //
-// Flow: golden = Windows Pro VM that ran /broom-prep-win (tweaks + EFI bundle + unattend), then sysprep →
-// upload .vmdk → publish(): extract the Windows partition → golden.vhdx + efi.tar.gz + 2 empty child VHDX
-// (vhdx.rs) → build stage (server kernel + initrd) → boot_script.
+// Flow: golden = Windows Pro VM that ran the Windows prep script (one-time link from the Images page: tweaks + EFI
+// bundle + unattend + boot-start disk drivers), sysprepped → upload → publish(): extract the Windows partition →
+// golden.vhdx + efi.tar.gz + 2 empty child VHDX (vhdx.rs) → make sure the stage bundle is installed (stage.rs) → boot_script.
 //
 // Every client boot: iPXE → STAGE (Linux, no root fs) on the SSD:
 //   p1 ESP BROOMEFI, p2 NTFS BROOMWIN\broom\: golden.vhdx ← base.vhdx (golden specialized on THIS
@@ -134,7 +134,7 @@ pub fn publish(st: &SharedState, id: i64, name: &str, steps: &mut crate::publish
     let golden = format!("{out}/golden.vhdx");
 
     // golden.vhdx gets a new GUID on every convert → new hash → every client re-downloads. Golden still newer than
-    // image.img → keep it, only rebuild stage + boot_script (Publish after changing the stage = cheap).
+    // image.img → keep it, only refresh the stage + boot_script (Publish with a new binary = cheap).
     // Note: changing the extract/registry logic needs a rebuild → upload again or `touch image.img`.
     let fresh = golden_fresh(&raw, &out);
     let drivers = if fresh {
@@ -257,7 +257,8 @@ fn build_golden(raw: &str, out: &str, name: &str, steps: &mut crate::publish::St
     // Only the tables are rewritten — the NTFS data of the Windows partition stays as it is.
     crate::disk::write_single_gpt(raw, start, size).map_err(|e| format!("golden single partition: {e}"))?;
 
-    // 3. Mount read-write: enable boot-start disk drivers + silent OOBE + new broom-done + take the EFI bundle.
+    // 3. Mount read-write: check the boot-start disk drivers (set by the prep) + silent OOBE + current broom-done /
+    //    bootorder scripts + take the EFI bundle.
     steps.go("registry + EFI");
     let drivers = with_part(raw, (start, size), &mnt, false, |m| {
         let mut drv = boot_storage_done(m)?;

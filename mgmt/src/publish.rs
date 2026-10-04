@@ -1,7 +1,7 @@
-// publish.rs — after a golden is uploaded, process it automatically so the image can boot.
-// Linux: golden raw (from vmdk) → shared RO iSCSI (disk or zram) + kernel/initrd (overlay.rs)
-// → iPXE boot_script loads kernel+initrd + attaches iSCSI + SSD overlay.
-// Windows: winstage.rs (native VHDX boot from the client SSD).
+// publish.rs — after a golden is uploaded (golden.rs: upload → image.img), make the image bootable. Linux: kernel +
+// initrd out of the golden (overlay.rs) + shared read-only iSCSI target (disk or zram) → iPXE boot_script loads the
+// kernel/initrd, the initrd attaches iSCSI + the SSD overlay. Windows: winstage/ (native VHDX boot from the SSD).
+// Also the iSCSI/zram life cycle (restore at start, new generation per publish, gc) and the Secure Boot shim copy.
 use std::path::Path;
 use std::process::Command;
 
@@ -76,9 +76,9 @@ fn mem_available_bytes() -> u64 {
 
 /// Publish an image according to its os. Blocking (called from spawn_blocking).
 /// Secure Boot clients (official signed iPXE, Network page) boot the Canonical-signed Ubuntu kernels — the Windows
-/// stage and Linux goldens alike — through Ubuntu's Microsoft-signed shim (package shim-signed): any Ubuntu shim
-/// verifies any Canonical-signed kernel. Copied to tftp/shim/shimx64.efi at every publish (cheap); boot.rs adds the
-/// `shim` line. Missing → only Secure Boot clients are affected (warning).
+/// stage and Linux goldens alike — through Ubuntu's Microsoft-signed shim (from the stage bundle, else the server's
+/// shim-signed package): any Ubuntu shim verifies any Canonical-signed kernel. Copied to tftp/shim/shimx64.efi at every
+/// publish (cheap); boot.rs adds the `shim` line. Missing → only Secure Boot clients are affected (warning).
 pub(crate) fn refresh_shim() {
     // The stage bundle (CI-built, see winstage::ensure_stage) carries Ubuntu's shim; else the server's own shim-signed.
     let bundled = crate::tftp_dir().join("broom-stage/shimx64.efi").to_string_lossy().into_owned();
@@ -205,7 +205,7 @@ fn publish_iscsi(st: &SharedState, id: i64, name: &str) -> Result<String, String
     let iqn = export_target(st, name, &cache_mode, &backing)?;
     gc_superseded(st, name, &iqn);
 
-    // 4. iPXE boot_script. The initrd reads broom.iscsi / broom.ssd from the cmdline.
+    // 4. iPXE boot_script. The initrd hook reads broom.name/hash/size/srv/reg from the cmdline.
     let ip = st.db.get_config("dhcp_server_ip", "");
     if ip.is_empty() {
         return Err("dhcp_server_ip is empty — run `setup` first".into());

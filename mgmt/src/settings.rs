@@ -4,7 +4,8 @@ use axum::{extract::State, http::StatusCode, routing::{get, post}, Json, Router}
 use serde::Deserialize;
 
 use crate::api::{ise, ok};
-use crate::{dhcp, SharedState};
+use crate::dhcp::{self, DhcpOpts};
+use crate::SharedState;
 
 pub fn routes() -> Router<SharedState> {
     Router::new()
@@ -16,7 +17,7 @@ pub fn routes() -> Router<SharedState> {
         .route("/api/cafe-user", get(get_cafe_user).post(set_cafe_user))
 }
 
-/// Guest user (created in the Windows golden by broom-prep-win → autologon). The DB keys keep the old names
+/// Guest user (created in the Windows golden by the prep script → autologon). The DB keys keep the old names
 /// `ltsp_user`/`ltsp_password` so running DBs need no migration.
 async fn get_cafe_user(State(st): State<SharedState>) -> Json<serde_json::Value> {
     // Never return the password (it is the shared local Administrator password baked into the golden — write-only,
@@ -103,7 +104,7 @@ async fn set_zram_reserve(
     Ok(ok())
 }
 
-/// Current DHCP config (mode + parameters) for the web to display.
+/// Current DHCP config (mode, parameters, optional behaviours) for the web to display.
 async fn get_dhcp(State(st): State<SharedState>) -> Json<serde_json::Value> {
     let g = |k: &str, d: &str| st.db.get_config(k, d);
     Json(serde_json::json!({
@@ -119,7 +120,30 @@ async fn get_dhcp(State(st): State<SharedState>) -> Json<serde_json::Value> {
         "lease": g("dhcp_lease", "12h"),
         "ipxe_signed": g("ipxe_signed", "0") == "1",
         "strict_reset": g("strict_reset", "0") == "1",
+        "rapid_commit": g(DhcpOpts::KEYS[0].0, DhcpOpts::KEYS[0].1) == "1",
+        "ipxe_fast": g(DhcpOpts::KEYS[1].0, DhcpOpts::KEYS[1].1) == "1",
+        "authoritative": g(DhcpOpts::KEYS[2].0, DhcpOpts::KEYS[2].1) == "1",
+        "send_hostname": g(DhcpOpts::KEYS[3].0, DhcpOpts::KEYS[3].1) == "1",
     }))
+}
+
+/// Most DNS servers handed out (option 6) — a client only tries the first few anyway.
+const MAX_DNS: usize = 8;
+
+/// "8.8.8.8 1.1.1.1, 8.8.8.8" → "8.8.8.8,1.1.1.1": commas or spaces, valid IPv4 only, duplicates dropped, order kept
+/// (= the clients' order of preference), at most MAX_DNS.
+fn normalize_dns(v: &str) -> Result<String, String> {
+    let mut out: Vec<std::net::Ipv4Addr> = Vec::new();
+    for p in v.split([',', ' ', ';']).map(str::trim).filter(|p| !p.is_empty()) {
+        let ip = p.parse().map_err(|_| format!("dns: {p:?} is not an IPv4 address"))?;
+        if !out.contains(&ip) {
+            out.push(ip);
+        }
+    }
+    if out.len() > MAX_DNS {
+        return Err(format!("dns: at most {MAX_DNS} servers"));
+    }
+    Ok(out.iter().map(|ip| ip.to_string()).collect::<Vec<_>>().join(","))
 }
 
 #[derive(Deserialize)]
@@ -137,6 +161,11 @@ struct DhcpBody {
     /// "Secure Boot clients": "1" = official signed iPXE for UEFI PXE, "0" = our own build.
     ipxe_signed: Option<String>,
     strict_reset: Option<String>,
+    /// Optional DHCP behaviours ("0"/"1"), see dhcp::DhcpOpts.
+    rapid_commit: Option<String>,
+    ipxe_fast: Option<String>,
+    authoritative: Option<String>,
+    send_hostname: Option<String>,
 }
 
 /// Validate one DHCP field. IPv4 fields must parse; a stored server IP / gateway / DNS flows into scripts + boot
@@ -150,7 +179,8 @@ fn dhcp_field_ok(key: &str, v: &str) -> Result<(), String> {
         "dhcp_server_ip" | "dhcp_subnet" | "dhcp_netmask" | "dhcp_range_start" | "dhcp_range_end" => ipv4(v),
         "dhcp_gateway" | "dhcp_dns" => v.is_empty() || v.split(',').all(|p| ipv4(p.trim())),
         "dhcp_lease" => v.parse::<u32>().is_ok() || matches!(v.chars().last(), Some('h' | 'm' | 's')),
-        "ipxe_signed" | "strict_reset" => v == "0" || v == "1",
+        "ipxe_signed" | "strict_reset" | "dhcp_rapid_commit" | "dhcp_ipxe_fast" | "dhcp_authoritative"
+        | "dhcp_send_hostname" => v == "0" || v == "1",
         _ => true,
     };
     if ok { Ok(()) } else { Err(format!("{}: invalid value {v:?}", key.trim_start_matches("dhcp_"))) }
@@ -162,6 +192,7 @@ async fn set_dhcp(
     State(st): State<SharedState>,
     Json(b): Json<DhcpBody>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let dns = b.dns.as_deref().map(normalize_dns).transpose().map_err(|e| (StatusCode::BAD_REQUEST, e))?;
     let fields = [
         ("dhcp_mode", &b.mode),
         ("dhcp_iface", &b.iface),
@@ -171,10 +202,14 @@ async fn set_dhcp(
         ("dhcp_range_end", &b.range_end),
         ("dhcp_netmask", &b.netmask),
         ("dhcp_gateway", &b.gateway),
-        ("dhcp_dns", &b.dns),
+        ("dhcp_dns", &dns),
         ("dhcp_lease", &b.lease),
         ("ipxe_signed", &b.ipxe_signed),
         ("strict_reset", &b.strict_reset),
+        (DhcpOpts::KEYS[0].0, &b.rapid_commit),
+        (DhcpOpts::KEYS[1].0, &b.ipxe_fast),
+        (DhcpOpts::KEYS[2].0, &b.authoritative),
+        (DhcpOpts::KEYS[3].0, &b.send_hostname),
     ];
     for (k, v) in &fields {
         if let Some(val) = v {
@@ -190,7 +225,7 @@ async fn set_dhcp(
     }
     // A lease without gateway/DNS takes every machine that gets it off the internet.
     let cur = |v: &Option<String>, k: &str| v.clone().unwrap_or_else(|| st.db.get_config(k, ""));
-    if mode == "full" && (cur(&b.gateway, "dhcp_gateway").trim().is_empty() || cur(&b.dns, "dhcp_dns").trim().is_empty()) {
+    if mode == "full" && (cur(&b.gateway, "dhcp_gateway").trim().is_empty() || cur(&dns, "dhcp_dns").trim().is_empty()) {
         return Err((StatusCode::BAD_REQUEST, "the DHCP server needs a gateway and DNS (clients would get no internet)".into()));
     }
     for (k, v) in &fields {
@@ -228,4 +263,14 @@ fn dhcp_field_validation() {
     assert!(dhcp_field_ok("dhcp_dns", "8.8.8.8,notip").is_err());
     assert!(dhcp_field_ok("dhcp_iface", "eth0").is_ok() && dhcp_field_ok("dhcp_iface", "eth 0;rm").is_err());
     assert!(dhcp_field_ok("dhcp_lease", "12h").is_ok() && dhcp_field_ok("dhcp_lease", "3600").is_ok());
+}
+
+#[cfg(test)]
+#[test]
+fn dns_list_normalized() {
+    assert_eq!(normalize_dns("8.8.8.8 1.1.1.1, 8.8.8.8;9.9.9.9").unwrap(), "8.8.8.8,1.1.1.1,9.9.9.9");
+    assert_eq!(normalize_dns("  ").unwrap(), "");
+    assert!(normalize_dns("8.8.8.8, dns.google").unwrap_err().contains("dns.google"));
+    let nine: Vec<String> = (1..=9).map(|i| format!("10.0.0.{i}")).collect();
+    assert!(normalize_dns(&nine.join(",")).unwrap_err().contains("at most 8"));
 }

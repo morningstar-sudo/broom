@@ -1,6 +1,6 @@
 // devices.rs — the Devices page: full machine management (the Machines page stays the quick dashboard).
 // Edit / delete, bulk actions, auto-numbered registration, CSV export/import, per-machine detail.
-// License keys are write-only here too: never exported, never returned (the web admin has no login).
+// License keys: importable by CSV, never exported; only the logged-in admin sees them (machine detail / status).
 use axum::{
     body::Body,
     extract::{Query, State},

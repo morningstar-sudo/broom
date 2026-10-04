@@ -1,6 +1,7 @@
-# Build iPXE (snponly.efi = upstream at mgmt/ipxe/IPXE_COMMIT + mgmt/ipxe/patches) + the mgmt binary (static musl, iPXE + web UI embedded),
-# run the unit tests, keep both as artifacts. Every push to main also tags the commit
-# v<Cargo.toml version>-<short sha> (e.g. v0.3.0-a1b2c3d) and publishes a release with the files.
+# Build iPXE (snponly.efi = upstream at mgmt/ipxe/IPXE_COMMIT + mgmt/ipxe/patches) + the mgmt binary (static musl, iPXE +
+# web UI + scripts embedded), run the unit tests, build the Windows stage bundle and pin it in a final binary; keep
+# binary + bundle + snponly.efi as artifacts. Every push to main also tags the commit v<Cargo.toml version>-<short sha>
+# (e.g. v0.5.3-a1b2c3d) and publishes a release with those files.
 name: build
 
 on:

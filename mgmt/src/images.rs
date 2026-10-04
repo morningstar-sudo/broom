@@ -1,4 +1,6 @@
-// images.rs — images: CRUD + versions (versions.rs: snapshot / rollback) + set default.
+// images.rs — images API: create / delete / default, chunked golden upload → convert + publish jobs, versions
+// (versions.rs: snapshot / rollback / new image from a version), export as a VMware VM, golden-chunk serving for the
+// Windows delta update, and the golden prep scripts (Linux /broom-prep, Windows one-time link).
 use axum::{
     body::Body,
     extract::{DefaultBodyLimit, Query, State},
@@ -584,7 +586,7 @@ async fn set_cache_mode(
     Ok(Json(serde_json::json!({"ok": true, "async": true})))
 }
 
-/// Script that bakes the overlay hook, run INSIDE the golden VM. GET /broom-prep
+/// Linux golden prep script (packages for the iSCSI root + SSD overlay), run INSIDE the golden VM. GET /broom-prep
 async fn broom_prep(State(st): State<SharedState>) -> impl IntoResponse {
     let ip = st.db.get_config("dhcp_server_ip", "10.0.0.12");
     (

@@ -36,7 +36,7 @@ const SCHEMA: &str = r#"
         ip       TEXT,
         hostname TEXT,
         image_id INTEGER REFERENCES images(id),
-        license_key    TEXT,                 -- Windows retail key, handed out once (machines.rs)
+        license_key    TEXT,                 -- Windows retail key, handed out once (license.rs)
         license_state  TEXT,                 -- 'armed' | 'sent' | NULL
         license_gen    INTEGER NOT NULL DEFAULT 0,
         license_result TEXT,                 -- slmgr output reported by the client
@@ -63,7 +63,7 @@ const SCHEMA: &str = r#"
         seen  INTEGER NOT NULL
     );
 
-    -- DHCP leases (dhcp.rs). source 'full' = our lease; 'proxy' = PXE client seen in proxy mode.
+    -- DHCP leases (dhcp.rs). source 'full' = our lease ('proxy' rows only in DBs from old versions).
     CREATE TABLE IF NOT EXISTS leases(
         mac      TEXT PRIMARY KEY,
         ip       TEXT,

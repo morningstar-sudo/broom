@@ -1,5 +1,5 @@
 // export.rs — an image (current golden or a saved version) → a VMware VM: <name>.vmx + <name>.vmdk, to edit the
-// golden again (Windows: boots through the broom unattend, edit, broom-prep-win, upload).
+// golden again (Windows: boots through the broom unattend, edit, run the Windows prep command, upload).
 // Windows publish trims image.img in place (winstage::build_golden: holes outside the Windows partition + a
 // one-partition GPT) → keep_boot_regions first saves what the trim destroys (the partition table, ESP/MSR/Recovery
 // or System Reserved) to images/<name>/orig/, and the export stitches it back around the Windows partition.

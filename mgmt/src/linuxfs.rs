@@ -1,5 +1,5 @@
 // linuxfs.rs — read a Linux golden raw disk without mounting it (replaces libguestfs): partitions
-// (sfdisk -J) → ext4 directly, or LVM2 PV → linear LVs → ext4 (crate ext4-view, read-only).
+// (disk.rs) → ext4 directly, or LVM2 PV → linear LVs → ext4 (crate ext4-view, read-only).
 // Used by overlay::build_boot to copy the newest kernel + initrd and read the root UUID.
 // Supported: ext2/3/4, LVM2 linear LVs (Ubuntu default). xfs/btrfs/other LVM layouts → clear error.
 use ext4_view::{Ext4, Ext4Read};
@@ -36,7 +36,7 @@ impl Ext4Read for Region {
 /// (start, size) in bytes of every partition; a disk without a partition table = one volume.
 fn partitions(raw: &str) -> Result<Vec<(u64, u64)>, String> {
     let size = std::fs::metadata(raw).map_err(|e| format!("{raw}: {e}"))?.len();
-    // Unreadable / no table → treat the whole image as one volume (as `sfdisk -J` failing did).
+    // Unreadable / no table → treat the whole image as one volume.
     Ok(match crate::disk::read(raw) {
         Ok(Some(t)) => t.parts.iter().map(|p| (p.start, p.size)).collect(),
         _ => vec![(0, size)],

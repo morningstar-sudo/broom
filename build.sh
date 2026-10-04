@@ -1,7 +1,7 @@
 #!/bin/bash
 # build.sh — build the whole project in one go (Linux / WSL):
 #   1. iPXE snponly.efi   (upstream + mgmt/ipxe/patches; only when a patch, IPXE_COMMIT or ipxe-src changed, or --ipxe)
-#   2. mgmt release binary (embeds snponly.efi + web UI) + unit tests (skip with --no-test);
+#   2. mgmt release binary (embeds snponly.efi + web UI + scripts) + unit tests (skip with --no-test);
 #      --live also runs the root-only live tests (real LIO / zram / ping / LVM, asks for sudo)
 #   3. copy to mgmt/dist/bootrom-mgmt  → deploy that single file to the server
 # Windows: double-click build.cmd (runs this script in WSL).

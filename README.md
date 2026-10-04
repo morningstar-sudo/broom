@@ -52,7 +52,13 @@ Then open `http://<server-ip>/`:
     option 67 = `snponly.efi` (Secure Boot clients: `sb/snponly-shim.efi`). broom always serves iPXE over TFTP; iPXE
     then fetches `autoexec.ipxe` from it, which chains the boot menu; or
   - turn the **DHCP server on** (Network page) after switching the router's DHCP off: interface, range, gateway and
-    DNS (gateway + DNS are required; setup pre-fills them from the server's own network).
+    DNS (gateway + DNS are required; setup pre-fills them from the server's own network). DNS: one box per server,
+    up to 8, in order of preference (**+ DNS** adds one). Optional DHCP behaviour (ticks, same page):
+    - **iPXE: don't wait for ProxyDHCP** (on) — option 175.176: iPXE takes this server's answer at once (saves 2 s).
+    - **Authoritative** (on) — NAK a machine with a lease/static IP here asking for an address that isn't its own.
+    - **Send hostname** (on) — option 12 = the machine's name on the Machines page.
+    - **Rapid Commit** (off) — RFC 4039: a client that asks for it gets the address in 2 packets instead of 4.
+      UEFI PXE and iPXE never ask, so it rarely changes boot time.
 - Client/boot endpoints (`/boot*`, `/tftp`, license and driver/chunk fetch) stay open — a PXE client can't log in.
 
 **Client machines:** UEFI, Secure Boot **off**, **PXE first** in the boot order (required for the reset-on-boot).

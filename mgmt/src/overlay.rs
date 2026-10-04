@@ -1,8 +1,8 @@
 // overlay.rs — golden raw disk → extract kernel/initrd for iPXE + prep script that bakes the overlay hook.
 //
-// Model (replaced LTSP): golden = raw disk (from vmdk), served over iSCSI as shared RO. Clients boot with
+// Model: golden = raw disk (from the uploaded VM), served over iSCSI as shared RO. Clients boot with
 // the golden's own kernel/initrd; the initrd (open-iscsi + overlayroot + reset hook baked in the
-// golden VM via PREP_SCRIPT) does: attach iSCSI (iBFT set by iPXE sanhook) → mount root RO =
+// golden VM by scripts/prep-linux.sh) does: attach iSCSI (iBFT set by iPXE sanhook) → mount root RO =
 // lower → build the local SSD writeback (reset every boot) → overlayfs → boot. Writeback goes to the SSD,
 // not RAM. Users/apps are baked into the img.
 //
@@ -22,7 +22,7 @@ pub fn build_boot(img: &Path, name: &str) -> Result<String, String> {
     tracing::info!("image {name}: kernel {} + initrd copied, root UUID {}", b.kver, b.root_uuid);
 
     // Inject the broom-wb hook + overlayroot.conf into the initrd (append a cpio → overrides the golden's copy).
-    // → tuning reset/overlay = edit Rust + Publish again, NO golden rebuild.
+    // → tuning reset/overlay = edit scripts/linux-*.sh, rebuild the binary, Publish again — NO golden rebuild.
     inject_initrd(&format!("{dst}/initrd.img"), name)?;
     Ok(b.root_uuid)
 }

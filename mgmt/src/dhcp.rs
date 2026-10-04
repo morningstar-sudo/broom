@@ -1,8 +1,9 @@
-// dhcp.rs — built-in DHCP server (replaces dnsmasq) for UEFI PXE + iPXE. It is the LAN's DHCP server: hands out IPs
-// (Machines-table binding > previous lease > first free in range) + the boot file. Turn it off (`dhcp_mode` = "off")
-// when another DHCP server owns the LAN — then broom serves no DHCP/TFTP (no proxyDHCP mode anymore). No DNS.
-// Every packet reads config/bindings/leases from the DB → Machines/DHCP edits apply immediately;
-// start() rebinds sockets only for interface changes. Leases live in the `leases` table.
+// dhcp.rs — built-in DHCP server for UEFI PXE + iPXE, on only when `dhcp_mode` = "full" (Network page; off by default:
+// a router usually owns the LAN, then it points PXE clients at our TFTP — see start()). When on, it is the LAN's DHCP
+// server: hands out IPs (Machines-table binding > previous lease > first free in range) + gateway/DNS + the boot file.
+// Optional behaviours (Rapid Commit, iPXE no-ProxyDHCP wait, authoritative NAK, hostname) are Network-page checkboxes
+// (DhcpOpts). No ProxyDHCP, relay or DHCPv6. Every packet reads config/bindings/leases from the DB → edits apply at
+// once; start() rebinds the sockets. Leases live in the `leases` table.
 use std::collections::HashMap;
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 
@@ -130,6 +131,38 @@ pub struct Cfg {
     pub lease_s: u32,
     /// "Secure Boot clients" (Network page): hand UEFI PXE the official signed iPXE (sb/…) instead of our own build.
     pub sb: bool,
+    /// Optional behaviours (checkboxes on the Network page).
+    pub opts: DhcpOpts,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DhcpOpts {
+    /// RFC 4039: a DISCOVER asking for it (option 80) gets the ACK at once, no OFFER/REQUEST round. Off by default
+    /// (the RFC wants it explicitly enabled); iPXE/UEFI PXE never ask, some Linux clients (systemd-networkd) do.
+    pub rapid_commit: bool,
+    /// Option 175.176 no-pxedhcp: iPXE takes our answer at once instead of waiting 2 s for ProxyDHCP offers.
+    pub ipxe_fast: bool,
+    /// NAK a known client asking for an IP it may not have (it gets a new one at once). Off → stay silent.
+    pub authoritative: bool,
+    /// Option 12: the hostname from the Machines table.
+    pub send_hostname: bool,
+}
+
+impl Default for DhcpOpts {
+    fn default() -> Self {
+        DhcpOpts { rapid_commit: false, ipxe_fast: true, authoritative: true, send_hostname: true }
+    }
+}
+
+impl DhcpOpts {
+    /// (config key, default) of each option, as stored by the Network page.
+    pub const KEYS: [(&'static str, &'static str); 4] =
+        [("dhcp_rapid_commit", "0"), ("dhcp_ipxe_fast", "1"), ("dhcp_authoritative", "1"), ("dhcp_send_hostname", "1")];
+
+    fn load(db: &dyn Db) -> Self {
+        let on = |i: usize| db.get_config(Self::KEYS[i].0, Self::KEYS[i].1) == "1";
+        DhcpOpts { rapid_commit: on(0), ipxe_fast: on(1), authoritative: on(2), send_hostname: on(3) }
+    }
 }
 
 /// "12h" / "30m" / "1d" / "3600" → seconds (default 12h).
@@ -149,7 +182,7 @@ impl Cfg {
         let g = |k: &str, d: &str| db.get_config(k, d);
         let ip = |k: &str| g(k, "").trim().parse::<Ipv4Addr>().ok();
         let server = ip("dhcp_server_ip").ok_or("dhcp_server_ip is not set — run setup (start as root)")?;
-        // Range default: .100–.200 of the subnet (same as the old dnsmasq config).
+        // Range default: .100–.200 of the subnet.
         let base = ip("dhcp_subnet").unwrap_or(server).octets();
         let start = ip("dhcp_range_start").unwrap_or(Ipv4Addr::new(base[0], base[1], base[2], 100));
         let end = ip("dhcp_range_end").unwrap_or(Ipv4Addr::new(base[0], base[1], base[2], 200));
@@ -163,6 +196,7 @@ impl Cfg {
             dns: g("dhcp_dns", "").split([',', ' ']).filter_map(|s| s.trim().parse().ok()).collect(),
             lease_s: lease_secs(&g("dhcp_lease", "12h")),
             sb: g("ipxe_signed", "0") == "1",
+            opts: DhcpOpts::load(db),
         })
     }
 }
@@ -349,22 +383,22 @@ fn full_reply(req: &Packet, mt: u8, ip: Ipv4Addr, mac: &str, k: Kind, cfg: &Cfg,
     if !cfg.dns.is_empty() {
         p.push(6, cfg.dns.iter().flat_map(|d| d.octets()).collect::<Vec<_>>());
     }
-    if let Some((_, Some(h))) = st.bindings.get(mac) {
+    if let Some((_, Some(h))) = st.bindings.get(mac).filter(|_| cfg.opts.send_hostname) {
         p.push(12, h.as_bytes().to_vec());
     }
     if let Some(f) = boot_file(k, cfg) {
         p.file = f;
     }
-    if k == Kind::Ipxe {
-        // iPXE option 175.176 no-pxedhcp = 1: our offer already carries the boot file → iPXE requests at once
-        // instead of waiting DHCP_DISC_PROXY_TIMEOUT_SEC (2 s) for ProxyDHCP offers.
+    if k == Kind::Ipxe && cfg.opts.ipxe_fast {
+        // iPXE option 175.176 no-pxedhcp = 1 (checkbox "iPXE: don't wait for ProxyDHCP"): our offer already carries the
+        // boot file → iPXE requests at once instead of waiting DHCP_DISC_PROXY_TIMEOUT_SEC (2 s) for ProxyDHCP offers.
         p.push(175, [0xb0, 1, 1]);
     }
     p
 }
 
-/// Decide the answer to one request. Pure: no I/O, so the whole protocol logic is unit-tested.
-/// Handle one DHCP packet (the server is always a full DHCP server now: it hands out IPs + boot info).
+/// Decide the answer to one request. Pure (no sockets, no DB; debug logging only), so the protocol logic is unit-tested.
+/// Handle one DHCP packet: hand out IPs + boot info.
 /// `from`/`port` are unused (kept for the packet-router signature).
 pub fn handle(req: &Packet, from: SocketAddrV4, port: u16, cfg: &Cfg, st: &Store) -> Outcome {
     let _ = (from, port);
@@ -407,6 +441,15 @@ pub fn handle(req: &Packet, from: SocketAddrV4, port: u16, cfg: &Cfg, st: &Store
                     out.log += &format!(" (its static IP {b} is still leased to {holder} — given a pool IP until that lease ends)");
                     out.warn = true;
                 }
+                if cfg.opts.rapid_commit && req.opt(80).is_some() {
+                    // Rapid Commit: the client asked to skip OFFER/REQUEST → straight ACK (with option 80) + full lease.
+                    out.log = out.log.replacen("DHCP offer", "got IP", 1) + " (rapid commit)";
+                    let mut p = full_reply(req, ACK, ip, &mac, k, cfg, st);
+                    p.push(80, Vec::new());
+                    out.reply = Some((p, Dest::Broadcast));
+                    out.lease = set(ip, cfg.lease_s as u64);
+                    return out;
+                }
                 out.reply = Some((full_reply(req, OFFER, ip, &mac, k, cfg, st), Dest::Broadcast));
                 // An OFFER hold must NOT shorten a longer lease this MAC already has (else a spoofed DISCOVER frees
                 // the victim's IP in 60 s → IP conflict). Keep the later expiry.
@@ -434,15 +477,15 @@ pub fn handle(req: &Packet, from: SocketAddrV4, port: u16, cfg: &Cfg, st: &Store
                     out.reply = Some((full_reply(req, ACK, ip, &mac, k, cfg, st), dest));
                     out.lease = set(ip, cfg.lease_s as u64);
                 }
-                // NAK only a client we know (bound, or holding/held a lease here). An unknown MAC asking for an IP
-                // without naming a server is renewing/rebooting with ANOTHER DHCP server's lease — stay silent
-                // (RFC 2131 4.3.2), never knock it off the LAN.
-                Some(ip) if st.bindings.contains_key(&mac) || st.leases.contains_key(&mac) => {
+                // NAK only a client we know (bound, or holding/held a lease here), and only when authoritative. An
+                // unknown MAC asking for an IP without naming a server is renewing/rebooting with ANOTHER DHCP
+                // server's lease — stay silent (RFC 2131 4.3.2), never knock it off the LAN.
+                Some(ip) if cfg.opts.authoritative && (st.bindings.contains_key(&mac) || st.leases.contains_key(&mac)) => {
                     out.log = format!("client {mac} asked for {ip}: refused (NAK)");
                     out.warn = true;
                     out.reply = Some((reply(req, NAK, cfg), Dest::Broadcast));
                 }
-                Some(ip) => tracing::debug!("dhcp: {mac} asked for {ip}, no record of it here → silent"),
+                Some(ip) => tracing::debug!("dhcp: {mac} asked for {ip}, not ours to give → silent"),
                 None => {}
             }
         }
@@ -613,6 +656,7 @@ mod tests {
             dns: vec![Ipv4Addr::new(1, 1, 1, 1)],
             lease_s: 3600,
             sb: false,
+            opts: DhcpOpts::default(),
         }
     }
 
@@ -799,6 +843,36 @@ mod tests {
         st.bindings.insert(MACS.into(), (bound, Some("PC01".into())));
         let out = handle(&req(DECLINE, &[(50, &bound.octets())]), FROM, 67, &cfg(), &st);
         assert!(out.warn && out.log.contains("PC01 declined 10.0.0.50") && matches!(out.lease, LeaseOp::None));
+    }
+
+    /// Network-page checkboxes: each optional behaviour on/off.
+    #[test]
+    fn optional_behaviours() {
+        let with = |f: &dyn Fn(&mut DhcpOpts)| {
+            let mut c = cfg();
+            f(&mut c.opts);
+            c
+        };
+        // Rapid Commit: only when enabled AND the client asks (option 80) → ACK + option 80 + full lease.
+        let rc = with(&|o| o.rapid_commit = true);
+        let out = handle(&req(DISCOVER, &[(80, &[])]), FROM, 67, &rc, &store());
+        let p = out.reply.unwrap().0;
+        assert_eq!((p.opt(53), p.opt(80)), (Some(&[ACK][..]), Some(&[][..])));
+        assert!(matches!(out.lease, LeaseOp::Set { expires: 4600, .. }) && out.log.contains("rapid commit"));
+        assert_eq!(handle(&req(DISCOVER, &[]), FROM, 67, &rc, &store()).reply.unwrap().0.opt(53), Some(&[OFFER][..]), "client didn't ask");
+        assert_eq!(handle(&req(DISCOVER, &[(80, &[])]), FROM, 67, &cfg(), &store()).reply.unwrap().0.opt(53), Some(&[OFFER][..]), "off by default");
+        // iPXE fast off → no option 175.
+        let ipxe = req(DISCOVER, &[(175, &[1])]);
+        assert!(handle(&ipxe, FROM, 67, &with(&|o| o.ipxe_fast = false), &store()).reply.unwrap().0.opt(175).is_none());
+        // Hostname off → no option 12 even for a bound machine.
+        let mut bound = store();
+        bound.bindings.insert(MACS.into(), (Ipv4Addr::new(10, 0, 0, 50), Some("PC01".into())));
+        assert!(handle(&req(DISCOVER, &[]), FROM, 67, &with(&|o| o.send_hostname = false), &bound).reply.unwrap().0.opt(12).is_none());
+        // Not authoritative → a known client asking for a wrong IP gets no NAK.
+        let mut known = store();
+        known.leases.insert(MACS.into(), (Ipv4Addr::new(10, 0, 0, 100), 5000));
+        let quiet = with(&|o| o.authoritative = false);
+        assert!(handle(&req(REQUEST, &[(50, &[192, 168, 1, 5])]), FROM, 67, &quiet, &known).reply.is_none());
     }
 
     #[test]

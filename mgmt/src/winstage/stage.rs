@@ -15,7 +15,7 @@ fn write_exec(path: &str, body: &str) -> Result<(), String> {
 /// Copied to /broom/bin (ahead of busybox in PATH — needs the full od/tar/wget...).
 const STAGE_HOOK: &str = include_str!("../../scripts/stage-hook.sh");
 
-/// Server tools the hook copies into the stage (/broom/bin, ahead of busybox).
+/// Tools of the machine building the bundle that the hook copies into the stage (/broom/bin, ahead of busybox).
 const STAGE_TOOLS: &str = "sfdisk blkid mkfs.fat mkntfs ntfsfix efibootmgr wget sha256sum tar gzip od dd awk zstd";
 
 /// Stage init-premount script — runs on the client, does NOT mount root; reboots into Windows when done.
@@ -30,11 +30,11 @@ fn build_stage(kernel: Option<&str>, sd: &str) -> Result<bool, String> {
         None => std::fs::read_to_string("/proc/sys/kernel/osrelease").map_err(|e| format!("kernel release: {e}"))?.trim().to_string(),
     };
     run("modinfo", &["-k", &kv, "ntfs3"]).map_err(|_| format!("kernel {kv} has no ntfs3 module — the stage must write NTFS"))?;
-    // zstd: multithreaded compression + faster decompression than gzip; server without zstd → gzip.
+    // zstd: multithreaded compression + faster decompression than gzip; a builder without zstd → gzip.
     let compress = if run("sh", &["-c", "command -v zstd"]).is_ok() { "zstd" } else { "gzip" };
     let initramfs_conf = format!("MODULES=most\nBUSYBOX=y\nCOMPRESS={compress}\n");
     let hook = STAGE_HOOK.replace("__TOOLS__", STAGE_TOOLS);
-    // Where each tool resolves on the server is part of the key: a tool installed later (e.g. wget) → rebuilt.
+    // Where each tool resolves on the builder is part of the key: a tool installed later (e.g. wget) → rebuilt.
     let tools = run("sh", &["-c", &format!("for b in {STAGE_TOOLS}; do command -v $b; done; true")]).unwrap_or_default();
     let key = stable_key(&[kv.as_str(), initramfs_conf.as_str(), hook.as_str(), STAGE_SCRIPT, tools.as_str()]);
     let key_file = format!("{sd}/stage.key");
@@ -55,7 +55,7 @@ fn build_stage(kernel: Option<&str>, sd: &str) -> Result<bool, String> {
     let tmp = format!("{sd}/stage.img.tmp");
     run("mkinitramfs", &["-d", conf, "-o", &tmp, &kv])?;
     // Tools WITHOUT a busybox replacement must really be in the initrd — report missing ones now
-    // at publish time, not when a client gets stuck in a shell.
+    // at build time, not when a client gets stuck in a shell.
     let list = run("lsinitramfs", &[&tmp])?;
     // wget: busybox's (initramfs build) lacks --header / --post-file → delta updates + drivers need GNU wget.
     // zstd: delta chunks arrive compressed.
@@ -76,7 +76,7 @@ fn build_stage(kernel: Option<&str>, sd: &str) -> Result<bool, String> {
 
 /// The stage bundle this binary belongs to (mgmt/stage.pin, filled by CI from `build-stage`: sha256, then the Release
 /// URL): kernel + initrd + Ubuntu shim built on the CI runner, so the server needs none of the tools above and its
-/// own kernel does not matter. Comments only (local builds) → the stage is built on the server instead.
+/// own kernel does not matter. Comments only (local builds) → a broom-stage.tar.gz copied next to the binary is used.
 const STAGE_PIN: &str = include_str!("../../stage.pin");
 /// Largest bundle accepted for download (kernel + initrd + shim are ~100 MB).
 const STAGE_MAX: u64 = 1 << 30;

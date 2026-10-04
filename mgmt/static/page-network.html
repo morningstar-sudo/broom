@@ -14,7 +14,17 @@
       <div class="field"><label>Range start</label><input id="dhcp_range_start" size="12" placeholder="auto .100"></div>
       <div class="field"><label>Range end</label><input id="dhcp_range_end" size="12" placeholder=".200"></div>
       <div class="field"><label>Gateway</label><input id="dhcp_gateway" size="12"></div>
-      <div class="field"><label>DNS</label><input id="dhcp_dns" size="12"></div>
+      <div class="field"><label title="One server per box, in order of preference (clients try the first one first), at most 8">DNS servers</label>
+        <div id="dns_list" style="display:flex;gap:6px;flex-wrap:wrap;align-items:center"></div></div>
+    </div>
+    <div class="row" id="full_only_opts" style="margin-top:12px">
+      <div class="field"><label>DHCP options</label>
+        <div style="display:flex;gap:16px;flex-wrap:wrap">
+          <label title="iPXE takes this server's answer at once instead of waiting 2 s for ProxyDHCP offers (option 175). Untick only if another ProxyDHCP server on the LAN must answer iPXE."><input id="dhcp_ipxe_fast" type="checkbox"> iPXE: don't wait for ProxyDHCP</label>
+          <label title="Machines that have a lease/static IP here but ask for another IP get a NAK and take a new one at once. Untick: stay silent (the client retries until its old lease runs out)."><input id="dhcp_authoritative" type="checkbox"> Authoritative (NAK wrong IPs)</label>
+          <label title="Send the hostname from the Machines table to the client (option 12)."><input id="dhcp_send_hostname" type="checkbox"> Send hostname</label>
+          <label title="RFC 4039: a client that asks for it gets its IP in one round trip (ACK right after DISCOVER). iPXE / UEFI PXE never ask; some Linux clients (systemd-networkd) do. Only with broom as the LAN's only DHCP server."><input id="dhcp_rapid_commit" type="checkbox"> Rapid Commit</label>
+        </div></div>
     </div>
     <div class="row" style="margin-top:12px">
       <div class="field"><label title="Windows images: the machine can only start Windows through the network stage.">Strict reset (Windows)</label>

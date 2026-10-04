@@ -69,9 +69,10 @@ fn xml(s: &str) -> String {
 }
 
 /// Script run INSIDE the golden Windows VM (PowerShell Admin, preferably in Audit Mode: Ctrl+Shift+F3 at OOBE).
-/// Usage: irm http://<server>/broom-prep-win | iex
+/// Usage: irm "http://<server>/broom-prep-win?t=<one-time token>" | iex (Images page → Windows prep command).
 /// Diskless tweaks → EFI bundle C:\broom\efi → unattend (guest user + autologon + skip OOBE) +
-/// broom-done.ps1 (first logon: write base.ok to BROOMWIN + reboot) → sysprep /generalize → power off the VM.
+/// broom-done.ps1 (first logon: write base.ok to BROOMWIN + reboot) → sysprep /generalize /quit → boot-start disk
+/// drivers (Start=0) → power off the VM.
 const PREP_WIN: &str = include_str!("../../scripts/prep-win.ps1");
 
 /// First logon (when base.vhdx is created on each machine): write base.ok to BROOMWIN, then restart at once → the stage

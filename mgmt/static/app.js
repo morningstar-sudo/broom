@@ -85,7 +85,7 @@ function refreshMachines(){return curPage==='devices'?loadDevices():loadStatus()
 function manage(id){dvPending=id;history.pushState(null,'','/devices');showPage('devices');}
 async function wake(mac){await j('/api/wake',mk({mac}));toast('WOL sent to '+mac)}
 // Windows license key: handed out ONCE to the machine's IP when its base is rebuilt (next boot). The full key +
-// activation result are shown to the logged-in operator. Keep keyOk in sync with key_ok() in machines.rs.
+// activation result are shown to the logged-in operator. Keep keyOk in sync with key_ok() in license.rs.
 const KEY_RULE='License key: 25 letters/digits as XXXXX-XXXXX-XXXXX-XXXXX-XXXXX (empty = remove)';
 const keyOk=k=>/^[A-Z0-9]{5}(-[A-Z0-9]{5}){4}$/.test(k);
 // Compact by default (lists): state + masked key tail + badge, full result on hover (title). full=true (detail
@@ -379,14 +379,29 @@ async function delDriver(id,name){if(!confirm('Delete driver package "'+name+'"?
   try{await j('/api/drivers/delete',mk({id}));loadDrivers();}catch(e){toast(e.message,true)}}
 
 // ---- network ----
+// DNS servers: one box each (order = preference), up to 8; sent to the server as one comma-separated list.
+const DNS_MAX=8;
+function dnsBox(v){const w=document.createElement('span');w.style.cssText='display:inline-flex;gap:2px';
+  w.innerHTML='<input class="dns" size="14" placeholder="e.g. 1.1.1.1"><button type="button" class="ghost" title="remove">×</button>';
+  w.querySelector('input').value=v||'';w.querySelector('button').onclick=()=>{w.remove();dnsButton();};return w;}
+function dnsButton(){const l=document.getElementById('dns_list');if(!l)return;let b=document.getElementById('dns_add');
+  if(!b){b=document.createElement('button');b.id='dns_add';b.type='button';b.className='ghost';b.textContent='+ DNS';
+    b.onclick=()=>{l.insertBefore(dnsBox(''),b);dnsButton();};l.appendChild(b);}
+  b.style.display=l.querySelectorAll('input.dns').length>=DNS_MAX?'none':'';}
+function setDns(csv){const l=document.getElementById('dns_list');if(!l)return;l.innerHTML='';
+  const v=(csv||'').split(',').map(s=>s.trim()).filter(Boolean);for(const x of (v.length?v:[''])) l.appendChild(dnsBox(x));dnsButton();}
+function getDns(){return [...document.querySelectorAll('#dns_list input.dns')].map(e=>e.value.trim()).filter(Boolean).join(',');}
 async function loadDhcp(){const c=await j('/api/dhcp');
-  ['mode','iface','server_ip','subnet','range_start','range_end','gateway','dns'].forEach(k=>{const e=document.getElementById('dhcp_'+k);if(e)e.value=c[k]||'';});
-  for(const k of ['ipxe_signed','strict_reset']){const e=document.getElementById('dhcp_'+k);if(e)e.checked=!!c[k];}
+  ['mode','iface','server_ip','subnet','range_start','range_end','gateway'].forEach(k=>{const e=document.getElementById('dhcp_'+k);if(e)e.value=c[k]||'';});
+  for(const k of ['ipxe_signed','strict_reset','rapid_commit','ipxe_fast','authoritative','send_hostname']){const e=document.getElementById('dhcp_'+k);if(e)e.checked=!!c[k];}
+  setDns(c.dns);
   const ps=document.getElementById('pxe_srv');if(ps&&c.server_ip)ps.textContent=c.server_ip;
   const dm=document.getElementById('dhcp_mode');if(dm)dm.onchange=toggleFull;toggleFull();}
-function toggleFull(){const fo=document.getElementById('full_only'),dm=document.getElementById('dhcp_mode');if(fo&&dm)fo.style.display=dm.value==='full'?'':'none';}
-async function applyDhcp(){const b={};['mode','iface','server_ip','subnet','range_start','range_end','gateway','dns'].forEach(k=>b[k]=document.getElementById('dhcp_'+k).value);
-  for(const k of ['ipxe_signed','strict_reset']){const e=document.getElementById('dhcp_'+k);if(e)b[k]=e.checked?'1':'0';}
+function toggleFull(){const dm=document.getElementById('dhcp_mode');if(!dm)return;
+  for(const id of ['full_only','full_only_opts']){const e=document.getElementById(id);if(e)e.style.display=dm.value==='full'?'':'none';}}
+async function applyDhcp(){const b={};['mode','iface','server_ip','subnet','range_start','range_end','gateway'].forEach(k=>b[k]=document.getElementById('dhcp_'+k).value);
+  for(const k of ['ipxe_signed','strict_reset','rapid_commit','ipxe_fast','authoritative','send_hostname']){const e=document.getElementById('dhcp_'+k);if(e)b[k]=e.checked?'1':'0';}
+  b.dns=getDns();
   const m=document.getElementById('dhcp_msg');
   try{const r=await j('/api/dhcp',mk(b));m.textContent=' ✓ '+(r.status||'applied');}catch(e){m.textContent=' ✗ '+e.message;}}
 

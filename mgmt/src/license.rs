@@ -69,7 +69,7 @@ async fn booted(State(st): State<SharedState>, ConnectInfo(peer): ConnectInfo<So
 
 pub(crate) const KEY_RULE: &str = "License key: 25 letters/digits as XXXXX-XXXXX-XXXXX-XXXXX-XXXXX";
 
-/// Windows product key format. Keep in sync with keyOk() in index.html.
+/// Windows product key format. Keep in sync with keyOk() in static/app.js.
 pub(crate) fn key_ok(k: &str) -> bool {
     k.len() == 29
         && k.split('-').count() == 5
@@ -143,7 +143,8 @@ async fn rearm_license(State(st): State<SharedState>, Json(b): Json<IdBody>) -> 
     Ok(ok())
 }
 
-/// GET /api/license (Windows, broom-done.ps1) → the key of the machine at the peer IP, once. 403 otherwise.
+/// POST /api/license (Windows, broom-done.ps1) → the key of the machine at the peer IP, once, shortly after its PXE
+/// boot. 403 otherwise.
 async fn license(State(st): State<SharedState>, ConnectInfo(peer): ConnectInfo<SocketAddr>) -> Result<String, ApiError> {
     let ip = peer.ip().to_string();
     let machines = st.db.machines().map_err(ise)?;

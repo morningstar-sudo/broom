@@ -1,6 +1,6 @@
-// tftp.rs — built-in read-only TFTP server (replaces dnsmasq's): RFC 1350 + blksize (RFC 2348) +
-// tsize/timeout (RFC 2349). Only boot files: snponly.efi straight from the bytes embedded in the
-// binary, anything else read-only from <home>/tftp. One task + one socket per transfer.
+// tftp.rs — built-in read-only TFTP server: RFC 1350 + blksize (RFC 2348) + tsize/timeout (RFC 2349). Serves only
+// what PXE firmware/iPXE fetch over TFTP, all from memory (see load()): the embedded iPXE builds and a generated
+// autoexec.ipxe. Everything else goes over HTTP. Always on (independent of the DHCP switch). One task + socket per transfer.
 use std::borrow::Cow;
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::time::Duration;

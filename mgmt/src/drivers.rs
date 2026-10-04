@@ -3,7 +3,7 @@
 // (the stage has tar/gzip, no unzip) + the hardware IDs read from its .inf files.
 // Stage, every boot: POST /api/drivers/for?mac= (body = its PCI/USB IDs) → "name sha256" lines of the packages
 // for this machine: a hardware ID matches, the package targets its group, or it is ticked "all machines".
-// broom-done.ps1 pnputil-installs them while base is built (winstage.rs).
+// broom-done.ps1 (scripts/, written into the golden by winstage/prep.rs) pnputil-installs them while base is built.
 use axum::{
     body::Body,
     extract::{DefaultBodyLimit, Query, State},
