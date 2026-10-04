@@ -261,6 +261,10 @@ async fn set_dhcp(
             st.db.set_config(k, val.trim()).map_err(ise)?;
         }
     }
+    if b.ipxe_signed.as_deref() == Some("1") {
+        // Secure Boot clients need the shim from the stage bundle → fetch it now if it isn't there (background).
+        tokio::task::spawn_blocking(crate::publish::prepare_stage);
+    }
     restart(&st).await
 }
 

@@ -285,9 +285,8 @@ async fn main() {
             Ok(s) => info!("{s}"),
             Err(e) => error!("DHCP/TFTP not started: {e} (fix it on the Network page → Apply)"),
         }
-        // Secure Boot shim (from the stage bundle, else the server's shim-signed) → tftp/shim/, so the switch works
-        // without a Publish.
-        publish::refresh_shim();
+        // Stage bundle checked + fetched if missing (background: a download), then its Secure Boot shim → tftp/shim/.
+        tokio::task::spawn_blocking(publish::prepare_stage);
         // configfs targets + zram are lost on server reboot → re-export / rebuild (background, zram is slow).
         let st = state.clone();
         tokio::task::spawn_blocking(move || publish::restore_targets(&st));

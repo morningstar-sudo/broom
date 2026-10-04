@@ -92,14 +92,12 @@ pub fn stage_pinned() -> Option<&'static str> {
 }
 
 /// Make sure stage_dir() holds the stage — always from a bundle, never built on the server (no packages there):
-/// `broom-stage.tar.gz` next to the binary if someone copied it there, else (release binary) downloaded once from
-/// the Release. A release binary accepts only its pinned bundle. Returns what happened.
+/// `broom-stage.tar.gz` next to the binary if someone copied it there, else (release binary) downloaded from the
+/// Release. A release binary accepts only its pinned bundle. What is installed is checked file by file (stage_ok)
+/// on every call: missing, changed or another build's → installed again. Returns what happened.
 pub fn ensure_stage() -> Result<String, String> {
     let sd = stage_dir();
     let local = crate::home().join("broom-stage.tar.gz");
-    let mark = format!("{sd}/bundle.sha256");
-    let have = |f: &str| Path::new(&format!("{sd}/{f}")).is_file();
-    let installed = |want: &str| std::fs::read_to_string(&mark).is_ok_and(|s| s.trim() == want) && have("vmlinuz") && have("stage.img");
     let Some(want) = stage_pinned() else {
         // Locally built binary: the bundle its builder made with `build-stage` (it matches their stage script).
         if local.is_file() {
@@ -108,58 +106,100 @@ pub fn ensure_stage() -> Result<String, String> {
             let _ = std::fs::remove_file(&local);
             return Ok("installed from broom-stage.tar.gz next to the binary".into());
         }
-        if std::fs::read_to_string(&mark).is_ok() && have("vmlinuz") && have("stage.img") {
-            return Ok("kept".into());
+        if stage_ok(&sd, None) {
+            return Ok("kept (checked)".into());
         }
         return Err(format!(
             "this binary was built locally and has no Windows stage: on a machine with initramfs-tools fdisk ntfs-3g \
-             dosfstools efibootmgr wget zstd shim-signed and a -generic kernel, run `sudo ./bootrom-mgmt build-stage <dir> \
+             dosfstools efibootmgr wget shim-signed and a -generic kernel, run `sudo ./bootrom-mgmt build-stage <dir> \
              --kernel <version>-generic`, copy <dir>/broom-stage.tar.gz to {} and publish again (or use a release binary)",
             local.display()
         ));
     };
-    if installed(want) {
-        return Ok("kept".into());
+    if stage_ok(&sd, Some(want)) {
+        return Ok("kept (checked)".into());
     }
-    if local.is_file() {
-        install_bundle(&local, want, &sd)?;
-        let _ = std::fs::remove_file(&local); // unpacked into tftp/broom-stage/
-        return Ok("installed from broom-stage.tar.gz next to the binary".into());
-    }
-    let url = parse_pin(STAGE_PIN).and_then(|(_, u)| u).ok_or_else(|| format!("this binary has no stage URL — copy its broom-stage.tar.gz to {}", local.display()))?;
-    let dl = crate::work_dir().join("broom-stage.tar.gz");
-    std::fs::create_dir_all(crate::work_dir()).map_err(|e| e.to_string())?;
-    tracing::info!("downloading the Windows stage: {url}");
-    download(url, &dl).map_err(|e| {
-        format!("{e} — no internet on this server? download broom-stage.tar.gz of this release elsewhere and copy it to {}", local.display())
-    })?;
-    let r = install_bundle(&dl, want, &sd);
-    let _ = std::fs::remove_file(&dl);
-    r?;
-    Ok("installed from the release bundle".into())
+    let r = if local.is_file() {
+        install_bundle(&local, want, &sd).map(|()| {
+            let _ = std::fs::remove_file(&local); // unpacked into tftp/broom-stage/
+            "installed from broom-stage.tar.gz next to the binary".to_string()
+        })
+    } else {
+        let url = parse_pin(STAGE_PIN).and_then(|(_, u)| u).ok_or_else(|| format!("this binary has no stage URL — copy its broom-stage.tar.gz to {}", local.display()))?;
+        let dl = crate::work_dir().join(format!("broom-stage-{}.tar.gz", unique()));
+        std::fs::create_dir_all(crate::work_dir()).map_err(|e| e.to_string())?;
+        tracing::info!("downloading the Windows stage: {url}");
+        let r = download(url, &dl)
+            .map_err(|e| format!("{e} — no internet on this server? download broom-stage.tar.gz of this release elsewhere and copy it to {}", local.display()))
+            .and_then(|()| install_bundle(&dl, want, &sd))
+            .map(|()| "installed from the release bundle".to_string());
+        let _ = std::fs::remove_file(&dl);
+        r
+    };
+    // Another call (startup, the Secure Boot switch, a publish) may have installed the same bundle meanwhile — what
+    // counts is what is on disk now.
+    r.or_else(|e| if stage_ok(&sd, Some(want)) { Ok("installed (checked)".into()) } else { Err(e) })
 }
 
-/// Check `file` against sha256 `want`, unpack it into `sd` (swapped in whole, never half-written), mark it.
+/// Per-call suffix for the download file + temp dirs: calls at the same time never write into each other's files.
+fn unique() -> String {
+    static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    format!("{}-{}", std::process::id(), N.fetch_add(1, std::sync::atomic::Ordering::Relaxed))
+}
+
+/// The installed stage is the bundle `want` (None = any bundle) AND every file it unpacked still has the sha256
+/// recorded when it was installed (files.sha256) — vmlinuz + stage.img among them. Re-hashed on each call
+/// (~100 MB: well under a second).
+fn stage_ok(sd: &str, want: Option<&str>) -> bool {
+    let mark = std::fs::read_to_string(format!("{sd}/bundle.sha256")).unwrap_or_default();
+    let mark = mark.trim();
+    if mark.is_empty() || want.is_some_and(|w| w != mark) {
+        return false;
+    }
+    let Ok(sums) = std::fs::read_to_string(format!("{sd}/files.sha256")) else { return false };
+    let mut names = Vec::new();
+    for l in sums.lines() {
+        let Some((h, f)) = l.split_once("  ") else { return false };
+        if f.contains('/') || crate::hash::file_hash(&format!("{sd}/{f}")).as_deref() != Some(h) {
+            return false;
+        }
+        names.push(f);
+    }
+    names.contains(&"vmlinuz") && names.contains(&"stage.img")
+}
+
+/// Check `file` against sha256 `want`, unpack it, record the sha256 of every file it holds (files.sha256, checked by
+/// stage_ok), swap it in as `sd` whole (never half-written).
 fn install_bundle(file: &Path, want: &str, sd: &str) -> Result<(), String> {
     let got = crate::hash::file_hash(&file.to_string_lossy()).ok_or_else(|| format!("{}: unreadable", file.display()))?;
     if got != want {
         return Err(format!("{}: sha256 {got}, this binary expects its own build's stage {want}", file.display()));
     }
-    let tmp = format!("{sd}.new");
-    let _ = std::fs::remove_dir_all(&tmp);
-    crate::archive::untar_gz(file, Path::new(&tmp))?;
-    for f in ["vmlinuz", "stage.img"] {
-        if !Path::new(&format!("{tmp}/{f}")).is_file() {
-            return Err(format!("stage bundle has no {f}"));
+    let u = unique();
+    let (tmp, old) = (format!("{sd}.new-{u}"), format!("{sd}.old-{u}"));
+    let r = (|| {
+        crate::archive::untar_gz(file, Path::new(&tmp))?;
+        for f in ["vmlinuz", "stage.img"] {
+            if !Path::new(&format!("{tmp}/{f}")).is_file() {
+                return Err(format!("stage bundle has no {f}"));
+            }
         }
-    }
-    std::fs::write(format!("{tmp}/bundle.sha256"), want).map_err(|e| e.to_string())?;
-    let old = format!("{sd}.old");
+        let mut sums = String::new();
+        let mut files: Vec<_> = std::fs::read_dir(&tmp).map_err(|e| e.to_string())?.flatten().filter(|e| e.path().is_file()).collect();
+        files.sort_by_key(|e| e.file_name());
+        for e in files {
+            let p = e.path();
+            let h = crate::hash::file_hash(&p.to_string_lossy()).ok_or_else(|| format!("{}: unreadable", p.display()))?;
+            sums.push_str(&format!("{h}  {}\n", e.file_name().to_string_lossy()));
+        }
+        std::fs::write(format!("{tmp}/files.sha256"), sums).map_err(|e| e.to_string())?;
+        std::fs::write(format!("{tmp}/bundle.sha256"), want).map_err(|e| e.to_string())?;
+        let _ = std::fs::rename(sd, &old);
+        std::fs::rename(&tmp, sd).map_err(|e| format!("{sd}: {e}"))
+    })();
+    let _ = std::fs::remove_dir_all(&tmp);
     let _ = std::fs::remove_dir_all(&old);
-    let _ = std::fs::rename(&sd, &old);
-    std::fs::rename(&tmp, sd).map_err(|e| format!("{sd}: {e}"))?;
-    let _ = std::fs::remove_dir_all(&old);
-    Ok(())
+    r
 }
 
 /// HTTPS GET → `dest` (rustls, built-in CA roots: works on a server without ca-certificates).
@@ -590,7 +630,19 @@ mod tests {
         super::install_bundle(&tgz, &sha, &sd).unwrap();
         assert_eq!(std::fs::read_to_string(format!("{sd}/stage.img")).unwrap(), "initrd");
         assert_eq!(std::fs::read_to_string(format!("{sd}/bundle.sha256")).unwrap(), sha);
-        assert!(Path::new(&format!("{sd}/shimx64.efi")).is_file() && !Path::new(&format!("{sd}.old")).exists());
+        assert!(Path::new(&format!("{sd}/shimx64.efi")).is_file());
+        let left: Vec<_> = std::fs::read_dir(d.join("tftp")).unwrap().flatten().map(|e| e.file_name()).collect();
+        assert_eq!(left, vec![std::ffi::OsString::from("broom-stage")], "no .new-* / .old-* dirs left");
+        // Checked file by file: right bundle → ok; another bundle, a changed or a missing file → not ok.
+        assert!(super::stage_ok(&sd, Some(&sha)) && super::stage_ok(&sd, None));
+        assert!(!super::stage_ok(&sd, Some(&"0".repeat(64))));
+        std::fs::write(format!("{sd}/shimx64.efi"), "evil").unwrap();
+        assert!(!super::stage_ok(&sd, Some(&sha)), "changed file");
+        super::install_bundle(&tgz, &sha, &sd).unwrap();
+        std::fs::remove_file(format!("{sd}/stage.img")).unwrap();
+        assert!(!super::stage_ok(&sd, Some(&sha)), "missing file");
+        std::fs::write(format!("{sd}/files.sha256"), "").unwrap();
+        assert!(!super::stage_ok(&sd, Some(&sha)), "empty list never passes");
         let _ = std::fs::remove_dir_all(&d);
     }
 }

@@ -69,13 +69,23 @@ fn secure_boot(st: &SharedState) -> bool {
 
 /// Under Secure Boot, iPXE boots the Canonical-signed Ubuntu kernel (Windows stage or Linux golden) through Ubuntu's
 /// Microsoft-signed shim (from the stage bundle, publish::refresh_shim → tftp/shim/). None when the switch is off or
-/// no shim is there yet (publish once: a Windows image, or a Linux one with the switch on, fetches the bundle).
+/// no shim is there yet (the server fetches the stage bundle at start, when the switch is turned on, and from here).
 fn shim_line(st: &SharedState, img: &crate::db::Image) -> Option<String> {
     if !secure_boot(st) {
         return None;
     }
     if !crate::tftp_dir().join("shim/shimx64.efi").is_file() {
-        warn!("image {}: no shim/shimx64.efi — install shim-signed and Publish again so Secure Boot clients can boot", img.name);
+        // Fetch the stage bundle (it carries the shim) in the background — at most every 10 minutes, a room of
+        // booting clients must not start a download each.
+        static LAST_TRY: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let now = crate::now_secs();
+        let last = LAST_TRY.load(std::sync::atomic::Ordering::Relaxed);
+        if now.saturating_sub(last) >= 600
+            && LAST_TRY.compare_exchange(last, now, std::sync::atomic::Ordering::Relaxed, std::sync::atomic::Ordering::Relaxed).is_ok()
+        {
+            tokio::task::spawn_blocking(crate::publish::prepare_stage);
+        }
+        warn!("image {}: no shim/shimx64.efi yet — fetching the stage bundle; Secure Boot clients can boot once it is in", img.name);
         return None;
     }
     Some(format!("shim http://{}/tftp/shim/shimx64.efi\n", st.db.get_config("dhcp_server_ip", "")))

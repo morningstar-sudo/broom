@@ -86,12 +86,23 @@ pub(crate) fn refresh_shim() {
         .into_iter()
         .find(|p| Path::new(p).is_file());
     let Some(src) = src else {
-        return tracing::warn!("no shim yet (published a Windows image once, or apt install shim-signed): Secure Boot clients cannot boot the kernels");
+        return tracing::warn!("no shim: the stage bundle is not installed (see the 'stage bundle' log line) and no shim-signed package → Secure Boot clients cannot boot the kernels");
     };
     let dir = crate::tftp_dir().join("shim");
     if let Err(e) = std::fs::create_dir_all(&dir).and_then(|_| std::fs::copy(src, dir.join("shimx64.efi"))) {
         tracing::warn!("copy {src} → {}: {e}", dir.display());
     }
+}
+
+/// The stage bundle (Windows stage + Secure Boot shim): checked, fetched when missing or not this binary's own, then
+/// the shim copied to tftp/shim/. Runs at start and when Secure Boot is switched on, so neither waits for the first
+/// Windows publish. Blocking (a download).
+pub(crate) fn prepare_stage() {
+    match crate::winstage::ensure_stage() {
+        Ok(s) => tracing::info!("stage bundle: {s}"),
+        Err(e) => tracing::warn!("stage bundle: {e}"),
+    }
+    refresh_shim();
 }
 
 pub fn run_publish(st: &SharedState, name: &str, steps: &mut Steps) -> Result<String, String> {
