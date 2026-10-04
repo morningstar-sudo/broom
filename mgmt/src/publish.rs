@@ -282,7 +282,7 @@ fn publish_iscsi_staged(
     let size = std::fs::metadata(img_abs).map_err(|e| e.to_string())?.len();
     let bs = format!(
         "sanhook iscsi:{ip}::::{iqn} || shell\n\
-         kernel http://{ip}/tftp/broom/{name}/vmlinuz initrd=initrd.img ip=dhcp root=UUID={root_uuid} ro fsck.mode=skip overlayroot=device:dev=/dev/disk/by-label/broomwb,recurse=0 broom.name={name} broom.hash={hash} broom.size={size} broom.srv={ip} broom.reg=${{broom-reg}} broom.lxgb=${{broom-lxgb}} broom.ssd=${{broom-ssd}}\n\
+         kernel http://{ip}/tftp/broom/{name}/vmlinuz initrd=initrd.img ip=dhcp root=UUID={root_uuid} ro fsck.mode=skip overlayroot=device:dev=/dev/disk/by-label/broomwb,recurse=0 broom.name={name} broom.hash={hash} broom.size={size} broom.srv={ip} broom.reg=${{broom-reg}} broom.lxgb=${{broom-lxgb}} broom.wbgb=${{broom-wbgb}} broom.ssd=${{broom-ssd}}\n\
          initrd http://{ip}/tftp/broom/{name}/initrd.img\n\
          boot"
     );

@@ -382,7 +382,7 @@ mod tests {
             let d = std::env::temp_dir().join(format!("broom_t_layout_{sectors}_{lx}"));
             std::fs::create_dir_all(d.join("sda")).unwrap();
             std::fs::write(d.join("sda/size"), format!("{sectors}\n")).unwrap();
-            let o = stage_sh().args(["-c", &format!("SYSB={}; LX={lx}\n{f}\nlayout sda", d.display())]).output().unwrap();
+            let o = stage_sh().args(["-c", &format!("SYSB={}; LX={lx}; WB=30\n{f}\nlayout sda", d.display())]).output().unwrap();
             let _ = std::fs::remove_dir_all(&d);
             String::from_utf8_lossy(&o.stdout).to_string()
         };

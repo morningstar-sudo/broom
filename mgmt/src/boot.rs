@@ -117,14 +117,14 @@ pub async fn start(State(st): State<SharedState>, Query(q): Q) -> impl IntoRespo
     script(match (&img, boot) {
         (Some(i), Some(bs)) => {
             info!("client {who} started - mac {mac} - ip {ip} - hostname {h} - image {name} ({})", i.os);
-            // Per-boot switches the Windows stage reads from its cmdline (broom.base= / broom.strict=), and the Linux
-            // share of the Broom SSD both OSes lay it out with (broom.lxgb=).
+            // Per-boot switches the Windows stage reads from its cmdline (broom.base= / broom.strict=), and the Broom
+            // SSD layout both OSes use (broom.lxgb= Linux share, broom.wbgb= writeback inside it).
             let strict = st.db.get_config("strict_reset", "0") == "1";
             let linux_sizes = st.db.images().unwrap_or_default().into_iter().filter(|i| i.os == "linux" && i.use_ssd).filter_map(|i| {
                 std::fs::metadata(crate::images_dir().join(&i.name).join("image.img")).ok().map(|m| m.len())
             });
             format!(
-                "#!ipxe\nset broom-base {}\nset broom-strict {}\nset broom-lxgb {}\nset broom-ssd {}\n{}{bs}\n",
+                "#!ipxe\nset broom-base {}\nset broom-strict {}\nset broom-lxgb {}\nset broom-wbgb {WB_GB}\nset broom-ssd {}\n{}{bs}\n",
                 i.base_mode as u8,
                 strict as u8,
                 linux_share_gb(linux_sizes),
@@ -142,12 +142,16 @@ pub async fn start(State(st): State<SharedState>, Query(q): Q) -> impl IntoRespo
     })
 }
 
+/// GB of the Linux writeback partition (broomwb) on the Broom SSD — the only place this number lives: the stage and
+/// the Linux hook get it on their cmdline (broom.wbgb).
+const WB_GB: u64 = 30;
+
 /// GB of the Broom SSD kept for the Linux side, from the Linux goldens that use the SSD (each machine caches all of
-/// them): 30 GB writeback (WB_GB in scripts/linux-iscsi-hook.sh, 30GiB in stage.sh layout()) + their total + 5 GB
-/// slack. None → 0 (Windows gets the whole disk). Only used when a disk is laid out, never to resize one.
+/// them): the writeback + their total + 5 GB slack. None → 0 (Windows gets the whole disk). Only used when a disk is
+/// laid out, never to resize one.
 fn linux_share_gb(golden_sizes: impl Iterator<Item = u64>) -> u64 {
     let gb: Vec<u64> = golden_sizes.map(|b| b.div_ceil(1 << 30)).collect();
-    if gb.is_empty() { 0 } else { 30 + gb.iter().sum::<u64>() + 5 }
+    if gb.is_empty() { 0 } else { WB_GB + gb.iter().sum::<u64>() + 5 }
 }
 
 struct MenuImage {

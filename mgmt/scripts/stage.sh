@@ -20,11 +20,11 @@ getfile(){
   if [ -x /broom/bin/wget ]; then /broom/bin/wget -q --show-progress --progress=bar:force:noscroll "$@"
   else wget "$@"; fi
 }
-NAME=""; HASH=""; SRV=""; HOST=""; LIC=""; MAC=""; REG=""; BASE=""; STRICT=""; LX=""
+NAME=""; HASH=""; SRV=""; HOST=""; LIC=""; MAC=""; REG=""; BASE=""; STRICT=""; LX=""; WB=""
 for a in $(cat /proc/cmdline); do
   case "$a" in broom.name=*) NAME=${a#*=};; broom.hash=*) HASH=${a#*=};; broom.srv=*) SRV=${a#*=};;
     broom.host=*) HOST=${a#*=};; broom.lic=*) LIC=${a#*=};; BOOTIF=01-*) MAC=$(echo "${a#BOOTIF=01-}" | tr - :);;
-    broom.reg=*) REG=${a#*=};; broom.base=*) BASE=${a#*=};; broom.strict=*) STRICT=${a#*=};; broom.lxgb=*) LX=${a#*=};; esac
+    broom.reg=*) REG=${a#*=};; broom.base=*) BASE=${a#*=};; broom.strict=*) STRICT=${a#*=};; broom.lxgb=*) LX=${a#*=};; broom.wbgb=*) WB=${a#*=};; esac
 done
 [ -n "$NAME" ] && [ -n "$HASH" ] && [ -n "$SRV" ] || die "missing broom.name/hash/srv on cmdline"
 for m in ntfs3 vfat nls_cp437 nls_iso8859_1 nls_utf8 efivarfs; do modprobe $m 2>/dev/null; done
@@ -47,9 +47,10 @@ scan(){
 }
 # The Broom SSD — ONE disk for Windows and Linux images alike (other disks stay normal disks), known by its GPT
 # partition names (read from sysfs: no tool needed, the Linux side does the same):
-#   p1 BROOMEFI 512M | p2 BROOMWIN (Windows) | p3 broomwb 30G + p4 broomcache (Linux, only when LX > 0)
+#   p1 BROOMEFI 512M | p2 BROOMWIN (Windows) | p3 broomwb (WB GB, broom.wbgb) + p4 broomcache (Linux, only when LX > 0)
 # LX = GB kept for the Linux side, sized by the server from its Linux goldens (broom.lxgb; 0 = no Linux image).
 case "$LX" in ''|*[!0-9]*) LX=0;; esac
+case "$WB" in ""|*[!0-9]*) WB=30;; esac   # writeback GB (broom.wbgb); 30 = boot script of an older version
 pn(){ p=$(part $1 $2); sed -n 's/^PARTNAME=//p' $SYSB/$1/${p##*/}/uevent 2>/dev/null; }
 broomdisk(){
   for n in $disks; do
@@ -64,7 +65,7 @@ layout(){
   [ $((gb - 1 - lx)) -ge 32 ] || lx=0
   printf 'label: gpt\nsize=512MiB, type=U, name=BROOMEFI\n'
   if [ $lx -gt 0 ]; then
-    printf 'size=%sGiB, type=EBD0A0A2-B9E5-4433-87C0-68B6B72699C7, name=BROOMWIN, attrs="GUID:63"\nsize=30GiB, name=broomwb\nname=broomcache\n' $((gb - 1 - lx))
+    printf 'size=%sGiB, type=EBD0A0A2-B9E5-4433-87C0-68B6B72699C7, name=BROOMWIN, attrs="GUID:63"\nsize=%sGiB, name=broomwb\nname=broomcache\n' $((gb - 1 - lx)) $WB
   else
     printf 'type=EBD0A0A2-B9E5-4433-87C0-68B6B72699C7, name=BROOMWIN, attrs="GUID:63"\n'
   fi

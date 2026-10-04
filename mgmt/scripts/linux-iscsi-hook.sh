@@ -2,7 +2,7 @@
 case "$1" in prereqs) echo ""; exit 0;; esac
 # Log to console + /run/broom-wb.log (/run moves to the real root → readable after boot).
 log(){ echo "broom: $*"; echo "$*" >> /run/broom-wb.log; }
-WB_GB=30   # writeback size (same 30 GB in stage.sh layout()); the rest of the Linux part = cache + /games.
+WB_GB=""   # writeback GB (broom.wbgb, set by the server); the rest of the Linux part = cache + /games.
 modprobe iscsi_tcp 2>/dev/null
 modprobe iscsi_ibft 2>/dev/null
 NAME=""; HASH=""; SIZE=""; NOCACHE=""; REG=""; LX=""; SSD=""; SRV=""
@@ -10,10 +10,11 @@ for a in $(cat /proc/cmdline); do
   case "$a" in
     broom.name=*) NAME=${a#*=};; broom.hash=*) HASH=${a#*=};; broom.size=*) SIZE=${a#*=};;
     broom.nocache) NOCACHE=1;;
-    broom.reg=*) REG=${a#*=};; broom.lxgb=*) LX=${a#*=};; broom.ssd=*) SSD=${a#*=};; broom.srv=*) SRV=${a#*=};;
+    broom.reg=*) REG=${a#*=};; broom.lxgb=*) LX=${a#*=};; broom.ssd=*) SSD=${a#*=};; broom.srv=*) SRV=${a#*=};; broom.wbgb=*) WB_GB=${a#*=};;
   esac
 done
 case "$LX" in ''|*[!0-9]*) LX=0;; esac
+case "$WB_GB" in ''|*[!0-9]*) WB_GB=30;; esac   # boot script of an older version
 # LOCAL disks = physical disks present BEFORE attaching iSCSI (golden iSCSI not visible yet). Skip removable and
 # USB disks (an external USB HDD/SSD often reports removable=0).
 localdisks=""

@@ -176,7 +176,7 @@ pub fn publish(st: &SharedState, id: i64, name: &str, steps: &mut crate::publish
     std::fs::write(format!("{out}/files.sha256"), sums).map_err(|e| format!("files.sha256: {e}"))?;
     std::fs::write(&sum_file, &hash).map_err(|e| format!("golden.sha256: {e}"))?;
     let bs = format!(
-        "kernel http://{ip}/tftp/broom-stage/vmlinuz initrd=stage.img ip=dhcp BOOTIF=01-${{mac:hexhyp}} broom.name={name} broom.hash={hash} broom.srv={ip} broom.host=${{broom-host}} broom.lic=${{broom-lic}} broom.reg=${{broom-reg}} broom.base=${{broom-base}} broom.strict=${{broom-strict}} broom.lxgb=${{broom-lxgb}}\n\
+        "kernel http://{ip}/tftp/broom-stage/vmlinuz initrd=stage.img ip=dhcp BOOTIF=01-${{mac:hexhyp}} broom.name={name} broom.hash={hash} broom.srv={ip} broom.host=${{broom-host}} broom.lic=${{broom-lic}} broom.reg=${{broom-reg}} broom.base=${{broom-base}} broom.strict=${{broom-strict}} broom.lxgb=${{broom-lxgb}} broom.wbgb=${{broom-wbgb}}\n\
          initrd http://{ip}/tftp/broom-stage/stage.img\n\
          boot"
     );
