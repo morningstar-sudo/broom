@@ -253,3 +253,7 @@ The binary embeds **iPXE**, © the iPXE authors and licensed **GPLv2 (with the U
 complete source is upstream iPXE at `mgmt/ipxe/IPXE_COMMIT` plus the changes in `mgmt/ipxe/patches/`
 (also GPLv2 / UBDL), and `mgmt/ipxe/signed/` holds unmodified official iPXE builds. iPXE is not covered by the
 Apache license; the two apply to their respective parts.
+
+`broom-stage.tar.gz` (Releases) is made of unmodified Ubuntu binaries (Linux kernel, busybox, ntfs-3g, wget, …;
+mostly GPL) under their own licenses: `SOURCES.txt` inside it lists each package + version, whose source is in the
+Ubuntu archive. See [NOTICE](NOTICE).

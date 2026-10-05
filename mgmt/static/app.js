@@ -2,6 +2,14 @@ async function j(url,opt){const r=await fetch(url,opt);
   if(r.status===401){location.replace('/login');throw new Error('login required');}
   if(!r.ok)throw new Error(await r.text());return r.json()}
 const esc=s=>(s==null?'':String(s)).replace(/[&<>"'`]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;','`':'&#96;'}[c]));
+// No data in inline JS (onclick="f('${esc(x)}')" is unsafe: the browser decodes &#39; back to ' before running
+// it; the CSP blocks inline handlers anyway). Elements name an ACTIONS entry in data-click / data-change /
+// data-input and carry JSON args in data-args; one listener per event type calls ACTIONS[name](...args, el, event).
+const act=(name,...args)=>`data-click="${name}" data-args="${esc(JSON.stringify(args))}"`;
+for(const ev of ['click','change','input'])document.addEventListener(ev,e=>{
+  const el=e.target.closest&&e.target.closest('[data-'+ev+']');if(!el)return;
+  const f=ACTIONS[el.dataset[ev]];if(f)f(...JSON.parse(el.dataset.args||'[]'),el,e);
+});
 
 // ---- tabs: load HTML fragments on demand (/ui/<page>) + only load data for the tab being viewed ----
 const loaders={machines:loadStatus,devices:loadDevices,images:loadImages,drivers:loadDrivers,network:loadDhcp,system:loadCafe};
@@ -63,9 +71,9 @@ function renderMachines(){
        <td><span class="led ${m.online?'on':'off'}">${m.online?'ON':'OFF'}</span>${m.not_reset?' <span class="pill" style="background:var(--off,#c33);color:#fff" title="Windows started from the SSD without a PXE boot at '+new Date(m.not_reset*1000).toLocaleString()+' — this session was NOT reset (cable out, server down, boot order changed?). Cleared by the next PXE boot.">not reset</span>':''}</td>
        <td class="mono" title="${esc(m.license_result||'')}">${licCell(m)}</td>
        <td class="row">${m.registered
-          ? `<button class="ghost" onclick="wake('${esc(m.mac)}')">Wake</button>
-             <button class="ghost" onclick="manage(${m.id})">Manage</button>`
-          : `<button onclick="regMachine('${esc(m.mac)}','${esc(m.ip)}','${esc(m.hostname)}')">Register</button>`}</td>
+          ? `<button class="ghost" ${act('wake',m.mac)}>Wake</button>
+             <button class="ghost" ${act('manage',m.id)}>Manage</button>`
+          : `<button ${act('regMachine',m.mac,m.ip,m.hostname)}>Register</button>`}</td>
      </tr>`).join('') || '<tr><td colspan=7 class="mono">no matching machines</td></tr>';
   document.getElementById('m_count').textContent=rows.length+' machines';
   document.getElementById('m_page').textContent='Page '+mPage+'/'+pages;
@@ -130,8 +138,8 @@ function dvFiltered(){
 }
 function dvRender(){
   const rows=dvFiltered(), tb=document.querySelector('#devices tbody'); if(!tb)return;
-  tb.innerHTML=rows.map(m=>`<tr class="${dvOpenId&&m.id===dvOpenId?'sel':''}" ${m.registered?`onclick="dvOpen(${m.id})" style="cursor:pointer"`:''}>
-      <td onclick="event.stopPropagation()"><input type="checkbox" ${dvSel.has(dvKey(m))?'checked':''} onchange="dvToggle('${esc(dvKey(m))}',this.checked)"></td>
+  tb.innerHTML=rows.map(m=>`<tr class="${dvOpenId&&m.id===dvOpenId?'sel':''}" ${m.registered?`${act('dvOpen',m.id)} style="cursor:pointer"`:''}>
+      <td data-click="noop"><input type="checkbox" ${dvSel.has(dvKey(m))?'checked':''} data-change="dvToggle" data-args="${esc(JSON.stringify([dvKey(m)]))}"></td>
       <td>${m.hostname?esc(m.hostname):'<span class="mono">—</span>'} ${m.registered?'':'<span class="pill new">new</span>'}</td>
       <td class="mono">${esc(m.grp||'—')}</td><td class="mono">${esc(m.ip)}</td><td class="mono">${esc(m.mac)}</td>
       <td><span class="led ${m.online?'on':'off'}">${m.online?'ON':'OFF'}</span></td>
@@ -184,7 +192,7 @@ async function dvOpen(id){
   let d; try{d=await j('/api/machines/detail?id='+id);}catch(e){dvClose();return;}
   dvOpenId=id;
   const m=d.machine; m.license_key=d.license_key; // key is skip-serialized on machine; detail returns it separately
-  const who=esc(m.hostname||m.mac), st=dvAll.find(x=>x.id===id)||{};
+  const name=m.hostname||m.mac, who=esc(name), st=dvAll.find(x=>x.id===id)||{};
   const opt=dvImages.map(i=>`<option value="${i.id}" ${i.id===m.image_id?'selected':''}>${esc(i.name)}</option>`).join('');
   const lease=d.lease?esc(d.lease.ip||'—')+' · '+esc(d.lease.source)+' · '+(d.lease.expires_in>0?'expires in '+Math.round(d.lease.expires_in/60)+' min':'expired'):'—';
   box.hidden=false;
@@ -198,12 +206,12 @@ async function dvOpen(id){
       <div class="field" style="flex:1;min-width:180px"><label>Notes</label><input id="dd_notes" value="${esc(m.notes||'')}" maxlength="200"></div>
     </div>
     <div class="row" style="margin-top:10px">
-      <button class="primary" onclick="dvSave(${id})">Save</button>
-      <button class="ghost" onclick="wake('${esc(m.mac)}')">Wake</button>
-      <button class="ghost" onclick="setKey(${id},'${who}')">License key</button>
-      ${m.license_state==='sent'?`<button class="ghost" onclick="rearmKey(${id},'${who}')">Re-arm key</button>`:''}
-      <button class="ghost danger" onclick="dvDelete(${id},'${who}')">Delete</button>
-      <button class="ghost" onclick="dvClose()">Close</button>
+      <button class="primary" ${act('dvSave',id)}>Save</button>
+      <button class="ghost" ${act('wake',m.mac)}>Wake</button>
+      <button class="ghost" ${act('setKey',id,name)}>License key</button>
+      ${m.license_state==='sent'?`<button class="ghost" ${act('rearmKey',id,name)}>Re-arm key</button>`:''}
+      <button class="ghost danger" ${act('dvDelete',id,name)}>Delete</button>
+      <button class="ghost" ${act('dvClose')}>Close</button>
       <span id="dd_msg" class="msg"></span>
     </div>
     <table style="margin-top:12px"><tbody>
@@ -240,14 +248,14 @@ async function loadImages(){
        <td class="mono" title="used on disk / virtual disk">${i.size==null?'—':gbs(i.used)+' / '+gbs(i.size)}${i.active_version?' <span class="pill linux">'+esc(i.active_version)+'</span>':''}</td>
        <td class="mono" title="${esc(i.hash||'')}">${i.hash?esc(i.hash).slice(0,10):'—'}</td>
        <td class="row">
-         <button class="ghost" onclick="setDefault(${i.id})">Default</button>
-         <button class="ghost" onclick="toggleCache(${i.id},'${esc(i.cache_mode||'disk')}','${esc(i.name)}')">${(i.cache_mode==='zram')?'→disk':'→zram'}</button>
-         ${i.os==='windows'?`<button class="ghost" onclick="toggleBase(${i.id},${!i.base_mode})" title="BASE MODE: the first logon on each machine waits for a technician to set up apps, then restart (saved for every boot). Off: base is saved by itself.">${i.base_mode?'Base mode: ON':'Base mode: off'}</button>`:`<button class="ghost" onclick="toggleSsd(${i.id},${!i.use_ssd})" title="On: the golden is cached and the session's writes go to the machine's SSD (reset every boot). Off (one-time): nothing touches the SSD — golden over the network, writes in RAM, gone at power-off.">${i.use_ssd?'SSD: on':'SSD: off (one-time)'}</button>`}
-         <button class="ghost" onclick="republish(${i.id},'${esc(i.name)}')">Republish</button>
-         <button class="ghost" onclick="showVersions(${i.id},'${esc(i.name)}','${esc(i.os)}')">Versions</button>
-         <button class="ghost" onclick="exportImage(${i.id},'${esc(i.name)}',null)" title="download as a VMware VM (.vmx + .vmdk) to edit the golden">Export</button>
-         <button class="ghost" onclick="editBoot(${i.id})">Boot</button>
-         <button class="ghost danger" onclick="delImage(${i.id},'${esc(i.name)}')">Delete</button>
+         <button class="ghost" ${act('setDefault',i.id)}>Default</button>
+         <button class="ghost" ${act('toggleCache',i.id,i.cache_mode||'disk',i.name)}>${(i.cache_mode==='zram')?'→disk':'→zram'}</button>
+         ${i.os==='windows'?`<button class="ghost" ${act('toggleBase',i.id,!i.base_mode)} title="BASE MODE: the first logon on each machine waits for a technician to set up apps, then restart (saved for every boot). Off: base is saved by itself.">${i.base_mode?'Base mode: ON':'Base mode: off'}</button>`:`<button class="ghost" ${act('toggleSsd',i.id,!i.use_ssd)} title="On: the golden is cached and the session's writes go to the machine's SSD (reset every boot). Off (one-time): nothing touches the SSD — golden over the network, writes in RAM, gone at power-off.">${i.use_ssd?'SSD: on':'SSD: off (one-time)'}</button>`}
+         <button class="ghost" ${act('republish',i.id,i.name)}>Republish</button>
+         <button class="ghost" ${act('showVersions',i.id,i.name,i.os)}>Versions</button>
+         <button class="ghost" ${act('exportImage',i.id,i.name,null)} title="download as a VMware VM (.vmx + .vmdk) to edit the golden">Export</button>
+         <button class="ghost" ${act('editBoot',i.id)}>Boot</button>
+         <button class="ghost danger" ${act('delImage',i.id,i.name)}>Delete</button>
        </td></tr>`).join('') || '<tr><td colspan=8 class="mono">no images yet</td></tr>';
   // srvhost inside the images fragment → set after it is injected.
   try{document.getElementById('srvhost2').textContent=location.host;}catch(_){}
@@ -286,14 +294,14 @@ async function showVersions(id,name,os){verImg={id,name,os};
   const el=document.getElementById('img_versions');
   el.innerHTML=`<h2>Versions — ${esc(name)}</h2><p class="mono">⏳ comparing with the current golden (the first time after a change reads the whole golden)...</p>`;
   const r=await j('/api/images/snapshots?id='+id);
-  el.innerHTML=`<h2>Versions — ${esc(name)} <button class="ghost" onclick="snapshotImage()">+ Snapshot now</button></h2>
+  el.innerHTML=`<h2>Versions — ${esc(name)} <button class="ghost" ${act('snapshotImage')}>+ Snapshot now</button></h2>
     <div class="scroll"><table><thead><tr><th>Version</th><th>Label</th><th>Created</th><th title="data that differs from the golden being served now (image list) — what a rollback to this version rewrites">vs current golden</th><th></th></tr></thead><tbody>${
     r.versions.map(v=>`<tr><td class="mono">${esc(v.version)} ${v.version===r.active?'<span class="pill linux">active</span>':''}</td>
       <td>${esc(v.label)}</td><td class="mono">${new Date(v.created*1000).toLocaleString()}</td><td class="mono" title="disk size ${gbs(v.size)}">${v.diff==null?'<span title="no golden on the server">?</span>':v.diff?'Δ '+gbs(v.diff):'same'}</td>
-      <td class="row"><button class="ghost" onclick="rollbackImage('${esc(v.version)}')">Rollback</button>
-        <button class="ghost" onclick="exportImage(verImg.id,verImg.name,'${esc(v.version)}')">Export</button>
-        <button class="ghost" onclick="versionToImage('${esc(v.version)}')" title="add this version as a new image on the list">→ New image</button>
-        <button class="ghost danger" onclick="deleteVersion('${esc(v.version)}')">Delete</button></td></tr>`).join('')
+      <td class="row"><button class="ghost" ${act('rollbackImage',v.version)}>Rollback</button>
+        <button class="ghost" ${act('exportImage',id,name,v.version)}>Export</button>
+        <button class="ghost" ${act('versionToImage',v.version)} title="add this version as a new image on the list">→ New image</button>
+        <button class="ghost danger" ${act('deleteVersion',v.version)}>Delete</button></td></tr>`).join('')
     || '<tr><td colspan=5 class="mono">no versions yet — Snapshot now saves the current golden</td></tr>'}</tbody></table></div>`;}
 async function snapshotImage(){const label=prompt('Label for this version (optional):','');if(label===null)return;
   const el=document.getElementById('img_status');
@@ -367,8 +375,8 @@ async function loadDrivers(){
        <td class="mono" style="white-space:normal">${d.machines.length?esc(d.machines.join(', ')):'—'}</td>
        <td><input type="checkbox" id="drv_all_${d.id}" ${d.all_machines?'checked':''}></td>
        <td><input id="drv_grp_${d.id}" value="${esc(d.groups.join(', '))}" placeholder="VIP, Pro" size="12"></td>
-       <td class="row"><button class="ghost" onclick="saveDrvTargets(${d.id})">Save</button>
-         <button class="ghost danger" onclick="delDriver(${d.id},'${esc(d.name)}')">Delete</button></td></tr>`).join('')
+       <td class="row"><button class="ghost" ${act('saveDrvTargets',d.id)}>Save</button>
+         <button class="ghost danger" ${act('delDriver',d.id,d.name)}>Delete</button></td></tr>`).join('')
     || '<tr><td colspan=7 class="mono">no driver packages yet</td></tr>';
 }
 async function uploadDriver(){
@@ -454,6 +462,21 @@ function toast(msg,err){let t=document.getElementById('toast');
 // Login lives on its own page (/login). This page is only served to a signed-in admin: the server redirects an
 // unauthenticated browser here → /login. A 401 on any API call (session expired) sends us back to /login.
 async function logout(){try{await fetch('/api/auth/logout',{method:'POST'});}catch(e){}location.replace('/login');}
+
+// Everything an element may name in data-click / data-change / data-input (see act()). Called as f(...args, el, event).
+const ACTIONS={
+  noop(){},   // a cell that must not open its row (checkbox column)
+  go(p,el,e){e.preventDefault();history.pushState(null,'','/'+p);showPage(p);},
+  href(url){location.href=url;},
+  mFilter(){mPage=1;renderMachines();},
+  dvToggle:(k,el)=>dvToggle(k,el.checked), dvSelectAll:el=>dvSelectAll(el.checked),
+  wake,manage,regMachine,loadStatus,clearMFilters,mPrev,mNext,setKey,rearmKey,
+  loadDevices,dvOpen,dvSave,dvDelete,dvClose,dvBulk,dvRegister,dvImport,dvAdd,dvRender,
+  loadImages,addImage,prepCmd,setDefault,toggleCache,toggleBase,toggleSsd,republish,showVersions,exportImage,editBoot,delImage,
+  snapshotImage,rollbackImage,versionToImage,deleteVersion,
+  loadDrivers,uploadDriver,saveDrvTargets,delDriver,
+  applyDhcp,savePw,saveCafe,setTimeout_,setZramReserve,logout,
+};
 
 let started=false;
 function startApp(){

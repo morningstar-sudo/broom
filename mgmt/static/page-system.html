@@ -6,7 +6,7 @@
       <div class="field"><label>Current</label><input id="pw_cur" type="password" size="10" autocomplete="current-password"></div>
       <div class="field"><label>New</label><input id="pw_new" type="password" size="10" autocomplete="new-password"></div>
       <div class="field"><label>Confirm</label><input id="pw_new2" type="password" size="10" autocomplete="new-password"></div>
-      <button class="primary" style="align-self:flex-end" onclick="savePw()">Change</button>
+      <button class="primary" style="align-self:flex-end" data-click="savePw">Change</button>
       <span id="pw_msg" class="msg"></span>
     </div>
     <p class="hint">Changing the password signs out every other browser (all old sessions stop working). This one stays signed in.</p>
@@ -16,7 +16,7 @@
     <div class="row">
       <div class="field"><label>Guest user</label><input id="cafe_user" size="10"></div>
       <div class="field"><label>Password</label><input id="cafe_password" type="password" size="10" placeholder="(unchanged)"></div>
-      <button class="primary" style="align-self:flex-end" onclick="saveCafe()">Save</button>
+      <button class="primary" style="align-self:flex-end" data-click="saveCafe">Save</button>
       <span id="cafe_msg" class="msg"></span>
     </div>
     <p class="hint">The user is created + set to autologon in the Windows golden when the Windows prep command (Images page) runs in the VM. Changes here only apply to goldens prepared <b>afterwards</b> (run prep again → upload). Linux golden: the user already exists in the image.</p>
@@ -24,12 +24,12 @@
   <div class="card">
     <h2>Countdown boot menu</h2>
     <div class="row"><input id="timeout" type="number" min="0" max="3600" size="4"> seconds
-      <button onclick="setTimeout_()">Save</button> <span id="to_msg" class="msg"></span></div>
+      <button data-click="setTimeout_">Save</button> <span id="to_msg" class="msg"></span></div>
   </div>
   <div class="card">
     <h2>zram — RAM reserved for the server</h2>
     <div class="row"><input id="zram_reserve" type="number" min="0" size="6"> MB
-      <button onclick="setZramReserve()">Save</button> <span id="zr_msg" class="msg"></span></div>
+      <button data-click="setZramReserve">Save</button> <span id="zr_msg" class="msg"></span></div>
     <p class="hint">Loading a golden into <b>zram</b> (compressed RAM cache) is refused if <code>img + reserve > available RAM</code> → avoids RAM overflow/OOM. Reserve = RAM kept for the OS + iSCSI serving. Not enough → the image falls back to <code>disk</code> by itself.</p>
   </div>
 </section>

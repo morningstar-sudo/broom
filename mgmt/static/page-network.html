@@ -31,7 +31,7 @@
       <div class="field"><label title="Windows images: the machine can only start Windows through the network stage.">Strict reset (Windows)</label>
         <label style="display:flex;gap:6px;align-items:center"><input id="dhcp_strict_reset" type="checkbox"> Windows starts only via PXE</label></div>
     </div>
-    <div class="row" style="margin-top:14px"><button class="primary" onclick="applyDhcp()">Apply (restart DHCP/TFTP)</button> <span id="dhcp_msg" class="msg"></span></div>
+    <div class="row" style="margin-top:14px"><button class="primary" data-click="applyDhcp">Apply (restart DHCP/TFTP)</button> <span id="dhcp_msg" class="msg"></span></div>
     <p class="hint"><b>Off</b> (default): the LAN's DHCP server (router) hands out IPs. Point its PXE options here:
       next-server / option 66 = <b id="pxe_srv">this server</b>, boot file / option 67 = <code>snponly.efi</code>
       (Secure Boot clients: <code>sb/snponly-shim.efi</code>). broom serves iPXE over TFTP and the menu over HTTP.<br>

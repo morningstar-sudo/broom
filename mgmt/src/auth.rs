@@ -199,8 +199,8 @@ fn is_public(method: &axum::http::Method, path: &str) -> bool {
     if OPEN.contains(&path) || path.starts_with("/tftp/") || path.starts_with("/api/auth/") {
         return true;
     }
-    // Only the standalone login page is public; the app shell, its tab fragments and all /api/* need a session.
-    method == Method::GET && path == "/login"
+    // Only the standalone login page (+ its script) is public; the app shell, its tab fragments and all /api/* need a session.
+    method == Method::GET && (path == "/login" || path == "/login.js")
 }
 
 /// Host header check against DNS rebinding (a page on some domain re-pointing that domain at this server). A rebinding
@@ -241,6 +241,25 @@ pub async fn guard(State(st): State<SharedState>, req: Request<Body>, next: Next
     } else {
         (StatusCode::UNAUTHORIZED, "login required").into_response()
     }
+}
+
+/// Security headers on every response. CSP: scripts only from our own files (no inline JS, no handler attributes —
+/// app.js dispatches data-click etc.), so a value that slips past escaping can't run in the admin's session. Inline
+/// styles stay allowed (style="" attributes all over the pages; CSS can't run script).
+pub async fn security_headers(req: Request<Body>, next: Next) -> Response {
+    let mut res = next.run(req).await;
+    let h = res.headers_mut();
+    h.insert(
+        header::CONTENT_SECURITY_POLICY,
+        header::HeaderValue::from_static(
+            "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; \
+             object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'",
+        ),
+    );
+    h.insert(header::X_CONTENT_TYPE_OPTIONS, header::HeaderValue::from_static("nosniff"));
+    h.insert(header::REFERRER_POLICY, header::HeaderValue::from_static("no-referrer"));
+    h.insert(header::X_FRAME_OPTIONS, header::HeaderValue::from_static("DENY"));
+    res
 }
 
 async fn status(State(st): State<SharedState>, req: Request<Body>) -> Json<serde_json::Value> {
@@ -391,7 +410,7 @@ mod tests {
     fn public_paths() {
         let pub_get = |p| is_public(&Method::GET, p);
         let pub_post = |p| is_public(&Method::POST, p);
-        assert!(pub_get("/login"), "the standalone sign-in page is public");
+        assert!(pub_get("/login") && pub_get("/login.js"), "the standalone sign-in page + its script are public");
         assert!(pub_get("/boot.ipxe") && pub_get("/tftp/broom/x/vmlinuz"));
         assert!(pub_post("/api/license") && pub_post("/api/auth/login") && pub_post("/api/booted"));
         assert!(!pub_get("/api/golden-chunk"), "delta chunks are gone");

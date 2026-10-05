@@ -121,9 +121,71 @@ fn random_iqn_base() -> String {
     format!("iqn.2026-01.local.broom-{:08x}", r as u32)
 }
 
+/// The DB holds the session-signing secret, license keys and the guest password → owner-only (0600). Made 0600
+/// before SQLite opens it (SQLite gives a new -wal/-shm the main file's mode), and re-applied to files from older
+/// versions created with the default umask.
+fn private_files(path: &str) -> std::io::Result<()> {
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+    if path.is_empty() || path == ":memory:" {
+        return Ok(());
+    }
+    std::fs::OpenOptions::new().create(true).truncate(false).write(true).mode(0o600).open(path)?;
+    for f in [path.to_string(), format!("{path}-wal"), format!("{path}-shm")] {
+        if std::path::Path::new(&f).exists() {
+            std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o600))?;
+        }
+    }
+    Ok(())
+}
+
+/// Schema version in `PRAGMA user_version`. A change to SCHEMA's tables bumps it and adds an `if v < N` step to
+/// migrate() (SCHEMA itself always holds the latest layout, for new DBs).
+const SCHEMA_VERSION: i64 = 1;
+
+fn has_column(c: &Connection, table: &str, col: &str) -> rusqlite::Result<bool> {
+    c.query_row("SELECT 1 FROM pragma_table_info(?1) WHERE name=?2", [table, col], |_| Ok(())).optional().map(|r| r.is_some())
+}
+
+/// Bring an older DB up to SCHEMA_VERSION, in one transaction: any error is real and stops the open.
+fn migrate(c: &mut Connection) -> rusqlite::Result<()> {
+    let v: i64 = c.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+    if v >= SCHEMA_VERSION {
+        return Ok(());
+    }
+    let tx = c.transaction()?;
+    if v < 1 {
+        // DBs from before user_version: columns added over time (a new DB already has them all from SCHEMA).
+        const COLS: &[(&str, &str, &str)] = &[
+            ("images", "boot_script", "TEXT"),
+            ("images", "hash", "TEXT"),
+            ("images", "cache_mode", "TEXT NOT NULL DEFAULT 'disk'"),
+            ("images", "active_version", "TEXT"),
+            ("images", "base_mode", "INTEGER NOT NULL DEFAULT 0"),
+            ("images", "use_ssd", "INTEGER NOT NULL DEFAULT 1"),
+            ("machines", "license_key", "TEXT"),
+            ("machines", "license_state", "TEXT"),
+            ("machines", "license_gen", "INTEGER NOT NULL DEFAULT 0"),
+            ("machines", "license_result", "TEXT"),
+            ("machines", "grp", "TEXT"),
+            ("machines", "notes", "TEXT"),
+        ];
+        for (table, col, ddl) in COLS {
+            if !has_column(&tx, table, col)? {
+                tx.execute(&format!("ALTER TABLE {table} ADD COLUMN {col} {ddl}"), [])?;
+            }
+        }
+        if has_column(&tx, "images", "dataset")? {
+            tx.execute("ALTER TABLE images DROP COLUMN dataset", [])?; // ZFS versioning removed
+        }
+    }
+    tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+    tx.commit()
+}
+
 impl Sqlite {
     pub fn open(path: &str) -> DbResult<Sqlite> {
-        let c = Connection::open(path).map_err(|err| format!("open {path}: {err}"))?;
+        private_files(path).map_err(|err| format!("{path}: {err}"))?;
+        let mut c = Connection::open(path).map_err(|err| format!("open {path}: {err}"))?;
         // SQLite silently falls back to read-only when it can't open for writing (e.g. a file owned by
         // another user in /tmp: fs.protected_regular blocks even root).
         if c.is_readonly(rusqlite::MAIN_DB).unwrap_or(false) {
@@ -133,22 +195,9 @@ impl Sqlite {
             ));
         }
         c.execute_batch(SCHEMA).map_err(e)?;
-        // Old DB migration: add columns, ignore if they already exist.
-        let _ = c.execute("ALTER TABLE images ADD COLUMN boot_script TEXT", []);
-        let _ = c.execute("ALTER TABLE images ADD COLUMN hash TEXT", []);
-        let _ = c.execute("ALTER TABLE images ADD COLUMN cache_mode TEXT NOT NULL DEFAULT 'disk'", []);
-        let _ = c.execute("ALTER TABLE images ADD COLUMN active_version TEXT", []);
-        let _ = c.execute("ALTER TABLE images ADD COLUMN base_mode INTEGER NOT NULL DEFAULT 0", []);
-        let _ = c.execute("ALTER TABLE images ADD COLUMN use_ssd INTEGER NOT NULL DEFAULT 1", []);
-        let _ = c.execute("ALTER TABLE images DROP COLUMN dataset", []); // ZFS versioning removed
-        let _ = c.execute("ALTER TABLE machines ADD COLUMN license_key TEXT", []);
-        let _ = c.execute("ALTER TABLE machines ADD COLUMN license_state TEXT", []);
-        let _ = c.execute("ALTER TABLE machines ADD COLUMN license_gen INTEGER NOT NULL DEFAULT 0", []);
-        let _ = c.execute("ALTER TABLE machines ADD COLUMN license_result TEXT", []);
-        let _ = c.execute("ALTER TABLE machines ADD COLUMN grp TEXT", []);
-        let _ = c.execute("ALTER TABLE machines ADD COLUMN notes TEXT", []);
+        migrate(&mut c).map_err(|err| format!("{path}: schema migration: {err}"))?;
         // ProxyDHCP mode removed: off is the same for broom (the LAN's DHCP points clients at it).
-        let _ = c.execute("UPDATE config SET value='off' WHERE key='dhcp_mode' AND value='proxy'", []);
+        c.execute("UPDATE config SET value='off' WHERE key='dhcp_mode' AND value='proxy'", []).map_err(e)?;
         // iSCSI IQN base, random per server, generated once (first open without it) and kept.
         c.execute("INSERT OR IGNORE INTO config(key,value) VALUES('iqn_base',?1)", [random_iqn_base()]).map_err(e)?;
         Ok(Sqlite { c: Mutex::new(c) })
@@ -524,6 +573,52 @@ mod tests {
         db.delete_image(a).unwrap();
         db.delete_image(c).unwrap();
         assert!(db.images().unwrap().iter().all(|i| !i.is_default), "never another OS");
+    }
+
+    #[test]
+    fn old_db_migrates_to_user_version() {
+        let p = tmp("broom_test_migrate.db");
+        Connection::open(&p)
+            .unwrap()
+            .execute_batch(
+                "CREATE TABLE images(id INTEGER PRIMARY KEY, name TEXT UNIQUE NOT NULL, os TEXT NOT NULL,
+                     is_default INTEGER NOT NULL DEFAULT 0, dataset TEXT);
+                 CREATE TABLE machines(id INTEGER PRIMARY KEY, mac TEXT UNIQUE NOT NULL, ip TEXT, hostname TEXT,
+                     image_id INTEGER REFERENCES images(id));
+                 INSERT INTO images(name,os,dataset) VALUES('old','linux','pool/old');
+                 INSERT INTO machines(mac) VALUES('aa:bb:cc:dd:ee:01');",
+            )
+            .unwrap();
+        for _ in 0..2 {
+            let db = Sqlite::open(&p).unwrap(); // second open: already migrated, nothing to do
+            assert_eq!(db.images().unwrap()[0].cache_mode, "disk");
+            assert_eq!(db.machines().unwrap()[0].mac, "aa:bb:cc:dd:ee:01");
+        }
+        let c = Connection::open(&p).unwrap();
+        assert_eq!(c.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0)).unwrap(), SCHEMA_VERSION);
+        assert!(!has_column(&c, "images", "dataset").unwrap() && has_column(&c, "machines", "notes").unwrap());
+        // A new DB starts at the latest version.
+        let p2 = tmp("broom_test_migrate_new.db");
+        drop(Sqlite::open(&p2).unwrap());
+        let v: i64 = Connection::open(&p2).unwrap().query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
+        assert_eq!(v, SCHEMA_VERSION);
+        tmp("broom_test_migrate.db");
+        tmp("broom_test_migrate_new.db");
+    }
+
+    #[test]
+    fn db_files_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let p = tmp("broom_test_perm.db");
+        std::fs::write(&p, b"").unwrap();
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o644)).unwrap(); // an older install
+        let db = Sqlite::open(&p).unwrap();
+        db.set_config("x", "y").unwrap();
+        for f in [p.clone(), format!("{p}-wal")] {
+            assert_eq!(std::fs::metadata(&f).unwrap().permissions().mode() & 0o777, 0o600, "{f}");
+        }
+        drop(db);
+        tmp("broom_test_perm.db");
     }
 
     #[test]

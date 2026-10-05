@@ -3,10 +3,17 @@ Copyright 2026 morningstar-sudo
 
 This product is licensed under the Apache License, Version 2.0 (see LICENSE).
 
-It bundles iPXE (https://ipxe.org/), in mgmt/ipxe/ipxe-src/, which is licensed under
-the GNU General Public License, version 2 (with the iPXE UBDL exception). iPXE's source
-and license are kept in that directory; the compiled snponly.efi embedded in the binary
-is built from it. iPXE is not covered by the Apache License above.
+The binary embeds iPXE (https://ipxe.org/) as snponly.efi, licensed under the GNU General Public License,
+version 2 (with the iPXE UBDL exception). Its complete corresponding source is upstream iPXE at the commit in
+mgmt/ipxe/IPXE_COMMIT plus the changes in mgmt/ipxe/patches/ (also GPLv2 / UBDL); mgmt/ipxe/build.sh fetches,
+patches and builds it. iPXE is not covered by the Apache License above.
 
 mgmt/ipxe/signed/ holds unmodified official iPXE release binaries (Secure Boot builds): snponly.efi, signed by the
 iPXE Secure Boot CA (UBDL), and the iPXE shim (https://github.com/ipxe/shim, BSD-2-Clause) signed by Microsoft.
+
+broom-stage.tar.gz (published on the Releases page, downloaded by the binary for Windows images) holds a Linux
+kernel, an initrd and a shim made of unmodified Ubuntu binaries: the Linux kernel, busybox, ntfs-3g, wget,
+efibootmgr, util-linux, dosfstools and others, under their own licenses (mostly GPL-2.0 / GPL-3.0), and shim
+(BSD-2-Clause). SOURCES.txt inside the bundle lists every package with its exact version and source package; the
+corresponding source is in the Ubuntu archive (`apt-get source <package>=<version>`, or
+https://launchpad.net/ubuntu/+source/<package>/<version>). These are not covered by the Apache License above.

@@ -1,12 +1,12 @@
 <section class="page active" id="page-drivers">
   <div class="head"><h1>Drivers</h1><p>custom Windows drivers installed into each machine's base</p>
-    <span class="sp"></span><button onclick="loadDrivers()">↻</button></div>
+    <span class="sp"></span><button data-click="loadDrivers">↻</button></div>
   <div class="card">
     <h2>Upload a driver package (.zip)</h2>
     <div class="row">
       <div class="field"><label>Name</label><input id="drv_name" size="14" placeholder="nvidia-572"></div>
       <div class="field"><label>.zip of the extracted driver folder</label><input type="file" id="drv_file" accept=".zip"></div>
-      <button class="primary" style="align-self:flex-end" onclick="uploadDriver()">Upload</button>
+      <button class="primary" style="align-self:flex-end" data-click="uploadDriver">Upload</button>
       <progress id="drv_prog" value="0" max="100" style="display:none"></progress>
       <span id="drv_msg" class="msg"></span>
     </div>

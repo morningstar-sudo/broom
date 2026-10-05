@@ -73,6 +73,7 @@ bin="$CARGO_TARGET_DIR/$target/release/bootrom-mgmt"
 if readelf -l "$bin" | grep -q INTERP; then
   echo "ERROR: $bin is dynamically linked (expected static musl)" >&2; exit 1
 fi
+mkdir -p dist
 cp "$bin" dist/bootrom-mgmt
 v=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
 echo "== [3/3] OK: mgmt/dist/bootrom-mgmt v$v ($(du -h dist/bootrom-mgmt | cut -f1))"

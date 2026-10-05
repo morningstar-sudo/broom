@@ -23,8 +23,8 @@ const STAGE_SCRIPT: &str = include_str!("../../scripts/stage.sh");
 
 /// Build the stage: kernel `kernel` (None = the running one) + initrd (mkinitramfs, own confdir) → `sd`.
 /// Kernel + script + hook unchanged → keep the previous build (mkinitramfs MODULES=most takes about a minute).
-/// Returns true if freshly built.
-fn build_stage(kernel: Option<&str>, sd: &str) -> Result<bool, String> {
+/// Returns the kernel release used.
+fn build_stage(kernel: Option<&str>, sd: &str) -> Result<String, String> {
     let kv = match kernel {
         Some(k) => k.to_string(),
         None => std::fs::read_to_string("/proc/sys/kernel/osrelease").map_err(|e| format!("kernel release: {e}"))?.trim().to_string(),
@@ -40,7 +40,7 @@ fn build_stage(kernel: Option<&str>, sd: &str) -> Result<bool, String> {
     let key_file = format!("{sd}/stage.key");
     let have = |f: &str| Path::new(&format!("{sd}/{f}")).exists();
     if have("stage.img") && have("vmlinuz") && std::fs::read_to_string(&key_file).ok().as_deref() == Some(key.as_str()) {
-        return Ok(false);
+        return Ok(kv);
     }
     let conf = &crate::work_dir().join("stage-conf").to_string_lossy().into_owned();
     let _ = std::fs::remove_dir_all(conf);
@@ -70,7 +70,35 @@ fn build_stage(kernel: Option<&str>, sd: &str) -> Result<bool, String> {
         .map_err(|e| format!("copy /boot/vmlinuz-{kv}: {e}"))?;
     let _ = std::fs::remove_dir_all(conf);
     std::fs::write(&key_file, &key).map_err(|e| e.to_string())?;
-    Ok(true)
+    Ok(kv)
+}
+
+/// Header of SOURCES.txt in the stage bundle; the package list follows.
+const SOURCES_HEAD: &str = "\
+The Broom Windows stage (vmlinuz, stage.img, shimx64.efi) holds UNMODIFIED binaries from the Ubuntu packages
+listed below, under their own licenses (GPL-2.0 / GPL-3.0 and others: Linux kernel, busybox, ntfs-3g, wget,
+efibootmgr, util-linux, dosfstools, ...; shim: BSD-2-Clause). They are not covered by Broom's Apache-2.0 license.
+Corresponding source for each: `apt-get source <source package>=<source version>` on Ubuntu, or
+https://launchpad.net/ubuntu/+source/<source package>/<source version>
+
+<binary package> <version>  source: <source package> <source version>
+";
+
+/// SOURCES.txt for the bundle: the Ubuntu package of every file in the initrd that exists on this builder, of the
+/// stage tools, the kernel and the shim, with versions + source package (license notice, see NOTICE).
+fn sources_list(stage_img: &str, kv: &str, shim: &str) -> Result<String, String> {
+    let script = format!(
+        "{{ lsinitramfs '{stage_img}' | sed 's#^#/#'; for b in {STAGE_TOOLS}; do command -v $b; done; \
+           echo /boot/vmlinuz-{kv}; echo '{shim}'; }} \
+         | while read -r f; do [ -f \"$f\" ] && echo \"$f\" && readlink -f \"$f\"; done | sort -u \
+         | xargs -r dpkg -S 2>/dev/null | grep -v '^diversion' | sed 's/: .*//; s/, /\\n/g' | sed 's/:.*//' | sort -u \
+         | xargs -r dpkg-query -W -f='${{binary:Package}} ${{Version}}  source: ${{source:Package}} ${{source:Version}}\\n'"
+    );
+    let list = run("sh", &["-c", &script])?;
+    if !list.contains("linux-image") {
+        return Err(format!("SOURCES.txt: no kernel package found for /boot/vmlinuz-{kv} (dpkg -S)"));
+    }
+    Ok(format!("{SOURCES_HEAD}{list}"))
 }
 
 /// The stage bundle this binary belongs to (mgmt/stage.pin, filled by CI from `build-stage`: sha256, then the Release
@@ -220,12 +248,14 @@ pub fn build_bundle(args: &[String]) -> ! {
         let dir = format!("{out}/broom-stage");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-        build_stage(kernel, &dir)?;
+        let kv = build_stage(kernel, &dir)?;
         let shim = ["/usr/lib/shim/shimx64.efi.signed.latest", "/usr/lib/shim/shimx64.efi.signed"]
             .into_iter()
             .find(|p| Path::new(p).is_file())
             .ok_or("no /usr/lib/shim/shimx64.efi.signed* — apt install shim-signed")?;
         std::fs::copy(shim, format!("{dir}/shimx64.efi")).map_err(|e| format!("{shim}: {e}"))?;
+        let sources = sources_list(&format!("{dir}/stage.img"), &kv, shim)?;
+        std::fs::write(format!("{dir}/SOURCES.txt"), sources).map_err(|e| e.to_string())?;
         let tgz = format!("{out}/broom-stage.tar.gz");
         crate::archive::tar_gz(Path::new(&dir), Path::new(&tgz))?;
         crate::hash::file_hash(&tgz).ok_or_else(|| "sha256 of the bundle failed".into())

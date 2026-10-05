@@ -146,6 +146,7 @@ fn clean_leftovers() {
 const INDEX_HTML: &str = include_str!("../static/index.html");
 /// Standalone login/setup page (auth.rs). Served at /login; unauthenticated page requests are redirected here.
 const LOGIN_HTML: &str = include_str!("../static/login.html");
+const LOGIN_JS: &str = include_str!("../static/login.js");
 /// Version (Cargo.toml) — shown on the web + in logs to tell deployed builds apart.
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// The web admin's script (index.html loads it as /app.js?v=<version>, so a new build is never served from cache).
@@ -158,6 +159,9 @@ async fn app_js() -> impl axum::response::IntoResponse {
 }
 async fn login_page() -> Html<&'static str> {
     Html(LOGIN_HTML)
+}
+async fn login_js() -> impl axum::response::IntoResponse {
+    ([(axum::http::header::CONTENT_TYPE, "text/javascript; charset=utf-8")], LOGIN_JS)
 }
 
 /// Server events (SSE): "ping" on connect + every 5 s (keep-alive) for the sidebar dot — the browser marks
@@ -391,6 +395,7 @@ async fn main() {
 
     let app = Router::new()
         .route("/login", get(login_page)) // standalone sign-in page (auth.rs); public
+        .route("/login.js", get(login_js))
         .route("/", get(index)) // web admin shell (embedded in the binary)
         .route("/app.js", get(app_js))
         // One URL per page (F5 / bookmarks keep the page); same shell, JS picks the page from the path.
@@ -417,6 +422,7 @@ async fn main() {
         .nest_service("/tftp", ServeDir::new(tftp_dir()))
         // Guard EVERYTHING: Host check + a session for non-public routes (auth.rs::is_public lists the open ones).
         .layer(axum::middleware::from_fn_with_state(state.clone(), auth::guard))
+        .layer(axum::middleware::from_fn(auth::security_headers)) // outermost: also on the guard's redirects / 401s
         .with_state(state);
 
     info!("bootrom-mgmt v{VERSION} serving on http://{addr}");

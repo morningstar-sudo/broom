@@ -1,17 +1,17 @@
 <section class="page active" id="page-machines">
   <div class="head"><h1>Machines</h1><p>quick view: on/off, wake, register — edit, bulk + CSV on the Devices page</p>
-    <span class="sp"></span><button onclick="loadStatus()">↻ Refresh</button></div>
+    <span class="sp"></span><button data-click="loadStatus">↻ Refresh</button></div>
   <div class="card">
     <h2>Machine list</h2>
     <div class="row" style="margin-bottom:12px">
-      <button class="ghost" onclick="clearMFilters()">Clear filters</button>
+      <button class="ghost" data-click="clearMFilters">Clear filters</button>
       <span style="flex:1"></span>
       <span id="m_count" class="msg"></span>
     </div>
     <div class="scroll"><table id="machines">
       <thead><tr><th>Hostname</th><th title="free-text group — driver packages can target a group (Drivers page)">Group</th><th>IP</th><th>MAC</th><th>Status</th><th title="Windows license key: armed = handed out once at the next base build; sent = installed (hover: activation result)">License</th><th></th></tr>
         <!-- One filter per column (filteredMachines in app.js). -->
-        <tr class="filters" oninput="mPage=1;renderMachines()">
+        <tr class="filters" data-input="mFilter">
           <th><input id="mf_host" placeholder="hostname"></th>
           <th><input id="mf_grp" placeholder="group"></th>
           <th><input id="mf_ip" placeholder="IP"></th>
@@ -22,11 +22,11 @@
         </tr></thead>
       <tbody></tbody></table></div>
     <div class="row" style="margin-top:12px;justify-content:flex-end;align-items:center">
-      <button class="ghost" onclick="mPrev()">‹ Prev</button>
+      <button class="ghost" data-click="mPrev">‹ Prev</button>
       <span id="m_page" class="msg"></span>
-      <button class="ghost" onclick="mNext()">Next ›</button>
+      <button class="ghost" data-click="mNext">Next ›</button>
     </div>
     <p class="hint">A <span class="pill new">new</span> machine = has a DHCP lease but is not registered. Register it with a hostname → reboot it to get the IP/name (full DHCP mode; takes effect at once, no Apply needed).
-      Many new machines at once (PC01, PC02…), edit, group, image, license key, CSV: <a href="/devices" onclick="event.preventDefault();history.pushState(null,'','/devices');showPage('devices')">Devices</a>.</p>
+      Many new machines at once (PC01, PC02…), edit, group, image, license key, CSV: <a href="/devices" data-click="go" data-args='["devices"]'>Devices</a>.</p>
   </div>
 </section>
