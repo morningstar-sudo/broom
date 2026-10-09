@@ -59,6 +59,24 @@ pub fn list() -> Option<Vec<TargetInfo>> {
     call(&Req::List).ok().map(|r| r.targets)
 }
 
+/// Serve exactly these games disks.
+pub fn games_set(disks: Vec<crate::iscsid::games::Config>) -> Result<(), String> {
+    call_up(&Req::GamesSet { disks }).map(|_| ())
+}
+
+/// Every games disk served. None = no daemon (or one of a build without games disks).
+pub fn games_status() -> Option<Vec<crate::iscsid::games::Info>> {
+    call(&Req::GamesStatus).ok().map(|r| r.games)
+}
+
+pub fn games_save(name: &str) -> Result<String, String> {
+    call(&Req::GamesSave { name: name.into() }).map(|r| r.msg)
+}
+
+pub fn games_discard(name: &str) -> Result<(), String> {
+    call(&Req::GamesDiscard { name: name.into() }).map(|_| ())
+}
+
 /// The daemon of this build is running: reused if so; started if none; one of another build is asked to quit once no
 /// client uses it (until then it keeps serving — upgrade_if_idle retries). Blocking.
 pub fn ensure_daemon() -> Result<String, String> {
@@ -75,7 +93,7 @@ pub fn ensure_daemon() -> Result<String, String> {
 /// An older build's daemon with no client logged in → replace it with this build's. True if replaced.
 pub fn upgrade_if_idle() -> bool {
     let Ok(v) = call(&Req::Version) else { return false };
-    if v.version == exe_id() || list().is_none_or(|t| t.iter().any(|t| t.sessions > 0)) {
+    if v.version == exe_id() || list().is_none_or(|t| t.iter().any(|t| t.sessions > 0)) || games_status().is_some_and(|g| g.iter().any(|d| d.sessions > 0)) {
         return false;
     }
     tracing::info!("iSCSI daemon {} idle → replaced by {}", v.version, exe_id());

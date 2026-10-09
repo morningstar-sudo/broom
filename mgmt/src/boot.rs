@@ -58,7 +58,7 @@ pub async fn render(State(st): State<SharedState>, Query(q): Q) -> impl IntoResp
 
     // Clamp: menu_script does timeout_s * 1000 (would overflow / panic on a huge stored value).
     let timeout_s: u64 = st.db.get_config("boot_timeout", "10").parse().unwrap_or(10).min(3600);
-    let images = menu_images(st.db.images().unwrap_or_default(), m.as_ref().and_then(|m| m.image_id));
+    let images = menu_images(st.db.images().unwrap_or_default(), m.as_ref());
     script(menu_script(&images, timeout_s, host.as_deref(), lic, m.is_some(), secure_boot(&st)))
 }
 
@@ -91,13 +91,18 @@ fn shim_line(st: &SharedState, img: &crate::db::Image) -> Option<String> {
     Some(format!("shim http://{}/tftp/shim/shimx64.efi\n", st.db.get_config("dhcp_server_ip", "")))
 }
 
-/// Menu entries; the machine's own image (Devices page) is its default when it still exists, else the global one.
-fn menu_images(images: Vec<crate::db::Image>, own: Option<i64>) -> Vec<MenuImage> {
-    let own = own.filter(|id| images.iter().any(|i| i.id == *id));
-    images
-        .into_iter()
-        .map(|i| MenuImage { is_default: own.map_or(i.is_default, |id| i.id == id), name: i.name })
-        .collect()
+/// The images a machine of group `grp` may boot (each image's groups; none = every machine).
+fn allowed(images: Vec<crate::db::Image>, grp: Option<&str>) -> Vec<crate::db::Image> {
+    images.into_iter().filter(|i| crate::machines::for_group(&i.groups, grp)).collect()
+}
+
+/// Menu entries = the images of the machine's group. Default: the machine's own image (Devices page), else the global
+/// one — whichever is on its menu; neither → no default (no countdown).
+fn menu_images(images: Vec<crate::db::Image>, m: Option<&Machine>) -> Vec<MenuImage> {
+    let images = allowed(images, m.and_then(|m| m.grp.as_deref()));
+    let own = m.and_then(|m| m.image_id).filter(|id| images.iter().any(|i| i.id == *id));
+    let def = own.or_else(|| images.iter().find(|i| i.is_default).map(|i| i.id));
+    images.into_iter().map(|i| MenuImage { is_default: Some(i.id) == def, name: i.name }).collect()
 }
 
 /// A menu choice: log the boot + hand over the image's boot script.
@@ -113,20 +118,30 @@ pub async fn start(
         let peer = peer.ip().to_canonical().to_string();
         st.saw_pxe(&mac, Some(&peer));
     }
+    let grp = m.as_ref().and_then(|m| m.grp.clone());
     let host = m.and_then(|m| m.hostname);
     // Image names are [A-Za-z0-9_-]; keep only those (the value is logged and echoed into the iPXE script).
     let name: String = q.get("image").map_or("", String::as_str).chars().filter(|c| c.is_ascii_alphanumeric() || matches!(*c, '_' | '-')).take(64).collect();
     let who = host.clone().unwrap_or_else(|| mac.clone());
     let h = host.as_deref().unwrap_or("-");
-    let img = st.db.image_by_name(&name).ok().flatten();
-    let boot = img.as_ref().and_then(|i| i.boot_script.as_deref()).map(str::trim).filter(|s| !s.is_empty());
-    script(match (&img, boot) {
+    // Only an image of the machine's group (as on its menu): a hand-typed choice of another group's image is refused.
+    let mine = allowed(st.db.images().unwrap_or_default(), grp.as_deref());
+    let img = mine.iter().find(|i| i.name == name);
+    if img.is_none() && st.db.image_by_name(&name).ok().flatten().is_some() {
+        warn!("client {who} chose image {name:?} - mac {mac} - ip {ip}: not for its group ({}), back to the menu", grp.as_deref().unwrap_or("none"));
+        return script(format!(
+            "#!ipxe\necho Image '{name}' is not for this machine's group\nsleep 3\nchain /boot.ipxe?mac=${{net0/mac}}&ip=${{net0/ip}}\n"
+        ));
+    }
+    let boot = img.and_then(|i| i.boot_script.as_deref()).map(str::trim).filter(|s| !s.is_empty());
+    script(match (img, boot) {
         (Some(i), Some(bs)) => {
             info!("client {who} started - mac {mac} - ip {ip} - hostname {h} - image {name} ({})", i.os);
             // Per-boot switches the Windows stage reads from its cmdline (broom.base= / broom.strict=), and the Broom
-            // SSD layout both OSes use (broom.lxgb= Linux share, broom.wbgb= writeback inside it).
+            // SSD layout both OSes use (broom.lxgb= Linux share, broom.wbgb= writeback inside it). The Linux share:
+            // the Linux goldens this machine may boot.
             let strict = st.db.get_config("strict_reset", "0") == "1";
-            let linux_sizes = st.db.images().unwrap_or_default().into_iter().filter(|i| i.os == "linux" && i.use_ssd && i.hash.is_some()).filter_map(|i| {
+            let linux_sizes = mine.iter().filter(|i| i.os == "linux" && i.use_ssd && i.hash.is_some()).filter_map(|i| {
                 std::fs::metadata(crate::images_dir().join(&i.name).join("image.img")).ok().map(|m| m.len())
             });
             format!(
@@ -285,9 +300,10 @@ mod tests {
         assert!(2 + hint.len() <= 80 - 2 - 32, "menu-hint would be overwritten by the countdown");
     }
 
+    /// The menu holds the images of the machine's group; its own image is the default when on it, else the global one.
     #[test]
-    fn machine_image_is_its_default() {
-        let img = |id, name: &str, def| crate::db::Image {
+    fn menu_by_group_and_default() {
+        let img = |id, name: &str, def, groups: &[&str]| crate::db::Image {
             id,
             name: name.into(),
             os: "windows".into(),
@@ -298,17 +314,24 @@ mod tests {
             cache_mode: "disk".into(),
             base_mode: false,
             use_ssd: true,
+            groups: groups.iter().map(|g| g.to_string()).collect(),
+            preload: false,
         };
-        let defaults = |own| {
-            super::menu_images(vec![img(1, "win11", true), img(2, "ubuntu", false)], own)
-                .into_iter()
-                .filter(|m| m.is_default)
-                .map(|m| m.name)
-                .collect::<Vec<_>>()
+        let images = || vec![img(1, "win11", true, &[]), img(2, "ubuntu", false, &[]), img(3, "stream", false, &["VIP"])];
+        let menu = |own: Option<i64>, grp: Option<&str>| {
+            let m = crate::db::Machine { image_id: own, grp: grp.map(Into::into), ..Default::default() };
+            let items = super::menu_images(images(), Some(&m));
+            let names: Vec<String> = items.iter().map(|i| i.name.clone()).collect();
+            (names, items.into_iter().filter(|i| i.is_default).map(|i| i.name).collect::<Vec<_>>())
         };
-        assert_eq!(defaults(None), ["win11"]);
-        assert_eq!(defaults(Some(2)), ["ubuntu"]);
-        assert_eq!(defaults(Some(9)), ["win11"], "deleted image → global default");
+        assert_eq!(menu(None, None), (vec!["win11".into(), "ubuntu".into()], vec!["win11".into()]));
+        assert_eq!(menu(Some(2), None).1, ["ubuntu"]);
+        assert_eq!(menu(Some(9), None).1, ["win11"], "deleted image → global default");
+        assert_eq!(menu(Some(3), Some("vip")).0, ["win11", "ubuntu", "stream"], "VIP (any case) also gets its own image");
+        assert_eq!(menu(Some(3), Some("vip")).1, ["stream"]);
+        assert_eq!(menu(Some(3), None).1, ["win11"], "own image not for its group → global default");
+        let only_vip = super::menu_images(vec![img(3, "stream", false, &["VIP"])], None);
+        assert!(only_vip.is_empty(), "unregistered machine: only images for every machine");
     }
 
     /// Open endpoints log mac/ip from the query: junk (a forged log line) must never get through.

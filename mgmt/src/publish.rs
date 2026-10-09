@@ -142,7 +142,8 @@ fn export_target(st: &SharedState, name: &str, g: u64, ram: bool, path: &str) ->
 }
 
 /// At start: LIO targets of an older version handed over (cleared, so the daemon gets port 3260), the iSCSI daemon
-/// checked / started, then every published Linux image's target restored if the daemon lacks it. Blocking.
+/// checked / started, then every published Linux image's target restored if the daemon lacks it, and the games disk
+/// settings sent. Blocking.
 pub fn start_iscsi(st: &SharedState) {
     let base = st.db.get_config("iqn_base", "iqn.2026-01.local.broom");
     if crate::iscsi::clear_lio(&[&base, "iqn.2026-08.net.tiem:"]) {
@@ -153,6 +154,9 @@ pub fn start_iscsi(st: &SharedState) {
         Err(e) => return tracing::error!("iSCSI targets not served: {e}"),
     }
     restore_targets(st);
+    if let Err(e) = crate::games::sync(st) {
+        tracing::error!("games disk not served: {e}");
+    }
 }
 
 /// zram devices an older version loaded goldens into (kernel RAM held until reset). Their LIO targets are gone.

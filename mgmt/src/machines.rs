@@ -21,6 +21,36 @@ pub(crate) fn who(m: &Machine) -> String {
     m.hostname.clone().unwrap_or_else(|| m.mac.clone())
 }
 
+/// The registered machine behind a client IP (its MAC from ARP / lease / fixed IP). Not proof of identity (ARP can be
+/// faked): for choosing what to offer, not for handing out secrets (license.rs is stricter).
+pub(crate) fn machine_at(st: &SharedState, ip: &str) -> Option<Machine> {
+    let mac = crate::license::mac_at(st, ip)?;
+    st.db.machines().ok()?.into_iter().find(|m| m.mac.eq_ignore_ascii_case(&mac))
+}
+
+/// A resource limited to `groups` (empty = every machine, registered or not) is for a machine of group `grp`.
+pub(crate) fn for_group(groups: &[String], grp: Option<&str>) -> bool {
+    groups.is_empty() || grp.is_some_and(|g| groups.iter().any(|x| x.eq_ignore_ascii_case(g)))
+}
+
+/// "VIP, Thuong ,vip" → ["VIP", "Thuong"]: trimmed, no empties, no case-insensitive duplicates; each a valid group
+/// name (drivers::group_ok, like a machine's group), at most 50.
+pub(crate) fn clean_groups(v: &[String]) -> Result<Vec<String>, String> {
+    let mut out: Vec<String> = Vec::new();
+    for g in v.iter().flat_map(|s| s.split(',')).map(str::trim).filter(|g| !g.is_empty()) {
+        if !crate::drivers::group_ok(g) {
+            return Err(format!("group {g:?}: letters/digits/_/-, max 32"));
+        }
+        if !out.iter().any(|x| x.eq_ignore_ascii_case(g)) {
+            out.push(g.to_string());
+        }
+    }
+    if out.len() > 50 {
+        return Err("at most 50 groups".into());
+    }
+    Ok(out)
+}
+
 pub(crate) fn machine_by_id(st: &SharedState, id: i64) -> Result<Machine, ApiError> {
     st.db.machines().map_err(ise)?.into_iter().find(|m| m.id == id).ok_or((StatusCode::NOT_FOUND, format!("machine {id} not found")))
 }

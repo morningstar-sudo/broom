@@ -24,6 +24,10 @@ pub struct Image {
     /// Linux: cache the golden + keep the session's writes on the machine's SSD (false = SSD untouched, RAM only).
     /// Windows always uses the SSD (it boots from a VHDX on it).
     pub use_ssd: bool,
+    /// Machine groups that get it in their boot menu (and may keep it on their SSD); empty = every machine.
+    pub groups: Vec<String>,
+    /// Machines that may boot it keep it on their SSD ahead of use (downloaded while another image boots).
+    pub preload: bool,
 }
 
 pub struct NewImage<'a> {
@@ -33,7 +37,7 @@ pub struct NewImage<'a> {
     pub cache_mode: &'a str,
 }
 
-#[derive(Serialize, Clone, Debug)]
+#[derive(Serialize, Clone, Debug, Default)]
 pub struct Machine {
     pub id: i64,
     pub mac: String,
@@ -110,6 +114,8 @@ pub trait Db: Send + Sync {
     /// Windows: the first logon on each machine waits in BASE MODE for a technician (true) or commits base at once.
     fn set_base_mode(&self, id: i64, on: bool) -> DbResult<()>;
     fn set_use_ssd(&self, id: i64, on: bool) -> DbResult<()>;
+    fn set_image_groups(&self, id: i64, groups: &[String]) -> DbResult<()>;
+    fn set_preload(&self, id: i64, on: bool) -> DbResult<()>;
     fn set_active_version(&self, id: i64, version: Option<&str>) -> DbResult<()>;
 
     // --- machines ---

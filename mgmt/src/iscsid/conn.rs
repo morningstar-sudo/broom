@@ -1,16 +1,33 @@
-// iscsid/conn.rs — one iSCSI connection (RFC 7143 subset that iPXE sanhook and open-iscsi use): login without
-// authentication or digests (ERL 0, one connection per session), then SCSI commands served CONCURRENTLY (an initiator
-// queues up to dozens; one at a time would cut it to queue depth 1), NOP, SendTargets, task management, logout.
-// The reader parses PDUs and spawns a task per command; one writer task numbers and sends every reply.
-use std::collections::HashMap;
+// iscsid/conn.rs — one iSCSI connection (RFC 7143 subset that iPXE sanhook, open-iscsi and the Windows initiator use):
+// login without authentication or digests (ERL 0, one connection per session), then SCSI commands served CONCURRENTLY
+// (an initiator queues up to dozens; one at a time would cut it to queue depth 1), NOP, SendTargets, task management,
+// logout. The reader parses PDUs and spawns a task per command; one writer task numbers and sends every reply.
+// Writes (only the game update machine may): the data is asked for with R2T, one write's data at a time.
+use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicU16, AtomicU32, Ordering};
 use std::sync::{Arc, LazyLock, Mutex};
 use std::time::Duration;
 
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufWriter};
-use tokio::sync::{mpsc, Notify, Semaphore};
+use tokio::sync::{mpsc, Notify, OwnedSemaphorePermit, Semaphore};
 
+use super::overlay::Overlay;
 use super::{scsi, Lun};
+
+/// What a session reads: `lun` under `layers` (games disk versions, oldest first); with an overlay it also writes.
+#[derive(Clone)]
+pub struct Disk {
+    pub lun: Arc<Lun>,
+    pub layers: Arc<[Arc<Overlay>]>,
+    pub ov: Option<Arc<Overlay>>,
+}
+
+impl Disk {
+    /// Blocking read through the layers.
+    fn read_at(&self, off: u64, buf: &mut [u8]) -> Result<(), String> {
+        super::games::read_chain(&self.layers, &self.lun, off, buf)
+    }
+}
 
 /// Data segment we accept / send at most per PDU.
 pub const MRDSL: usize = 262_144;
@@ -18,7 +35,7 @@ pub const MRDSL: usize = 262_144;
 const WINDOW: u32 = 64;
 /// Commands in flight in the whole daemon: bounds the read buffers (≤ 1 MB each) whatever the connection count.
 static IN_FLIGHT: Semaphore = Semaphore::const_new(512);
-/// A data segment bigger than this ends the connection (we never ask for data; login/text are small).
+/// A data segment bigger than this ends the connection (login/text are small; Data-Out ≤ MRDSL).
 const MAX_IN: usize = 1 << 20;
 
 fn get32(b: &[u8], at: usize) -> u32 {
@@ -75,6 +92,8 @@ pub async fn writer(w: impl AsyncWrite + Unpin, mut rx: mpsc::Receiver<Out>, exp
             if o.status {
                 put32(&mut o.bhs, 24, statsn);
                 statsn = statsn.wrapping_add(1);
+            } else if o.bhs[0] == 0x31 {
+                put32(&mut o.bhs, 24, statsn); // R2T: the next StatSN, not taken
             }
             let e = exp.load(Ordering::Relaxed);
             put32(&mut o.bhs, 28, e);
@@ -108,8 +127,12 @@ static ACTIVE: LazyLock<Mutex<HashMap<(String, [u8; 6]), Arc<Notify>>>> = LazyLo
 static TSIH: AtomicU16 = AtomicU16::new(1);
 
 struct Login {
-    lun: Option<Arc<Lun>>, // None = discovery session
+    disk: Option<Disk>, // None = discovery session
+    /// A games disk session (attached, to detach when it ends).
+    games: Option<super::games::View>,
     their_mrdsl: usize,
+    /// MaxBurstLength: data asked for per R2T.
+    burst: usize,
     key: (String, [u8; 6]),
 }
 
@@ -142,8 +165,9 @@ fn answer(k: &str, v: &str) -> Option<String> {
 }
 
 /// Login phase. Ok(None) = refused (response already queued) or the connection ended.
-async fn login(r: &mut (impl AsyncRead + Unpin), tx: &mpsc::Sender<Out>, exp: &AtomicU32) -> std::io::Result<Option<Login>> {
+async fn login(r: &mut (impl AsyncRead + Unpin), tx: &mpsc::Sender<Out>, exp: &AtomicU32, peer: &str) -> std::io::Result<Option<Login>> {
     let (mut name, mut target, mut kind, mut their_mrdsl) = (String::new(), None::<String>, "Normal".to_string(), 8192);
+    let mut burst = MRDSL;
     let (mut sent_tpgt, mut sent_mrdsl, mut pending) = (false, false, Vec::new());
     loop {
         let p = read_pdu(r).await?;
@@ -171,6 +195,7 @@ async fn login(r: &mut (impl AsyncRead + Unpin), tx: &mpsc::Sender<Out>, exp: &A
                 "TargetName" => target = Some(v.clone()),
                 "SessionType" => kind = v.clone(),
                 "MaxRecvDataSegmentLength" => their_mrdsl = v.parse::<usize>().unwrap_or(8192).clamp(512, MRDSL),
+                "MaxBurstLength" => burst = v.parse::<usize>().unwrap_or(MRDSL).clamp(512, MRDSL), // as `answer` says
                 _ => {}
             }
             if let Some(a) = answer(&k, &v) {
@@ -187,6 +212,17 @@ async fn login(r: &mut (impl AsyncRead + Unpin), tx: &mpsc::Sender<Out>, exp: &A
         if name.is_empty() && fail.is_none() {
             fail = Some((0x02, 0x07)); // missing InitiatorName
         }
+        let done = transit && nsg == 3;
+        let mut games = None;
+        if done && fail.is_none() && target.as_deref().is_some_and(super::games::owns) {
+            match super::games::attach(target.as_deref().unwrap_or_default(), peer) {
+                Ok(v) => games = Some(v),
+                Err(e) => {
+                    tracing::info!("iscsid: games disk login of {peer} refused: {e}");
+                    fail = Some((0x03, 0x01)); // service unavailable: the initiator retries
+                }
+            }
+        }
         if let Some((class, detail)) = fail {
             rsp[1] = csg << 2;
             rsp[36] = class;
@@ -202,7 +238,6 @@ async fn login(r: &mut (impl AsyncRead + Unpin), tx: &mpsc::Sender<Out>, exp: &A
             out.push(format!("MaxRecvDataSegmentLength={MRDSL}"));
             sent_mrdsl = true;
         }
-        let done = transit && nsg == 3;
         rsp[1] = if transit { 0x80 | csg << 2 | nsg } else { csg << 2 };
         if done {
             rsp[14..16].copy_from_slice(&TSIH.fetch_add(1, Ordering::Relaxed).max(1).to_be_bytes());
@@ -211,7 +246,9 @@ async fn login(r: &mut (impl AsyncRead + Unpin), tx: &mpsc::Sender<Out>, exp: &A
         tx.send(Out::new(rsp, text, true)).await.ok();
         if done {
             let isid: [u8; 6] = p.bhs[8..14].try_into().unwrap();
-            return Ok(Some(Login { lun, their_mrdsl, key: (name, isid) }));
+            let (layers, ov) = games.as_ref().map_or((Arc::from([]), None), |v| (Arc::from(v.layers.clone()), v.ov.clone()));
+            let disk = lun.map(|lun| Disk { lun, layers, ov });
+            return Ok(Some(Login { disk, games, their_mrdsl, burst, key: (name, isid) }));
         }
     }
 }
@@ -224,28 +261,38 @@ impl Drop for Counted {
     }
 }
 
-pub async fn serve(sock: tokio::net::TcpStream) {
+/// A games disk session, detached when the connection ends.
+struct Attached(super::games::View);
+impl Drop for Attached {
+    fn drop(&mut self) {
+        super::games::detach(&self.0);
+    }
+}
+
+pub async fn serve(sock: tokio::net::TcpStream, peer: String) {
     let local = sock.local_addr().map(|a| a.ip().to_string()).unwrap_or_default();
     let (mut r, w) = sock.into_split();
     let (tx, rx) = mpsc::channel::<Out>(256);
     let exp = Arc::new(AtomicU32::new(0));
     let wt = tokio::spawn(writer(w, rx, exp.clone()));
     // A connection that never finishes logging in is dropped (slow-loris on a public port).
-    let Ok(Ok(Some(l))) = tokio::time::timeout(Duration::from_secs(15), login(&mut r, &tx, &exp)).await else {
+    let Ok(Ok(Some(l))) = tokio::time::timeout(Duration::from_secs(15), login(&mut r, &tx, &exp, &peer)).await else {
         drop(tx);
         let _ = wt.await;
         return;
     };
+    let mut l = l;
+    let _attached = l.games.take().map(Attached);
     let kick = Arc::new(Notify::new());
-    let _counted = l.lun.clone().map(|lun| {
-        lun.sessions.fetch_add(1, Ordering::Relaxed);
+    let _counted = l.disk.as_ref().map(|d| {
+        d.lun.sessions.fetch_add(1, Ordering::Relaxed);
         if let Some(old) = ACTIVE.lock().unwrap().insert(l.key.clone(), kick.clone()) {
             old.notify_one();
         }
-        Counted(lun)
+        Counted(d.lun.clone())
     });
     full_feature(&mut r, &tx, &exp, &l, &kick, &local).await;
-    if l.lun.is_some() {
+    if l.disk.is_some() {
         let mut a = ACTIVE.lock().unwrap();
         if a.get(&l.key).is_some_and(|k| Arc::ptr_eq(k, &kick)) {
             a.remove(&l.key);
@@ -253,6 +300,64 @@ pub async fn serve(sock: tokio::net::TcpStream) {
     }
     drop(tx);
     let _ = wt.await;
+}
+
+/// The write whose data is coming in (Data-Out answering our R2T).
+struct Incoming {
+    bhs: [u8; 48],
+    buf: Vec<u8>,
+    got: usize,
+    burst_end: usize,
+    ttt: u32,
+    r2tsn: u32,
+    slot: OwnedSemaphorePermit,
+}
+
+impl Incoming {
+    /// Ask for the next burst.
+    fn r2t(&mut self, burst: usize, ttt: u32) -> Out {
+        let len = (self.buf.len() - self.got).min(burst);
+        self.ttt = ttt;
+        self.burst_end = self.got + len;
+        let mut b = [0u8; 48];
+        b[0] = 0x31;
+        b[1] = 0x80;
+        b[8..20].copy_from_slice(&self.bhs[8..20]); // LUN, ITT
+        put32(&mut b, 20, ttt);
+        put32(&mut b, 36, self.r2tsn);
+        put32(&mut b, 40, self.got as u32);
+        put32(&mut b, 44, len as u32);
+        self.r2tsn += 1;
+        Out::new(b, Vec::new(), false)
+    }
+}
+
+/// Run a command in its own task; its slot (and a daemon-wide one, taken here if not given) held until its replies
+/// are queued: buffers waiting to be sent count too (the writer drops a client that stops reading, which frees them).
+fn spawn_command(
+    bhs: [u8; 48],
+    disk: Disk,
+    mrdsl: usize,
+    data: Vec<u8>,
+    tx: mpsc::Sender<Out>,
+    slot: OwnedSemaphorePermit,
+    global: Option<tokio::sync::SemaphorePermit<'static>>,
+) {
+    tokio::spawn(async move {
+        let global = match global {
+            Some(g) => g,
+            None => match IN_FLIGHT.acquire().await {
+                Ok(g) => g,
+                Err(_) => return,
+            },
+        };
+        for o in command(&bhs, disk, mrdsl, data).await {
+            if tx.send(o).await.is_err() {
+                break;
+            }
+        }
+        drop((slot, global));
+    });
 }
 
 async fn full_feature(
@@ -264,9 +369,24 @@ async fn full_feature(
     local: &str,
 ) {
     let slots = Arc::new(Semaphore::new(WINDOW as usize));
+    // Writes: one receives its data at a time, the others wait their turn here (without a slot: the reader must never
+    // wait on a slot held by a write that needs the reader to finish).
+    let mut incoming: Option<Incoming> = None;
+    let mut waiting: VecDeque<[u8; 48]> = VecDeque::new();
+    let mut ttt: u32 = 0;
     loop {
         if tx.is_closed() {
             return; // the writer gave up on this client
+        }
+        // Next write in line: its slot, its buffer, its first R2T.
+        if incoming.is_none() {
+            if let Some(bhs) = waiting.pop_front() {
+                let Ok(slot) = slots.clone().acquire_owned().await else { return };
+                ttt = ttt.wrapping_add(1) & 0x7fff_ffff;
+                let mut w = Incoming { bhs, buf: vec![0u8; get32(&bhs, 20) as usize], got: 0, burst_end: 0, ttt, r2tsn: 0, slot };
+                tx.send(w.r2t(l.burst, ttt)).await.ok();
+                incoming = Some(w);
+            }
         }
         let p = tokio::select! {
             p = read_pdu(r) => match p { Ok(p) => p, Err(_) => return },
@@ -293,25 +413,47 @@ async fn full_feature(
                 put32(&mut rsp, 20, 0xffff_ffff);
                 tx.send(Out::new(rsp, p.data, true)).await.ok();
             }
-            0x00 | 0x05 => {} // NOP-Out answering ours / unsolicited Data-Out: nothing to do
+            0x00 => {} // NOP-Out answering ours
             0x01 => {
-                let Some(lun) = l.lun.clone() else { return reject(tx, &p.bhs, 0x05).await };
-                let Ok(permit) = slots.clone().acquire_owned().await else { return };
+                let Some(disk) = l.disk.clone() else { return reject(tx, &p.bhs, 0x05).await };
+                if is_write(&p.bhs, &disk) {
+                    waiting.push_back(p.bhs);
+                    continue;
+                }
+                let Ok(slot) = slots.clone().acquire_owned().await else { return };
                 let Ok(global) = IN_FLIGHT.acquire().await else { return };
-                let (tx, mrdsl) = (tx.clone(), l.their_mrdsl);
-                tokio::spawn(async move {
-                    // Both slots held until the data is handed to the writer: buffers waiting to be sent count too
-                    // (the writer drops a client that stops reading, which frees them).
-                    for o in command(&p.bhs, lun, mrdsl).await {
-                        if tx.send(o).await.is_err() {
-                            break;
-                        }
+                spawn_command(p.bhs, disk, l.their_mrdsl, Vec::new(), tx.clone(), slot, Some(global));
+            }
+            0x05 => {
+                // Data-Out: only the data our last R2T asked for, in order (DataPDUInOrder / DataSequenceInOrder).
+                let (ttt_in, off, n) = (get32(&p.bhs, 20), get32(&p.bhs, 40) as usize, p.data.len());
+                let ok = |w: &&mut Incoming| get32(&w.bhs, 16) == itt && w.ttt == ttt_in && off == w.got && off + n <= w.burst_end;
+                let Some(w) = incoming.as_mut().filter(ok) else {
+                    return reject(tx, &p.bhs, 0x09).await; // invalid PDU field: data nobody asked for
+                };
+                w.buf[off..off + n].copy_from_slice(&p.data);
+                w.got += n;
+                if p.bhs[1] & 0x80 != 0 {
+                    if w.got != w.burst_end {
+                        return reject(tx, &p.bhs, 0x09).await; // burst ended short
                     }
-                    drop((permit, global));
-                });
+                    if w.got < w.buf.len() {
+                        ttt = ttt.wrapping_add(1) & 0x7fff_ffff;
+                        tx.send(w.r2t(l.burst, ttt)).await.ok();
+                    } else if let (Some(w), Some(disk)) = (incoming.take(), l.disk.clone()) {
+                        spawn_command(w.bhs, disk, l.their_mrdsl, w.buf, tx.clone(), w.slot, None);
+                    }
+                }
             }
             0x02 => {
-                // Task management: commands finish quickly, so every function is "complete".
+                // Task management: commands finish quickly, so every function is "complete". A write still waiting
+                // for its data is dropped (ABORT TASK: that one; the others: all of them).
+                let referenced = get32(&p.bhs, 20);
+                let gone = |b: &[u8; 48]| p.bhs[1] & 0x7f != 1 || get32(b, 16) == referenced;
+                waiting.retain(|b| !gone(b));
+                if incoming.as_ref().is_some_and(|w| gone(&w.bhs)) {
+                    incoming = None;
+                }
                 rsp[0] = 0x22;
                 rsp[1] = 0x80;
                 tx.send(Out::new(rsp, Vec::new(), true)).await.ok();
@@ -340,6 +482,18 @@ async fn full_feature(
     }
 }
 
+/// A WRITE we take data for: writable session, LUN 0, data expected, exactly the blocks the CDB names. Anything else
+/// goes to `command` without data (which answers it — a refusal, or a zero-length write).
+fn is_write(bhs: &[u8; 48], disk: &Disk) -> bool {
+    let edtl = get32(bhs, 20) as u64;
+    let cdb: [u8; 16] = bhs[32..48].try_into().unwrap();
+    disk.ov.is_some()
+        && bhs[1] & 0x20 != 0
+        && edtl > 0
+        && bhs[8..16] == [0u8; 8]
+        && matches!(scsi::handle(&cdb, disk.lun.size, &disk.lun.iqn, true), scsi::Cmd::Write { blocks, .. } if blocks as u64 * scsi::BLOCK == edtl)
+}
+
 async fn reject(tx: &mpsc::Sender<Out>, bhs: &[u8; 48], reason: u8) {
     let mut rsp = [0u8; 48];
     rsp[0] = 0x3f;
@@ -350,30 +504,38 @@ async fn reject(tx: &mpsc::Sender<Out>, bhs: &[u8; 48], reason: u8) {
 }
 
 /// Run one SCSI command → the PDUs answering it (Data-In split to the initiator's segment size, status in the last
-/// one; or a SCSI Response).
-pub async fn command(bhs: &[u8; 48], lun: Arc<Lun>, mrdsl: usize) -> Vec<Out> {
+/// one; or a SCSI Response). `data`: a WRITE's data, received.
+pub async fn command(bhs: &[u8; 48], disk: Disk, mrdsl: usize, data: Vec<u8>) -> Vec<Out> {
     let cdb: [u8; 16] = bhs[32..48].try_into().unwrap();
     let edtl = get32(bhs, 20) as usize;
+    let lun = disk.lun.clone();
+    let writable = disk.ov.is_some();
     let cmd = if bhs[8..16] != [0u8; 8] {
         // Only LUN 0 exists.
         match cdb[0] {
             0x12 => scsi::Cmd::Data(vec![0x7f, 0, 0x06, 0x02, 0, 0, 0, 0]), // peripheral qualifier: no LUN here
-            0xa0 => scsi::handle(&cdb, lun.size, &lun.iqn),
+            0xa0 => scsi::handle(&cdb, lun.size, &lun.iqn, writable),
             _ => scsi::Cmd::Check(0x05, 0x25, 0x00),
         }
     } else {
-        scsi::handle(&cdb, lun.size, &lun.iqn)
+        scsi::handle(&cdb, lun.size, &lun.iqn, writable)
     };
-    let cmd = match cmd {
-        scsi::Cmd::Read { lba, blocks } => {
+    let moved = data.len();
+    let plain = disk.ov.is_none() && disk.layers.is_empty();
+    let cmd = match (cmd, disk.ov.clone()) {
+        (scsi::Cmd::Read { lba, blocks }, ov) => {
             let (off, len) = (lba * scsi::BLOCK, blocks as usize * scsi::BLOCK as usize);
-            let r = match lun.read_now(off, len) {
+            let r = match lun.read_now(off, len).filter(|_| plain) {
                 Some(buf) => Ok(Ok(buf)),
                 None => {
-                    let l = lun.clone();
+                    let d = disk.clone();
                     tokio::task::spawn_blocking(move || {
                         let mut buf = vec![0u8; len];
-                        l.read_at(off, &mut buf).map(|_| buf)
+                        match ov {
+                            Some(ov) => ov.read_at(&|o, b| d.read_at(o, b), off, &mut buf),
+                            None => d.read_at(off, &mut buf),
+                        }
+                        .map(|_| buf)
                     })
                     .await
                 }
@@ -387,7 +549,28 @@ pub async fn command(bhs: &[u8; 48], lun: Arc<Lun>, mrdsl: usize) -> Vec<Out> {
                 Err(_) => scsi::Cmd::Check(0x04, 0x44, 0x00),
             }
         }
-        c => c,
+        (scsi::Cmd::Write { lba, blocks }, Some(ov)) if blocks as usize * scsi::BLOCK as usize == moved => {
+            let d = disk.clone();
+            let off = lba * scsi::BLOCK;
+            match tokio::task::spawn_blocking(move || ov.write_at(&|o, b| d.read_at(o, b), off, &data)).await {
+                Ok(Ok(())) => scsi::Cmd::Ok,
+                Ok(Err(e)) => {
+                    tracing::warn!("iscsid: write {} @{off}+{moved}: {e}", lun.iqn);
+                    scsi::Cmd::Check(0x03, 0x0c, 0x00) // medium error, write error
+                }
+                Err(_) => scsi::Cmd::Check(0x04, 0x44, 0x00),
+            }
+        }
+        (scsi::Cmd::Write { .. }, _) => scsi::Cmd::Check(0x05, 0x24, 0x00), // data length ≠ the CDB's
+        (scsi::Cmd::Sync, Some(ov)) => match tokio::task::spawn_blocking(move || ov.flush()).await {
+            Ok(Ok(())) => scsi::Cmd::Ok,
+            Ok(Err(e)) => {
+                tracing::warn!("iscsid: sync {}: {e}", lun.iqn);
+                scsi::Cmd::Check(0x03, 0x0c, 0x00)
+            }
+            Err(_) => scsi::Cmd::Check(0x04, 0x44, 0x00),
+        },
+        (c, _) => c,
     };
     let mut base = [0u8; 48];
     base[16..20].copy_from_slice(&bhs[16..20]); // ITT
@@ -403,7 +586,7 @@ pub async fn command(bhs: &[u8; 48], lun: Arc<Lun>, mrdsl: usize) -> Vec<Out> {
         Out::new(b, sense, true)
     };
     match cmd {
-        scsi::Cmd::Ok | scsi::Cmd::Read { .. } => vec![response(0, Vec::new(), 0)],
+        scsi::Cmd::Ok | scsi::Cmd::Read { .. } | scsi::Cmd::Write { .. } | scsi::Cmd::Sync => vec![response(0, Vec::new(), moved)],
         scsi::Cmd::Check(k, a, q) => {
             let s = scsi::sense(k, a, q);
             let mut d = (s.len() as u16).to_be_bytes().to_vec();

@@ -11,6 +11,30 @@ if ((-not (Test-Path $mark) -or (Get-Content $mark -Raw).Trim() -ne $bootId) -an
     Set-Content -Encoding ascii $mark $bootId
   } catch { }
 }
+# Games disk (if the server has one) as a drive letter: broom-games.ps1, copied out like the stub does (volume path).
+$gf = $v.Path + 'broom\broom-games.ps1'
+if ([IO.File]::Exists($gf) -and [IO.File]::Exists($srvf)) {
+  $run = "$env:SystemRoot\Temp\broom-games.run.ps1"
+  [IO.File]::Copy($gf, $run, $true)
+  & powershell -NoProfile -ExecutionPolicy Bypass -File $run -Srv ([IO.File]::ReadAllText($srvf).Trim())
+}
+# Session watchdog (broom-watch.ps1: SSD room): its own task (SYSTEM, no time limit), started once per boot - it loops,
+# it must not hold this task up. C: is reset every boot, so the task is registered again each time.
+$wf = $v.Path + 'broom\broom-watch.ps1'
+if ([IO.File]::Exists($wf) -and [IO.File]::Exists($srvf)) {
+  try {
+    $t = Get-ScheduledTask -TaskName BroomWatch -ErrorAction SilentlyContinue
+    if (-not $t -or $t.State -ne 'Running') {
+      $run = "$env:SystemRoot\Temp\broom-watch.run.ps1"
+      [IO.File]::Copy($wf, $run, $true)
+      $arg = '-NoProfile -ExecutionPolicy Bypass -File "' + $run + '" -Srv ' + [IO.File]::ReadAllText($srvf).Trim()
+      $act = New-ScheduledTaskAction -Execute powershell.exe -Argument $arg
+      $set = New-ScheduledTaskSettingsSet -ExecutionTimeLimit ([TimeSpan]::Zero) -MultipleInstances IgnoreNew -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
+      Register-ScheduledTask -TaskName BroomWatch -Action $act -Settings $set -User SYSTEM -RunLevel Highest -Force | Out-Null
+      Start-ScheduledTask -TaskName BroomWatch
+    }
+  } catch { }
+}
 # Strict reset (stage wrote strict.txt = the SSD's Windows entries): remove the Windows boot loader from the ESP once
 # Windows is up - the stage puts it back on every PXE boot, so without the stage (cable out, F12, BootOrder edited)
 # the SSD cannot start Windows at all.

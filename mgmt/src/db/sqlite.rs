@@ -31,7 +31,9 @@ const SCHEMA: &str = r#"
         cache_mode  TEXT NOT NULL DEFAULT 'disk', -- where the golden is kept: 'disk' | 'zram'
         active_version TEXT,                 -- versions.rs version image.img equals (NULL = none)
         base_mode   INTEGER NOT NULL DEFAULT 0, -- Windows: 1 = first logon waits in BASE MODE (technician), 0 = auto-commit
-        use_ssd     INTEGER NOT NULL DEFAULT 1  -- Linux: 1 = cache + writes on the machine's SSD, 0 = SSD untouched (RAM only)
+        use_ssd     INTEGER NOT NULL DEFAULT 1, -- Linux: 1 = cache + writes on the machine's SSD, 0 = SSD untouched (RAM only)
+        grps        TEXT NOT NULL DEFAULT '', -- machine groups that get it in their boot menu, comma-separated; '' = all
+        preload     INTEGER NOT NULL DEFAULT 0  -- 1 = machines that may boot it keep it on their SSD ahead of use
     );
 
     CREATE TABLE IF NOT EXISTS machines(
@@ -96,7 +98,7 @@ const SCHEMA: &str = r#"
     INSERT OR IGNORE INTO config(key,value) VALUES('ltsp_password','123456');
 "#;
 
-const IMAGE_COLS: &str = "id,name,os,is_default,boot_script,hash,cache_mode,active_version,base_mode,use_ssd";
+const IMAGE_COLS: &str = "id,name,os,is_default,boot_script,hash,cache_mode,active_version,base_mode,use_ssd,grps,preload";
 
 fn image_row(r: &Row) -> rusqlite::Result<Image> {
     Ok(Image {
@@ -110,6 +112,8 @@ fn image_row(r: &Row) -> rusqlite::Result<Image> {
         active_version: r.get(7)?,
         base_mode: r.get::<_, i64>(8)? == 1,
         use_ssd: r.get::<_, i64>(9)? == 1,
+        groups: r.get::<_, String>(10)?.split(',').filter(|g| !g.is_empty()).map(String::from).collect(),
+        preload: r.get::<_, i64>(11)? == 1,
     })
 }
 
@@ -143,7 +147,7 @@ fn private_files(path: &str) -> std::io::Result<()> {
 
 /// Schema version in `PRAGMA user_version`. A change to SCHEMA's tables bumps it and adds an `if v < N` step to
 /// migrate() (SCHEMA itself always holds the latest layout, for new DBs).
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 2;
 
 fn has_column(c: &Connection, table: &str, col: &str) -> rusqlite::Result<bool> {
     c.query_row("SELECT 1 FROM pragma_table_info(?1) WHERE name=?2", [table, col], |_| Ok(())).optional().map(|r| r.is_some())
@@ -179,6 +183,14 @@ fn migrate(c: &mut Connection) -> rusqlite::Result<()> {
         }
         if has_column(&tx, "images", "dataset")? {
             tx.execute("ALTER TABLE images DROP COLUMN dataset", [])?; // ZFS versioning removed
+        }
+    }
+    if v < 2 {
+        // Images per machine group + preloading.
+        for (col, ddl) in [("grps", "TEXT NOT NULL DEFAULT ''"), ("preload", "INTEGER NOT NULL DEFAULT 0")] {
+            if !has_column(&tx, "images", col)? {
+                tx.execute(&format!("ALTER TABLE images ADD COLUMN {col} {ddl}"), [])?;
+            }
         }
     }
     tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
@@ -319,6 +331,20 @@ impl Db for Sqlite {
     fn set_use_ssd(&self, id: i64, on: bool) -> DbResult<()> {
         self.c()
             .execute("UPDATE images SET use_ssd=?1 WHERE id=?2", params![on as i64, id])
+            .map(|_| ())
+            .map_err(e)
+    }
+
+    fn set_image_groups(&self, id: i64, groups: &[String]) -> DbResult<()> {
+        self.c()
+            .execute("UPDATE images SET grps=?1 WHERE id=?2", params![groups.join(","), id])
+            .map(|_| ())
+            .map_err(e)
+    }
+
+    fn set_preload(&self, id: i64, on: bool) -> DbResult<()> {
+        self.c()
+            .execute("UPDATE images SET preload=?1 WHERE id=?2", params![on as i64, id])
             .map(|_| ())
             .map_err(e)
     }

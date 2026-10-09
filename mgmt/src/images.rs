@@ -3,7 +3,7 @@
 // prep scripts (Linux /broom-prep, Windows one-time link).
 use axum::{
     body::Body,
-    extract::{DefaultBodyLimit, Query, State},
+    extract::{ConnectInfo, DefaultBodyLimit, Query, State},
     http::{header, StatusCode},
     response::IntoResponse,
     routing::{get, post, put},
@@ -26,6 +26,8 @@ pub fn routes() -> Router<SharedState> {
         .route("/api/images/cache-mode", post(set_cache_mode))
         .route("/api/images/base-mode", post(set_base_mode))
         .route("/api/images/ssd", post(set_use_ssd))
+        .route("/api/images/groups", post(set_groups))
+        .route("/api/images/preload", post(set_preload))
         .route("/api/cache-list", get(cache_list))
         .route("/api/images/job", get(job_status))
         .route("/broom-prep", get(broom_prep))
@@ -655,19 +657,54 @@ async fn set_base_mode(State(st): State<SharedState>, Json(b): Json<BaseModeBody
     Ok(Json(serde_json::json!({"ok": true})))
 }
 
-/// GET /api/cache-list (public: Windows stage + Linux cache script, every boot) → "name hash" per image a machine may
-/// keep on its SSD: published, and using the SSD (Windows always). A cached image not listed, or with another hash
-/// (deleted, SSD switched off, republished), is removed on the machine.
-async fn cache_list(State(st): State<SharedState>) -> Result<String, ApiError> {
-    Ok(cache_lines(&st.db.images().map_err(ise)?))
+/// GET /api/cache-list (public: Windows stage + Linux cache script, every boot) → "name hash" per image the machine at
+/// the peer IP may keep on its SSD: published, using the SSD (Windows always), and for its group. A cached image not
+/// listed, or with another hash (deleted, SSD switched off, republished, no longer for its group), is removed on the
+/// machine. Then "preload name hash os" per such image set to preload: the machine fetches it ahead of use.
+async fn cache_list(State(st): State<SharedState>, ConnectInfo(peer): ConnectInfo<std::net::SocketAddr>) -> Result<String, ApiError> {
+    let grp = crate::machines::machine_at(&st, &peer.ip().to_canonical().to_string()).and_then(|m| m.grp);
+    Ok(cache_lines(&st.db.images().map_err(ise)?, grp.as_deref()))
 }
 
-fn cache_lines(images: &[crate::db::Image]) -> String {
-    images
+fn cache_lines(images: &[crate::db::Image], grp: Option<&str>) -> String {
+    let mine: Vec<(&crate::db::Image, &str)> = images
         .iter()
-        .filter(|i| i.use_ssd || i.os == "windows")
-        .filter_map(|i| i.hash.as_deref().map(|h| format!("{} {h}\n", i.name)))
-        .collect()
+        .filter(|i| (i.use_ssd || i.os == "windows") && crate::machines::for_group(&i.groups, grp))
+        .filter_map(|i| i.hash.as_deref().map(|h| (i, h)))
+        .collect();
+    let keep = mine.iter().map(|(i, h)| format!("{} {h}\n", i.name));
+    let preload = mine.iter().filter(|(i, _)| i.preload).map(|(i, h)| format!("preload {} {h} {}\n", i.name, i.os));
+    keep.chain(preload).collect()
+}
+
+#[derive(Deserialize)]
+struct GroupsBody {
+    id: i64,
+    groups: Vec<String>,
+}
+
+/// POST /api/images/groups {id, groups} — the machine groups that get it in their boot menu (empty = every machine).
+/// Read at each boot → no republish needed.
+async fn set_groups(State(st): State<SharedState>, Json(b): Json<GroupsBody>) -> Result<Json<serde_json::Value>, ApiError> {
+    let name = name_of(&st, b.id)?;
+    let groups = crate::machines::clean_groups(&b.groups).map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+    st.db.set_image_groups(b.id, &groups).map_err(ise)?;
+    tracing::info!("image {name}: for {}", if groups.is_empty() { "every machine".into() } else { format!("groups {}", groups.join(", ")) });
+    Ok(Json(serde_json::json!({"ok": true})))
+}
+
+/// POST /api/images/preload {id, on} — Windows: machines that may boot it fetch it onto their SSD ahead of use (the
+/// stage, while another image boots), so choosing it later needs no download. Linux needs none: it boots over the
+/// network at once and copies itself onto the SSD in the background.
+async fn set_preload(State(st): State<SharedState>, Json(b): Json<BaseModeBody>) -> Result<Json<serde_json::Value>, ApiError> {
+    let img = st.db.image(b.id).map_err(ise)?.ok_or((StatusCode::NOT_FOUND, format!("image {} not found", b.id)))?;
+    if img.os != "windows" {
+        return Err((StatusCode::BAD_REQUEST, "preload is for Windows images (Linux boots over the network at once)".into()));
+    }
+    let name = img.name;
+    st.db.set_preload(b.id, b.on).map_err(ise)?;
+    tracing::info!("image {name}: preload {}", if b.on { "on" } else { "off" });
+    Ok(Json(serde_json::json!({"ok": true})))
 }
 
 #[derive(Deserialize)]
@@ -707,14 +744,20 @@ mod tests {
     fn cache_list_lines() {
         let img = |name: &str, os: &str, hash: Option<&str>, use_ssd: bool| crate::db::Image {
             id: 0, name: name.into(), os: os.into(), active_version: None, is_default: false, boot_script: None,
-            hash: hash.map(Into::into), cache_mode: "disk".into(), base_mode: false, use_ssd,
+            hash: hash.map(Into::into), cache_mode: "disk".into(), base_mode: false, use_ssd, groups: Vec::new(),
+            preload: false,
         };
-        let list = [
+        let mut list = vec![
             img("win11", "windows", Some("aa"), false), // Windows always uses the SSD
             img("ubuntu", "linux", Some("bb"), true),
             img("kiosk", "linux", Some("cc"), false), // SSD off → not cached
             img("draft", "linux", None, true),        // not published
         ];
-        assert_eq!(super::cache_lines(&list), "win11 aa\nubuntu bb\n");
+        assert_eq!(super::cache_lines(&list, None), "win11 aa\nubuntu bb\n");
+        // Another group's image is not kept; a preloaded one is also listed to fetch ahead (after every keep line).
+        list.push(crate::db::Image { groups: vec!["VIP".into()], preload: true, ..img("stream", "windows", Some("dd"), true) });
+        list[1].preload = true;
+        assert_eq!(super::cache_lines(&list, Some("Thuong")), "win11 aa\nubuntu bb\npreload ubuntu bb linux\n");
+        assert_eq!(super::cache_lines(&list, Some("vip")), "win11 aa\nubuntu bb\nstream dd\npreload ubuntu bb linux\npreload stream dd windows\n");
     }
 }

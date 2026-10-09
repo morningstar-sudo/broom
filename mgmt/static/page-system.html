@@ -27,6 +27,21 @@
       <button data-click="setTimeout_">Save</button> <span id="to_msg" class="msg"></span></div>
   </div>
   <div class="card">
+    <h2>SSD room (Windows machines)</h2>
+    <div class="row">
+      <div class="field"><label>Keep free per session</label><input id="ssd_room" type="number" min="5" size="5"> GB</div>
+      <div class="field"><label>Warn the guest below</label><input id="ssd_warn" type="number" min="1" size="5"> GB</div>
+      <div class="field"><label>Restart below</label><input id="ssd_reboot" type="number" min="1" size="5"> GB</div>
+      <button style="align-self:flex-end" data-click="setSsd">Save</button> <span id="ssd_msg" class="msg"></span>
+    </div>
+    <p class="hint">Everything a guest writes (C:, games drives) lands on the machine's SSD until the next boot. At each
+      boot the stage frees <b>Keep free</b> GB (parked images, unused the longest first). During the session a watchdog
+      checks the SSD every 15 s: below <b>Warn</b> it tells the guest (and the Machines page shows <i>SSD full</i>); below
+      <b>Restart</b> it restarts the machine after 60 s — otherwise Windows would crash with a blue screen once the SSD is
+      full. Big writes come mostly from launchers updating games on the machines: let only the games disk's update
+      machine update them. Applies at each machine's next boot.</p>
+  </div>
+  <div class="card">
     <h2>RAM cache — RAM reserved for the server</h2>
     <div class="row"><input id="zram_reserve" type="number" min="0" size="6"> MB
       <button data-click="setZramReserve">Save</button> <span id="zr_msg" class="msg"></span></div>

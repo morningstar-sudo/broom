@@ -12,6 +12,8 @@ pub fn routes() -> Router<SharedState> {
         .route("/api/config", get(get_config))
         .route("/api/config/timeout", post(set_timeout))
         .route("/api/config/zram-reserve", post(set_zram_reserve))
+        .route("/api/config/ssd", post(set_ssd))
+        .route("/api/client-config", get(client_config))
         .route("/api/dhcp", get(get_dhcp).post(set_dhcp))
         .route("/api/cafe-user", get(get_cafe_user).post(set_cafe_user))
 }
@@ -66,10 +68,47 @@ async fn set_cafe_user(
 
 /// System page values (same defaults as their readers: boot.rs, publish.rs).
 async fn get_config(State(st): State<SharedState>) -> Json<serde_json::Value> {
+    let (room, warn, reboot) = ssd_limits(&st);
     Json(serde_json::json!({
         "boot_timeout": st.db.get_config("boot_timeout", "10").parse::<u64>().unwrap_or(10),
         "zram_reserve_mb": st.db.get_config("zram_reserve_mb", "2048").parse::<u64>().unwrap_or(2048),
+        "ssd_room_gb": room,
+        "ssd_warn_gb": warn,
+        "ssd_reboot_gb": reboot,
     }))
+}
+
+/// Windows SSD (BROOMWIN), GB: free room the stage keeps for each session (parked images go to make it), and the free
+/// room at which the session watchdog (broom-watch.ps1) warns the guest / restarts the machine — before Windows itself
+/// would crash with its boot disk out of room.
+fn ssd_limits(st: &SharedState) -> (u64, u64, u64) {
+    let n = |k, d: u64| st.db.get_config(k, &d.to_string()).parse::<u64>().unwrap_or(d);
+    (n("ssd_room_gb", 20), n("ssd_warn_gb", 10), n("ssd_reboot_gb", 3))
+}
+
+/// GET /api/client-config (public: the Windows stage + watchdog) → "<room GB> <warn GB> <reboot GB>".
+pub(crate) async fn client_config(State(st): State<SharedState>) -> String {
+    let (room, warn, reboot) = ssd_limits(&st);
+    format!("{room} {warn} {reboot}\n")
+}
+
+#[derive(Deserialize)]
+struct SsdLimits {
+    room_gb: u64,
+    warn_gb: u64,
+    reboot_gb: u64,
+}
+
+/// POST /api/config/ssd {room_gb, warn_gb, reboot_gb} — read by the clients at each boot.
+async fn set_ssd(State(st): State<SharedState>, Json(b): Json<SsdLimits>) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    if !(5..=2000).contains(&b.room_gb) || !(1..=b.room_gb).contains(&b.warn_gb) || !(1..b.warn_gb).contains(&b.reboot_gb) {
+        return Err((StatusCode::BAD_REQUEST, "need 5 ≤ room ≤ 2000, 1 ≤ warn ≤ room, 1 ≤ restart < warn (GB)".into()));
+    }
+    st.db.set_config("ssd_room_gb", &b.room_gb.to_string()).map_err(ise)?;
+    st.db.set_config("ssd_warn_gb", &b.warn_gb.to_string()).map_err(ise)?;
+    st.db.set_config("ssd_reboot_gb", &b.reboot_gb.to_string()).map_err(ise)?;
+    tracing::info!("SSD: {} GB kept free per session, warn below {} GB, restart below {} GB", b.room_gb, b.warn_gb, b.reboot_gb);
+    Ok(ok())
 }
 
 #[derive(Deserialize)]

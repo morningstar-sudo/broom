@@ -1,11 +1,13 @@
-// iscsid/ — the iSCSI target of the Linux goldens, in its own process (`bootrom-mgmt iscsid`, started by mgmt, see
-// iscsi.rs). Read-only LUN 0 per target, served from the golden file (disk cache mode) or from a compressed copy in
-// RAM ("zram" mode, ramimg.rs). Its own process so an mgmt restart or upgrade never cuts a client off — the job the
-// kernel's LIO target did before, without needing LIO or zram in the kernel.
+// iscsid/ — the iSCSI target of the Linux goldens and of the Windows games disk (games.rs), in its own process
+// (`bootrom-mgmt iscsid`, started by mgmt, see iscsi.rs). Read-only LUN 0 per target, served from the golden file (disk
+// cache mode) or from a compressed copy in RAM ("zram" mode, ramimg.rs). Its own process so an mgmt restart or upgrade
+// never cuts a client off — the job the kernel's LIO target did before, without needing LIO or zram in the kernel.
 //
 // mgmt drives it over a Unix socket, one JSON request per connection (Req → Resp). Targets are saved to a state file
 // and restored when the daemon itself starts again (crash → systemd restarts it; server reboot).
 mod conn;
+pub mod games;
+mod overlay;
 pub(crate) mod ramimg; // also the Windows goldens' RAM copies (goldenram.rs)
 mod scsi;
 
@@ -46,6 +48,11 @@ pub enum Req {
     List,
     Version,
     Quit,
+    /// Serve exactly these games disks.
+    GamesSet { disks: Vec<games::Config> },
+    GamesSave { name: String },
+    GamesDiscard { name: String },
+    GamesStatus,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -63,6 +70,10 @@ pub struct Resp {
     pub targets: Vec<TargetInfo>,
     #[serde(default)]
     pub version: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub games: Vec<games::Info>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub msg: String,
 }
 
 pub struct Lun {
@@ -125,11 +136,18 @@ static LOADING: LazyLock<Mutex<HashSet<String>>> = LazyLock::new(Default::defaul
 static STATE: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
 
 fn lookup(iqn: &str) -> Option<Arc<Lun>> {
-    TARGETS.lock().unwrap().get(iqn).map(|(_, l)| l.clone())
+    let l = TARGETS.lock().unwrap().get(iqn).map(|(_, l)| l.clone());
+    l.or_else(|| games::lun(iqn))
 }
 
 fn iqns() -> Vec<String> {
-    TARGETS.lock().unwrap().keys().cloned().collect()
+    let mut v: Vec<String> = TARGETS.lock().unwrap().keys().cloned().collect();
+    v.extend(games::iqns());
+    v
+}
+
+fn state_path() -> Option<std::path::PathBuf> {
+    STATE.get().cloned()
 }
 
 /// Save the target list (temp + rename: whole or not at all).
@@ -190,6 +208,14 @@ async fn handle(req: Req) -> Resp {
         Req::List => r.targets = list(),
         Req::Version => r.version = crate::iscsi::exe_id(),
         Req::Quit => {}
+        // Blocking: set may finish a merge cut off earlier; save links files.
+        Req::GamesSet { disks } => r.err = tokio::task::spawn_blocking(move || games::set(disks)).await.unwrap_or_else(|e| Err(e.to_string())).err(),
+        Req::GamesSave { name } => match tokio::task::spawn_blocking(move || games::save(&name)).await.unwrap_or_else(|e| Err(e.to_string())) {
+            Ok(m) => r.msg = m,
+            Err(e) => r.err = Some(e),
+        },
+        Req::GamesDiscard { name } => r.err = games::discard(&name).err(),
+        Req::GamesStatus => r.games = games::info(),
     }
     r
 }
@@ -267,6 +293,15 @@ pub async fn run(args: &[String]) -> ! {
             }
         }
         save(); // drops the ones that were skipped or failed
+        games::restore();
+    });
+    // Games disk versions nobody uses any more are merged into games.img.
+    tokio::spawn(async {
+        let mut t = tokio::time::interval(std::time::Duration::from_secs(30));
+        loop {
+            t.tick().await;
+            let _ = tokio::task::spawn_blocking(games::tick).await;
+        }
     });
 
     tokio::spawn(async move {
@@ -289,7 +324,7 @@ pub async fn run(args: &[String]) -> ! {
         let _ = socket2::SockRef::from(&s).set_tcp_keepalive(&ka);
         let _ = s.set_nodelay(true);
         tokio::spawn(async move {
-            conn::serve(s).await;
+            conn::serve(s, peer.ip().to_canonical().to_string()).await;
             drop(permit);
         });
     }
@@ -314,7 +349,7 @@ mod tests {
     }
 
     async fn login(s: &mut tokio::net::TcpStream, target: &str) -> conn::Pdu {
-        let keys = format!("InitiatorName=iqn.test:pc\0TargetName={target}\0SessionType=Normal\0MaxRecvDataSegmentLength=4096\0");
+        let keys = format!("InitiatorName=iqn.test:pc-{target}\0TargetName={target}\0SessionType=Normal\0MaxRecvDataSegmentLength=4096\0MaxBurstLength=65536\0");
         s.write_all(&pdu(0x43, 0x80 | 1 << 2 | 3, 1, 0, keys.as_bytes())).await.unwrap();
         conn::read_pdu(s).await.unwrap()
     }
@@ -332,7 +367,7 @@ mod tests {
         let addr = l.local_addr().unwrap();
         tokio::spawn(async move {
             while let Ok((s, _)) = l.accept().await {
-                tokio::spawn(conn::serve(s));
+                tokio::spawn(conn::serve(s, "127.0.0.1".into()));
             }
         });
 
@@ -388,6 +423,132 @@ mod tests {
         TARGETS.lock().unwrap().remove(iqn);
         let _ = std::fs::remove_file(p);
     }
+
+    fn scsi_cmd(itt: u32, cmdsn: u32, flags: u8, op: u8, lba: u32, blocks: u16) -> Vec<u8> {
+        let mut c = pdu(0x01, flags, itt, cmdsn, &[]);
+        c[8..16].fill(0);
+        c[20..24].copy_from_slice(&(blocks as u32 * 512).to_be_bytes());
+        c[32] = op;
+        c[34..38].copy_from_slice(&lba.to_be_bytes());
+        c[39..41].copy_from_slice(&blocks.to_be_bytes());
+        c
+    }
+
+    async fn read_blocks(s: &mut tokio::net::TcpStream, itt: u32, cmdsn: u32, lba: u32, blocks: u16) -> Vec<u8> {
+        s.write_all(&scsi_cmd(itt, cmdsn, 0xc0, 0x28, lba, blocks)).await.unwrap();
+        let mut buf = vec![0u8; blocks as usize * 512];
+        loop {
+            let r = conn::read_pdu(s).await.unwrap();
+            assert_eq!(r.bhs[0], 0x25, "Data-In");
+            let at = u32::from_be_bytes(r.bhs[40..44].try_into().unwrap()) as usize;
+            buf[at..at + r.data.len()].copy_from_slice(&r.data);
+            if r.bhs[1] & 0x01 != 0 {
+                return buf;
+            }
+        }
+    }
+
+    fn info_of(name: &str) -> games::Info {
+        games::info().into_iter().find(|i| i.name == name).unwrap()
+    }
+
+    async fn wait_games(f: impl Fn(&games::Info) -> bool) {
+        for _ in 0..100 {
+            if f(&info_of("t")) {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        panic!("games disk state not reached: {:?}", games::info());
+    }
+
+    /// Games disk: the update machine's WRITE comes in over two R2T bursts, lands in the update overlay and reads back;
+    /// a read-only session is refused writes. "save" makes version g1 at once: a new session of g1 reads the update while
+    /// a session still on g0 keeps reading the old content; once g0 is unused the layer is merged into games.img and
+    /// g0 is no longer served.
+    #[tokio::test]
+    async fn games_disk_versions() {
+        let d = std::env::temp_dir().join("broom_test_games");
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let (img, img2) = (d.join("t/games.img"), d.join("b/games.img"));
+        std::fs::create_dir_all(img.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(img2.parent().unwrap()).unwrap();
+        std::fs::write(&img, vec![0x11u8; 1 << 20]).unwrap();
+        let (iqn, g0, g1) = ("iqn.test:games", "iqn.test:games.g0", "iqn.test:games.g1");
+        std::fs::write(&img2, vec![0x22u8; 1 << 20]).unwrap();
+        let other = games::Config { name: "b".into(), iqn: "iqn.test:games-b".into(), path: img2.to_string_lossy().into(), update_ip: None };
+        let cfg = |ip: Option<&str>| vec![games::Config { name: "t".into(), iqn: iqn.into(), path: img.to_string_lossy().into(), update_ip: ip.map(Into::into) }, other.clone()];
+        games::set(cfg(Some("127.0.0.1"))).unwrap();
+        let mut all = games::iqns();
+        all.sort();
+        assert_eq!(all, ["iqn.test:games-b.g0", g0], "every disk served, each with its own versions");
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = l.local_addr().unwrap();
+        tokio::spawn(async move {
+            while let Ok((s, _)) = l.accept().await {
+                tokio::spawn(conn::serve(s, "127.0.0.1".into()));
+            }
+        });
+
+        let mut s = tokio::net::TcpStream::connect(addr).await.unwrap();
+        assert_eq!(login(&mut s, g0).await.bhs[36], 0, "update machine logged in");
+        let data: Vec<u8> = (0..128 << 10).map(|i: u32| (i % 253) as u8).collect();
+        s.write_all(&scsi_cmd(20, 1, 0xa0, 0x2a, 8, 256)).await.unwrap(); // WRITE(10), F + W
+        for burst in 0..2u32 {
+            let r = conn::read_pdu(&mut s).await.unwrap();
+            assert_eq!(r.bhs[0], 0x31, "R2T");
+            let g = |at: usize| u32::from_be_bytes(r.bhs[at..at + 4].try_into().unwrap());
+            assert_eq!((g(36), g(40), g(44)), (burst, burst * 65536, 65536), "R2TSN, offset, length");
+            for (i, chunk) in data[g(40) as usize..(g(40) + g(44)) as usize].chunks(32768).enumerate() {
+                let mut p = pdu(0x05, if i == 1 { 0x80 } else { 0 }, 20, 0, chunk);
+                p[8..16].fill(0);
+                p[20..24].copy_from_slice(&r.bhs[20..24]); // TTT
+                p[36..40].copy_from_slice(&(i as u32).to_be_bytes());
+                p[40..44].copy_from_slice(&(g(40) + i as u32 * 32768).to_be_bytes());
+                s.write_all(&p).await.unwrap();
+            }
+        }
+        let r = conn::read_pdu(&mut s).await.unwrap();
+        assert_eq!((r.bhs[0], r.bhs[1] & 0x06, r.bhs[3]), (0x21, 0, 0), "GOOD, no residual");
+        assert!(read_blocks(&mut s, 21, 2, 8, 256).await == data, "reads its own write");
+        assert!(read_blocks(&mut s, 22, 3, 0, 8).await.iter().all(|&b| b == 0x11), "rest from the disk");
+        assert!(games::save("t").is_err(), "update machine still connected");
+        drop(s);
+
+        games::set(cfg(None)).unwrap(); // update mode off: every session read-only
+        let mut old = tokio::net::TcpStream::connect(addr).await.unwrap();
+        login(&mut old, g0).await;
+        assert!(read_blocks(&mut old, 30, 1, 8, 8).await.iter().all(|&b| b == 0x11), "g0 unchanged");
+        old.write_all(&scsi_cmd(31, 2, 0xa0, 0x2a, 8, 1)).await.unwrap();
+        let r = conn::read_pdu(&mut old).await.unwrap();
+        assert_eq!((r.bhs[0], r.bhs[3]), (0x21, 0x02), "write refused, no R2T");
+
+        wait_games(|i| !i.update_connected).await;
+        assert!(games::save("t").unwrap().starts_with("version g1 ready"));
+        assert!(games::iqns().iter().any(|i| i == g1), "new boots get g1");
+        let mut s = tokio::net::TcpStream::connect(addr).await.unwrap();
+        assert_eq!(login(&mut s, g1).await.bhs[36], 0);
+        assert!(read_blocks(&mut s, 40, 1, 8, 256).await == data, "g1 = the update");
+        assert!(read_blocks(&mut old, 32, 3, 8, 8).await.iter().all(|&b| b == 0x11), "a client on g0 keeps g0");
+
+        games::merge_if_idle("t", std::time::Duration::ZERO);
+        assert_eq!(info_of("t").layers, 1, "not merged while g0 is in use");
+        drop(old);
+        wait_games(|i| i.old_sessions == 0).await;
+        games::merge_if_idle("t", std::time::Duration::ZERO);
+        let i = info_of("t");
+        assert_eq!((i.ver, i.layers, i.merging), (1, 0, false), "merged");
+        let disk = std::fs::read(&img).unwrap();
+        assert!(disk[8 * 512..8 * 512 + data.len()] == data[..] && disk[..8 * 512].iter().all(|&b| b == 0x11));
+        assert!(read_blocks(&mut s, 41, 2, 8, 256).await == data, "g1 session unaffected by the merge");
+        let mut late = tokio::net::TcpStream::connect(addr).await.unwrap();
+        assert_eq!(login(&mut late, g0).await.bhs[36], 0x02, "g0 no longer served");
+        drop(s);
+        games::set(Vec::new()).unwrap();
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
 
     #[test]
     fn requests_roundtrip() {

@@ -193,6 +193,9 @@ fn is_public(method: &axum::http::Method, path: &str) -> bool {
         "/api/license",
         "/api/license/result",
         "/api/booted",
+        "/api/games/for",
+        "/api/ssd-low",
+        "/api/client-config",
         "/broom-prep",
         "/broom-prep-win",
     ];

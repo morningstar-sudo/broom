@@ -520,7 +520,7 @@ mod tests {
 
         let existing = [m(1, "aa:00:00:00:00:01", Some("PC01"), Some("10.0.0.51"))];
         let img = crate::db::Image { id: 7, name: "win11".into(), os: "windows".into(), active_version: None, is_default: false,
-                                     boot_script: None, hash: None, cache_mode: "disk".into(), base_mode: false, use_ssd: true };
+                                     boot_script: None, hash: None, cache_mode: "disk".into(), base_mode: false, use_ssd: true, groups: Vec::new(), preload: false };
         // Columns in any order; existing row updated (ip column absent → kept), new row added with a key.
         let csv = "Hostname,MAC,group,image,license_key\nPC01,AA-00-00-00-00-01,VIP,win11,\nPC02,aa:00:00:00:00:02,,,abcde-12345-fghij-67890-klmno\n";
         let (w, keys) = plan_import(csv, &existing, std::slice::from_ref(&img)).unwrap();

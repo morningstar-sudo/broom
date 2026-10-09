@@ -1,0 +1,34 @@
+<section class="page active" id="page-groups">
+  <div class="head"><h1>Groups</h1><p>what each machine group gets</p>
+    <span class="sp"></span><button data-click="loadGroups">↻</button></div>
+  <div class="card">
+    <h2>Groups</h2>
+    <div class="scroll"><table id="groups">
+      <thead><tr><th>Group</th><th>Machines</th><th>Images (boot menu)</th><th>Games disks</th><th>Drivers</th><th></th></tr></thead>
+      <tbody></tbody></table></div>
+    <div class="row" style="margin-top:10px">
+      <div class="field"><label>New group</label><input id="gr_new" size="14" placeholder="VIP"></div>
+      <button class="primary" style="align-self:flex-end" data-click="createGroup">Create</button>
+      <span id="gr_msg" class="msg"></span>
+    </div>
+    <p class="hint">A machine is in one group (or none). It gets the images, games disks and driver packages of its group
+      <b>plus</b> those for every machine (last row). Names: letters / digits / _ / -, at most 32. An image or games disk for
+      every machine is limited to groups on its own page (Images); one that would lose its last group here asks first —
+      it would then go to every machine. Changes apply at each machine's next boot.</p>
+  </div>
+  <div class="card" id="gr_edit" style="display:none">
+    <h2 id="gr_title"></h2>
+    <div class="row" style="align-items:flex-start;gap:28px;flex-wrap:wrap">
+      <div><b>Machines</b><div id="gr_machines" style="max-height:340px;overflow:auto;margin-top:6px"></div></div>
+      <div><b>Images</b><div id="gr_images" style="margin-top:6px"></div></div>
+      <div><b>Games disks</b><div id="gr_disks" style="margin-top:6px"></div></div>
+      <div><b>Drivers</b><div id="gr_drivers" style="margin-top:6px"></div></div>
+    </div>
+    <div class="row" style="margin-top:12px">
+      <button class="primary" data-click="saveGroup">Save</button>
+      <button class="ghost" data-click="closeGroup">Close</button>
+      <span id="gr_emsg" class="msg"></span>
+    </div>
+    <p class="hint">A machine shown with another group in brackets moves to this one when ticked.</p>
+  </div>
+</section>

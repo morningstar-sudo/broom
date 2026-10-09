@@ -23,6 +23,7 @@ pub fn routes() -> Router<SharedState> {
         .route("/api/license", post(license))
         .route("/api/license/result", post(license_result))
         .route("/api/booted", post(booted))
+        .route("/api/ssd-low", post(ssd_low))
 }
 
 /// A key is only handed out this long after the machine's last PXE boot (/boot/start or the stage's driver query):
@@ -32,7 +33,7 @@ const LICENSE_WINDOW_S: u64 = 30 * 60;
 const BOOT_WINDOW_S: u64 = 15 * 60;
 
 /// MAC of the host at `ip`: the kernel's ARP entry (it just talked to us), else its DHCP lease or static IP.
-fn mac_at(st: &SharedState, ip: &str) -> Option<String> {
+pub(crate) fn mac_at(st: &SharedState, ip: &str) -> Option<String> {
     arp_mac(ip)
         .or_else(|| st.db.leases().ok()?.into_iter().find(|l| l.ip.as_deref() == Some(ip)).map(|l| l.mac))
         .or_else(|| st.db.machines().ok()?.into_iter().find(|m| m.ip.as_deref() == Some(ip)).map(|m| m.mac))
@@ -64,6 +65,38 @@ async fn booted(State(st): State<SharedState>, ConnectInfo(peer): ConnectInfo<So
         );
         st.not_reset.lock().unwrap().insert(mac, now);
     }
+    StatusCode::NO_CONTENT
+}
+
+/// One SSD report per IP per minute (public endpoint).
+static SSD_SEEN: std::sync::LazyLock<std::sync::Mutex<std::collections::HashMap<String, u64>>> = std::sync::LazyLock::new(Default::default);
+
+#[derive(Deserialize)]
+struct SsdLow {
+    /// Bytes still free on BROOMWIN.
+    free: u64,
+}
+
+/// POST /api/ssd-low?free=<bytes> — Windows (broom-watch.ps1): the SSD is running out of room during this session
+/// (the guest's writes fill it; past the reboot threshold the machine restarts itself before Windows would crash).
+/// Flagged on the Machines page until its next PXE boot.
+async fn ssd_low(State(st): State<SharedState>, ConnectInfo(peer): ConnectInfo<SocketAddr>, axum::extract::Query(q): axum::extract::Query<SsdLow>) -> StatusCode {
+    let (ip, now) = (peer.ip().to_canonical().to_string(), crate::now_secs());
+    {
+        let mut seen = SSD_SEEN.lock().unwrap();
+        seen.retain(|_, t| now.saturating_sub(*t) < 60);
+        if seen.insert(ip.clone(), now).is_some() {
+            return StatusCode::TOO_MANY_REQUESTS;
+        }
+    }
+    let Some(mac) = mac_at(&st, &ip) else { return StatusCode::NO_CONTENT };
+    let name = st.db.machines().unwrap_or_default().into_iter().find(|m| m.mac.eq_ignore_ascii_case(&mac)).map(|m| who(&m));
+    tracing::warn!(
+        "machine {} ({mac}, {ip}): SSD almost full during the session — {:.1} GB free (guest writes; see Settings → SSD room)",
+        name.as_deref().unwrap_or(&mac),
+        q.free as f64 / (1u64 << 30) as f64
+    );
+    st.ssd_low.lock().unwrap().insert(mac, (q.free, now));
     StatusCode::NO_CONTENT
 }
 

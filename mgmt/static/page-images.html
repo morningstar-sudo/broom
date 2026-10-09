@@ -4,7 +4,7 @@
   <div class="card">
     <h2>Image list</h2>
     <div class="scroll"><table id="images">
-      <thead><tr><th>Name</th><th>OS</th><th>Cache</th><th>Default</th><th>Boot</th><th title="golden being served: used on disk / virtual disk size (active version)">Size</th><th>Hash</th><th></th></tr></thead>
+      <thead><tr><th>Name</th><th>OS</th><th title="machine groups that get it in their boot menu (Devices page); click to change">Groups</th><th>Cache</th><th>Default</th><th>Boot</th><th title="golden being served: used on disk / virtual disk size (active version)">Size</th><th>Hash</th><th></th></tr></thead>
       <tbody></tbody></table></div>
     <div id="img_status" class="msg" style="margin-top:10px"></div>
     <div id="img_versions" style="margin-top:14px"></div>
@@ -25,5 +25,27 @@
     <p class="hint"><b>Linux</b>: <code>curl -fsSL http://<span id="srvhost2">SERVER</span>/broom-prep | sudo bash</code></p>
     <p class="hint"><b>Windows (Pro)</b>: PowerShell Admin, in the VM: <code style="user-select:all">irm http://<span id="srvhost3">SERVER</span>/broom-prep-win | iex</code>
       <br>Set the guest user + password (Settings) first: they are baked into the golden.</p>
+  </div>
+  <div class="card">
+    <h2>Games disks (Windows) <button class="ghost" data-click="loadGames">↻</button></h2>
+    <div class="scroll"><table id="games">
+      <thead><tr><th>Name</th><th>Drive</th><th>Size</th><th>Groups</th><th title="version machines get at boot">Version</th><th title="machines connected (still on an older version)">Machines</th><th>Update machine</th><th>Update not saved</th><th></th></tr></thead>
+      <tbody></tbody></table></div>
+    <div class="row" style="margin-top:10px">
+      <div class="field"><label>Name</label><input id="gm_name" size="10" placeholder="common"></div>
+      <div class="field"><label>Drive</label><input id="gm_letter" size="2" maxlength="1" value="G"></div>
+      <div class="field"><label>Size GB</label><input id="gm_size" type="number" min="1" size="6" value="500"></div>
+      <div class="field"><label>Groups (empty = all machines)</label><input id="gm_groups" size="20" placeholder="VIP, Thuong" list="gm_grouplist"></div>
+      <datalist id="gm_grouplist"></datalist>
+      <button class="primary" style="align-self:flex-end" data-click="saveGames">Add / change</button>
+      <span id="gm_msg" class="msg"></span>
+    </div>
+    <p class="hint">Disks on the server for the Windows machines (Steam / launcher libraries go there); a machine gets
+      every disk of its group (Devices page) plus those set for all machines, each under its drive letter. Guests write
+      to their own SSD (thrown away at reboot); a games disk itself never changes. <b>To install / update games</b>: pick
+      the disk's update machine → (re)boot it: that drive is writable there → install → <b>shut it down properly</b> →
+      <b>Save</b>: a new version at once — each machine gets it at its next boot, machines already playing keep theirs.
+      A new disk is set up (formatted) by its first update machine. Size can only grow; the update machine extends the
+      drive on its next boot. Two disks the same machine gets need different letters.</p>
   </div>
 </section>

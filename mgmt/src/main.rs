@@ -11,6 +11,8 @@ mod devices;
 mod dhcp;
 mod disk;
 mod drivers;
+mod games;
+mod groups;
 mod export;
 mod golden;
 mod goldenram;
@@ -197,7 +199,7 @@ async fn events(
 // Per-tab fragments — loaded on demand via /ui/<page> (the web only fetches the tab being viewed).
 async fn ui_page(axum::extract::Path(p): axum::extract::Path<String>) -> Html<&'static str> {
     Html(match p.as_str() {
-        "machines" | "images" | "network" | "system" | "drivers" | "devices" => assets::text(&format!("static/page-{p}.html")),
+        "machines" | "images" | "network" | "system" | "drivers" | "devices" | "groups" => assets::text(&format!("static/page-{p}.html")),
         _ => "",
     })
 }
@@ -223,6 +225,9 @@ pub struct AppState {
     /// mac → unix time Windows reported a boot WITHOUT a PXE boot just before (session not reset). Cleared by the
     /// next PXE boot. Shown on the Machines page.
     pub not_reset: Mutex<std::collections::HashMap<String, u64>>,
+    /// mac → (bytes free, unix time) Windows reported its SSD (BROOMWIN) running out of room during a session
+    /// (broom-watch.ps1). Cleared by the next PXE boot. Shown on the Machines page.
+    pub ssd_low: Mutex<std::collections::HashMap<String, (u64, u64)>>,
 }
 
 pub fn now_secs() -> u64 {
@@ -256,6 +261,7 @@ impl AppState {
         }
         drop((seen, ips));
         self.not_reset.lock().unwrap().remove(mac);
+        self.ssd_low.lock().unwrap().remove(mac);
     }
 
     /// Record an image job status + push it to open web tabs.
@@ -348,6 +354,7 @@ async fn main() {
         pxe_seen: Mutex::new(std::collections::HashMap::new()),
         pxe_ip: Mutex::new(std::collections::HashMap::new()),
         not_reset: Mutex::new(std::collections::HashMap::new()),
+        ssd_low: Mutex::new(std::collections::HashMap::new()),
     });
     auth::init_setup_token(&state);
 
@@ -361,6 +368,10 @@ async fn main() {
         }
         // Stage bundle checked + fetched if missing (background: a download), then its Secure Boot shim → tftp/shim/.
         tokio::task::spawn_blocking(publish::prepare_stage);
+        // The Windows scripts of this version for every image (stage: tftp/broom-scripts/).
+        if let Err(e) = winstage::install_scripts() {
+            error!("Windows scripts not installed: {e}");
+        }
         // The iSCSI daemon (its own process: survives this one's restarts) checked / started, missing targets restored
         // (background: a RAM copy is slow).
         let st = state.clone();
@@ -385,7 +396,8 @@ async fn main() {
         // Superseded iSCSI generations (+ their RAM copies) go as soon as their last client logs out — a busy lab never
         // has a moment with no client at all, and a publish only cleans up what is idle at that moment. Images with
         // a running job are skipped (their old generation is still in the boot script until the publish saves it).
-        // Same pass: an iSCSI daemon of an older build is replaced once no client uses it.
+        // Same pass: an iSCSI daemon of an older build is replaced once no client uses it; the games disk settings are
+        // pushed again (the update machine's lease may have moved).
         let st = state.clone();
         tokio::spawn(async move {
             loop {
@@ -393,6 +405,9 @@ async fn main() {
                 let st = st.clone();
                 let _ = tokio::task::spawn_blocking(move || {
                     iscsi::upgrade_if_idle();
+                    if let Err(e) = games::sync(&st) {
+                        tracing::debug!("games disk: {e}");
+                    }
                     for img in st.db.images().unwrap_or_default().into_iter().filter(|i| i.os == "linux") {
                         let busy = st.jobs.lock().unwrap().get(&img.name).is_some_and(|s| s.starts_with('⏳'));
                         if !busy {
@@ -417,12 +432,15 @@ async fn main() {
         .route("/system", get(index))
         .route("/drivers", get(index))
         .route("/devices", get(index))
+        .route("/groups", get(index))
         .route("/ui/{page}", get(ui_page)) // fragment tab on-demand
         .route("/api/events", get(events)) // SSE: server liveness (sidebar dot) + image job status
         .route("/boot.ipxe", get(boot::render)) // iPXE menu
         .route("/boot/start", get(boot::start)) // menu choice → "client started" log + image boot script
         .merge(images::routes()) // images, versions, upload, publish
         .merge(drivers::routes()) // Windows driver packages
+        .merge(games::routes()) // games disks (Windows)
+        .merge(groups::routes()) // Groups page
         .merge(machines::routes()) // Machines table
         .merge(license::routes()) // Windows license keys + boot reports
         .merge(settings::routes()) // boot menu, zram, DHCP, guest user

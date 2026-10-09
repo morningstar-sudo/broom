@@ -195,12 +195,18 @@ oldest(){
   done
 }
 # Room for this session (the child grows with what the guest writes; a base build needs a few GB): parked images go,
-# the oldest first, while BROOMWIN has less than 20 GB or 10 % free. (A new golden makes its own room in step 1.)
-while df -Pk $W | tail -1 | awk '{ m = $2 / 10; if (m < 20971520) m = 20971520; exit !($4 < m) }'; do
+# the oldest first, while BROOMWIN has less than ROOM GB free (Settings → SSD room; 20 when the server doesn't say).
+# (A new golden makes its own room in step 1.)
+ROOM=$(wget -q -O - "http://$SRV/api/client-config" 2>/dev/null | awk 'NR == 1 && $1 ~ /^[0-9]+$/ { print $1 }')
+[ -n "$ROOM" ] || ROOM=20
+while df -Pk $W | tail -1 | awk -v r="$ROOM" '{ exit !($4 < r * 1048576) }'; do
   oldest; [ -n "$old" ] || break
   rm -rf "$old"; log "image ${old##*/img.} removed from this disk (unused the longest) to keep room for the session"
 done
 cd /
+
+gb(){ echo "$1" | awk '{ printf "%.1f GB", $1 / 1073741824 }'; }
+fsize(){ ls -ln "$1" 2>/dev/null | awk '{ print $5 }'; }
 
 # 1. Golden hash mismatch → download the whole golden again. No delta: one sequential write into free space (nothing
 #    to compare, the file stays unfragmented). The old golden + base/child go first: they belong to the old version
@@ -230,8 +236,6 @@ if [ "$(cat $B/golden.sha256 2>/dev/null)" != "$HASH" ]; then
   # Free space: the golden (minus the part a cut download already holds) + 1 GB for base/child to start with.
   size=$(wget -q -O - http://$SRV/tftp/broom-win/$NAME/golden.size 2>/dev/null)
   case "$size" in ''|*[!0-9]*) die "server has no golden.size for $NAME (published by an older version) -> Publish again, then reboot";; esac
-  gb(){ echo "$1" | awk '{ printf "%.1f GB", $1 / 1073741824 }'; }
-  fsize(){ ls -ln "$1" 2>/dev/null | awk '{ print $5 }'; }
   room(){
     have=$(fsize $D/golden.vhdx); avail=$(df -Pk $W | tail -1 | awk '{ print $4 }')
     awk -v a="$avail" -v h="${have:-0}" -v s="$size" 'BEGIN { exit !(a * 1024 + h >= s + 1073741824) }'
@@ -278,28 +282,71 @@ if [ "$(cat $B/golden.sha256 2>/dev/null)" != "$HASH" ]; then
   mv $D/* $B/ && rmdir $D && sync && echo "$HASH" > $B/golden.sha256 && sync
 fi
 
-# 1b. The small boot files (EFI bundle, VHDX templates, the broom-done / boot-order scripts the golden's stubs run) are
-# checked against the server's sha256 on EVERY boot: the
+# 1b. The small boot files (EFI bundle, VHDX templates: the image's; the broom-done / boot-order / games scripts the
+# golden's stubs run: the server's, same for every image) are checked against the server's sha256 on EVERY boot: the
 # guest is a local admin and could swap them on BROOMWIN (e.g. a child template with its own data) to outlive the
 # reset. Wrong or missing → downloaded again.
+# check_list <list> <url dir> <names...>: the listed files among <names> made equal to the server's.
+check_list(){
+  l=$1; u=$2; shift 2
+  while read -r h f; do
+    case " $* " in *" $f "*) ;; *) continue;; esac
+    [ "$(sha256sum $B/$f 2>/dev/null | cut -c1-64)" = "$h" ] && continue
+    log "$f differs from the server's -> downloading it again"
+    if wget -q -O $B/$f.tmp $u/$f && [ "$(sha256sum $B/$f.tmp | cut -c1-64)" = "$h" ]; then
+      mv $B/$f.tmp $B/$f
+    else
+      rm -f $B/$f.tmp; restart "could not get a good $f (publish or server update running?) -> retrying"
+    fi
+  done < $l
+}
 configure_networking
 if wget -q -O /run/broom-files.sha256 http://$SRV/tftp/broom-win/$NAME/files.sha256 2>/dev/null && [ -s /run/broom-files.sha256 ]; then
   # These files belong to the golden named on the list's "golden" line: another one (published meanwhile) → reboot
   # for the new boot script instead of putting new templates next to this golden.
   g=$(sed -n 's/^\([0-9a-f]*\)  golden$/\1/p' /run/broom-files.sha256)
   [ -z "$g" ] || [ "$g" = "$HASH" ] || restart "image $NAME changed on the server -> reboot to get the new version"
-  while read -r h f; do
-    case "$f" in efi.tar.gz|child-template.vhdx|child-template.off|base-template.vhdx|broom-done.ps1|broom-bootorder.ps1) ;; *) continue;; esac
-    [ "$(sha256sum $B/$f 2>/dev/null | cut -c1-64)" = "$h" ] && continue
-    log "$f differs from the server's -> downloading it again"
-    if wget -q -O $B/$f.tmp http://$SRV/tftp/broom-win/$NAME/$f && [ "$(sha256sum $B/$f.tmp | cut -c1-64)" = "$h" ]; then
-      mv $B/$f.tmp $B/$f
-    else
-      rm -f $B/$f.tmp; restart "could not get a good $f (publish running?) -> retrying"
-    fi
-  done < /run/broom-files.sha256
+  check_list /run/broom-files.sha256 http://$SRV/tftp/broom-win/$NAME efi.tar.gz child-template.vhdx child-template.off base-template.vhdx
 else
   log "no files.sha256 on the server for $NAME (published by an older version) -> Publish again to check the boot files"
+fi
+if wget -q -O /run/broom-scripts.sha256 http://$SRV/tftp/broom-scripts/scripts.sha256 2>/dev/null && [ -s /run/broom-scripts.sha256 ]; then
+  check_list /run/broom-scripts.sha256 http://$SRV/tftp/broom-scripts broom-done.ps1 broom-bootorder.ps1 broom-games.ps1 broom-watch.ps1
+else
+  log "no scripts.sha256 on the server -> Windows scripts not checked this boot"
+fi
+
+# 1c. Preload: the other Windows images of this machine set to preload (cache-list lines "preload name hash windows")
+#     are fetched now into broom\img.<name>\ as parked sets, so choosing one later needs no download (its base is
+#     still built on its first boot). Only into free space beyond the session's room (ROOM GB): a preload never
+#     evicts anything. Downloaded into pre.<name>.<hash>\ first, resumed after a cut; the golden is checked against the
+#     server's hash when the set is taken out (step 0), like any parked set.
+pre_room(){ df -Pk $W | tail -1 | awk -v s="$1" -v h="${2:-0}" -v r="${ROOM:-20}" '{ exit !($4 * 1024 + h >= s + r * 1073741824) }'; }
+if [ -s /run/broom-cache-list ]; then
+  pl=$(sed -n 's/^preload \([A-Za-z0-9_-]*\) \([0-9a-f]*\) windows$/\1 \2/p' /run/broom-cache-list)
+  for d in $B/pre.*; do
+    [ -d "$d" ] || continue
+    printf '%s\n' "$pl" | grep -qxF "$(echo "${d#$B/pre.}" | sed 's/\./ /')" || rm -rf "$d"
+  done
+  printf '%s\n' "$pl" | while read -r n h; do
+    [ -n "$n" ] && [ "$n" != "$NAME" ] || continue
+    [ "$(cat $B/img.$n/golden.sha256 2>/dev/null)" = "$h" ] && continue
+    U=http://$SRV/tftp/broom-win/$n
+    [ "$(wget -q -O - $U/golden.sha256 2>/dev/null)" = "$h" ] || continue   # being published: next boot
+    size=$(wget -q -O - $U/golden.size 2>/dev/null); case "$size" in ''|*[!0-9]*) continue;; esac
+    P=$B/pre.$n.$h; mkdir -p $P
+    pre_room $size "$(fsize $P/golden.vhdx)" || { rm -rf $P; log "preload $n ($(gb $size)): not enough room on BROOMWIN -> skipped"; continue; }
+    log "preloading image $n ($(gb $size)) for later..."
+    ok=1
+    for f in golden.vhdx base-template.vhdx child-template.vhdx child-template.off efi.tar.gz; do
+      [ -f $P/$f.ok ] && continue
+      ( cd $P && getfile -c -O $f $U/$f ) || { rm -f $P/$f; ( cd $P && getfile -O $f $U/$f ); } || { ok=""; break; }
+      touch $P/$f.ok
+    done
+    if [ -z "$ok" ] || [ "$(fsize $P/golden.vhdx)" != "$size" ]; then log "preload $n: cut -> resumed next boot"; continue; fi
+    rm -f $P/*.ok; rm -rf $B/img.$n
+    mv $P $B/img.$n && echo "$h" > $B/img.$n/golden.sha256 && date +%s > $B/img.$n/.parked && sync && log "image $n preloaded"
+  done
 fi
 
 # DataWriteGuid of the current header (highest seq) as {..}; empty if the log was not replayed.
@@ -423,10 +470,11 @@ if [ -n "$MAC" ] && wget -q -T 10 -O /run/broom-drv.txt --post-file=/run/broom-h
 else
   log "drivers: server did not answer -> keeping the current ones"
 fi
-# Last session's writes: delete first → freed (and TRIMmed, discard mount) before the fresh child is written.
+# Last session's writes: delete first → freed (and TRIMmed, discard mount) before the fresh child is written. Same for
+# its writes on the games disk (broom-games.ps1 makes that child again once Windows is up).
 # The child is rebuilt from the (checked) template every boot, with base's DataWriteGuid as its parent link — base is
 # only ever opened read-only, so that GUID is still the one it had when committed. (child-local.vhdx: older layout.)
-rm -f child.vhdx child-local.vhdx
+rm -f child.vhdx child-local.vhdx games-*-child.vhdx
 g=""; [ -f base.vhdx ] && g=$(vhdx_guid base.vhdx)
 if [ -f base.vhdx ] && [ -z "$g" ]; then
   log "base.vhdx header unreadable -> rebuilding base"; rm -f base.vhdx base.host base.lic base.drv

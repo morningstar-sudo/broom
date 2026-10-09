@@ -53,6 +53,12 @@ pub(super) fn broom_done() -> &'static str { crate::assets::text("scripts/broom-
 /// later) are kept, after. Writes NVRAM only when different. ASCII only.
 pub(super) fn broom_bootorder() -> &'static str { crate::assets::text("scripts/broom-bootorder.ps1") }
 
+/// Games disk as a drive letter (games.rs), run by broom-bootorder.ps1 (no stub of its own: no new prep needed).
+pub(super) fn broom_games() -> &'static str { crate::assets::text("scripts/broom-games.ps1") }
+
+/// Session watchdog (SSD room), started by broom-bootorder.ps1 as its own task.
+pub(super) fn broom_watch() -> &'static str { crate::assets::text("scripts/broom-watch.ps1") }
+
 /// /broom-prep-win: embeds the guest user/password (config shared with Linux).
 pub fn prep_script(db: &dyn Db) -> String {
     let user = db.get_config("ltsp_user", "guest");
@@ -95,6 +101,7 @@ mod tests {
         assert!(!s.contains("__"), "placeholder left unreplaced");
         assert!(super::broom_done().is_ascii(), "broom-done is written with -Encoding ascii");
         assert!(super::broom_bootorder().is_ascii());
+        assert!(super::broom_games().is_ascii() && super::broom_watch().is_ascii());
         assert!(super::stub().is_ascii());
         // The golden gets the two stubs, not the scripts themselves (those come from BROOMWIN, newest every boot).
         assert!(s.contains("broom\\broom-done.ps1") && s.contains("broom\\broom-bootorder.ps1"));

@@ -634,6 +634,7 @@ mod tests {
     #[test]
     fn stage_whole_golden_download() {
         let s = super::stage_script();
+        let helpers = &s[s.find("gb(){").unwrap()..s.find("# 1. Golden hash mismatch").unwrap()];
         let part = &s[s.find("  D=$B/dl-$HASH").unwrap()..s.find("# 1b. ").unwrap()];
         let golden: Vec<u8> = (0..3_000_000u32).map(|i| (i % 251) as u8).collect();
         let run = |short: bool| {
@@ -658,7 +659,7 @@ mod tests {
                  srv_hash(){{ echo {hash}; }}\n\
                  wget(){{ for u; do :; done; cat {d}/srv/${{u##*/}}; }}\n\
                  getfile(){{ if [ \"$1\" = -c ]; then shift; fi; o=$2; u=$3; if [ \"$o\" = - ]; then cat {d}/srv/${{u##*/}} {cut}; else cat {d}/srv/${{u##*/}} {cut} > \"$o\"; fi; }}\n\
-                 if :; then\n{part}echo OK", // the cut ends with the `fi` of step 1's `if`
+                 {helpers}if :; then\n{part}echo OK", // the cut ends with the `fi` of step 1's `if`
                 d = d.display()
             );
             let o = stage_sh().args(["-c", &sh]).output().unwrap();
@@ -672,6 +673,55 @@ mod tests {
         assert_eq!(run(false), ("OK".into(), true, true, true));
         let (out, _, sum_ok, old_gone) = run(true);
         assert_eq!((out.as_str(), sum_ok, old_gone), ("DIE", false, true), "short golden never accepted");
+    }
+
+    /// Preload (step 1c, cut from stage_script(), wget/getfile/df mocked): another image of the list set to preload is
+    /// fetched whole into img.<name>\ (parked, with its hash); the booting image and Linux ones are not; an already
+    /// current set is left alone; a leftover pre.*\ no longer listed goes; no room → nothing fetched.
+    #[test]
+    fn stage_preload() {
+        let s = super::stage_script();
+        let helpers = &s[s.find("gb(){").unwrap()..s.find("# 1. Golden hash mismatch").unwrap()];
+        let part = &s[s.find("# 1c. Preload").unwrap()..s.find("# DataWriteGuid of the current header").unwrap()];
+        let run = |tag: &str, avail_kb: &str| {
+            let d = std::env::temp_dir().join(format!("broom_t_preload_{tag}"));
+            let _ = std::fs::remove_dir_all(&d);
+            for p in ["b/img.cur", "b/pre.gone.e9", "srv"] {
+                std::fs::create_dir_all(d.join(p)).unwrap();
+            }
+            std::fs::write(d.join("b/img.cur/golden.sha256"), "cc\n").unwrap();
+            for f in ["golden.vhdx", "base-template.vhdx", "child-template.vhdx", "child-template.off", "efi.tar.gz"] {
+                std::fs::write(d.join("srv").join(f), f).unwrap();
+            }
+            std::fs::write(d.join("srv/golden.size"), "11").unwrap(); // = len("golden.vhdx")
+            std::fs::write(d.join("srv/golden.sha256"), "aa").unwrap();
+            std::fs::write(
+                d.join("list"),
+                "w11 bb\nwin aa\ncur cc\nubu dd\npreload w11 bb windows\npreload win aa windows\npreload cur cc windows\npreload ubu dd linux\n",
+            )
+            .unwrap();
+            let sh = format!(
+                "B={d}/b; W={d}; SRV=x; NAME=w11\nlog(){{ :; }}\n\
+                 wget(){{ for u; do :; done; cat {d}/srv/${{u##*/}}; }}\n\
+                 getfile(){{ if [ \"$1\" = -c ]; then shift; fi; o=$2; u=$3; cat {d}/srv/${{u##*/}} > \"$o\"; }}\n\
+                 df(){{ printf 'h\\nx 100 0 {avail_kb} 0 /\\n'; }}\n{helpers}{body}",
+                d = d.display(),
+                body = part.replace("/run/broom-cache-list", &format!("{}/list", d.display()))
+            );
+            assert!(stage_sh().args(["-c", &sh]).status().unwrap().success());
+            let rd = |f: &str| std::fs::read_to_string(d.join("b").join(f)).ok();
+            let out = (rd("img.win/golden.vhdx"), rd("img.win/golden.sha256"), rd("img.win/efi.tar.gz"), d.join("b/pre.gone.e9").exists());
+            let others = (d.join("b/img.w11").exists(), d.join("b/img.ubu").exists(), rd("img.cur/golden.sha256"), d.join("b/pre.win.aa").exists());
+            let _ = std::fs::remove_dir_all(&d);
+            (out, others)
+        };
+        let s = |v: &str| Some(v.to_string());
+        assert_eq!(
+            run("room", "99999999"),
+            ((s("golden.vhdx"), s("aa\n"), s("efi.tar.gz"), false), (false, false, s("cc\n"), false)),
+            "win fetched + parked; booting / Linux / current untouched; stale pre.* gone"
+        );
+        assert_eq!(run("full", "1").0, (None, None, None, false), "no room: nothing fetched");
     }
 
     /// Image folders (cut from stage_script(), wget mocked): the booting image's set comes to the top of broom\, the
@@ -728,7 +778,8 @@ mod tests {
     fn stage_room_evicts_oldest_parked() {
         let s = super::stage_script();
         let oldest = &s[s.find("oldest(){").unwrap()..s.find("# Room for this session").unwrap()];
-        let part = format!("{oldest}\n{}", &s[s.find("  gb(){").unwrap()..s.find("  # $f.ok = file fully downloaded").unwrap()]);
+        let helpers = &s[s.find("gb(){").unwrap()..s.find("# 1. Golden hash mismatch").unwrap()];
+        let part = format!("{oldest}\n{helpers}{}", &s[s.find("  room(){").unwrap()..s.find("  # $f.ok = file fully downloaded").unwrap()]);
         let d = std::env::temp_dir().join("broom_t_room");
         let _ = std::fs::remove_dir_all(&d);
         for (n, parked) in [("b", "1700000200"), ("c", "1700000300"), ("a", "1700000100")] {
@@ -749,24 +800,24 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
     }
 
-    /// Room for the session (step 0): parked images go, oldest first, while less than 20 GB / 10 % is free; enough room
-    /// → nothing removed.
+    /// Room for the session (step 0): parked images go, oldest first, while less than the server's room (20 GB when it
+    /// doesn't answer) is free; enough room → nothing removed.
     #[test]
     fn stage_session_room() {
         let s = super::stage_script();
         let part = &s[s.find("oldest(){").unwrap()..s.find("# 1. Golden hash mismatch").unwrap()];
         let part = &part[..part.find("cd /").unwrap()]; // up to the end of step 0
-        let run = |avail_kb: &str| {
-            let d = std::env::temp_dir().join(format!("broom_t_sroom_{avail_kb}"));
+        let run = |avail_kb: &str, config: &str| {
+            let d = std::env::temp_dir().join(format!("broom_t_sroom_{avail_kb}_{}", config.len()));
             let _ = std::fs::remove_dir_all(&d);
             for (n, parked) in [("b", "200"), ("a", "100")] {
                 std::fs::create_dir_all(d.join(format!("img.{n}"))).unwrap();
                 std::fs::write(d.join(format!("img.{n}/.parked")), parked).unwrap();
             }
-            // 100 GB disk: 20 GB is the bar. Room appears once img.a is gone.
+            // Room appears once img.a is gone (30 GB free then).
             let sh = format!(
-                "B={d}; W={d}\nlog(){{ :; }}\n\
-                 df(){{ [ -d {d}/img.a ] && a={avail_kb} || a=30000000; printf 'h\\nx 104857600 0 %s 0 /\\n' $a; }}\n{part}",
+                "B={d}; W={d}; SRV=x\nlog(){{ :; }}; wget(){{ printf '{config}'; }}\n\
+                 df(){{ [ -d {d}/img.a ] && a={avail_kb} || a=31457280; printf 'h\\nx 104857600 0 %s 0 /\\n' $a; }}\n{part}",
                 d = d.display()
             );
             assert!(stage_sh().args(["-c", &sh]).status().unwrap().success());
@@ -774,8 +825,10 @@ mod tests {
             let _ = std::fs::remove_dir_all(&d);
             out
         };
-        assert_eq!(run("1000"), (false, true), "short of room → the oldest parked image goes, then enough");
-        assert_eq!(run("25000000"), (true, true), "25 GB free → nothing removed");
+        assert_eq!(run("1000", ""), (false, true), "no answer = 20 GB: short of room → the oldest parked image goes, then enough");
+        assert_eq!(run("26214400", ""), (true, true), "25 GB free → nothing removed");
+        assert_eq!(run("26214400", "28 10 3\\n"), (false, true), "server's room 28 GB: 25 GB free is short");
+        assert_eq!(run("26214400", "junk"), (true, true), "a bad answer = 20 GB");
     }
 
     /// Real HTTPS download (GitHub release → redirect to its CDN): cargo test download_https -- --ignored

@@ -144,6 +144,53 @@ sent, in parallel 8 MB chunks with retry) — or a single `.vmdk` / `.img` / `.z
   (games need it), so a determined guest can still interfere with the boot setup of the machine they sit at — keep
   the boot LAN segmented and check the flag.
 
+## Machine groups: images, SSD cache, games disks
+
+A machine's **group** decides what it gets; everything set for no group goes to every machine (registered or not).
+The **Groups** page shows each group with its machines, images, games disks and driver packages, and edits them in one
+place (create / rename / delete a group; tick what belongs to it). Removing the last group of an image or games disk
+asks first: it would then go to every machine.
+
+- **Images → Groups**: the boot menu lists only the images of the machine's group (choosing another one by hand is
+  refused). Default entry: the machine's own image if on its menu, else the global default; neither → no countdown.
+  This organizes the menus, it is not access control — the goldens themselves are readable on the boot LAN.
+- **SSD cache**: a machine keeps on its SSD only the images of its group (`/api/cache-list` answers per machine); an
+  image taken off its group is removed from its SSD at its next boot. Each image is downloaded once and kept (Windows:
+  `broom\img.<image>\` with its base; Linux: the cache partition); the one unused the longest goes when space runs out.
+- **Preload** (Windows images): the machines of its groups fetch it onto their SSD ahead of use, while booting another
+  image (that boot takes longer once per publish), so choosing it later needs no download — only its base is built on
+  its first boot. Only into free space beyond the session's room: a preload never evicts anything.
+- **Games disks** (below): each disk for some groups, or all.
+
+### SSD room (Windows)
+
+Everything a guest writes (C:, games drives) lands on the machine's SSD until the next boot. **Settings → SSD room**:
+the stage frees *Keep free* GB at each boot (parked images, unused the longest first); during the session a watchdog
+(`broom-watch.ps1`) checks the SSD every 15 s — below *Warn* it tells the guest and flags the machine (*SSD full* on the
+Machines page), below *Restart* it restarts the machine after 60 s. Without it Windows stops with a blue screen once
+the SSD is full (it can't grow its boot VHDX) — and C: shows the VHDX's virtual free space, so Windows never warns.
+Big writes come mostly from launchers updating games on the machines: let only the games disk's update machine do it.
+
+## Games disks (Windows)
+
+Images → **Games disks**: disks on the server (`games/<name>/games.img`, sparse) for the Windows machines — game
+libraries live there instead of in the golden. A machine gets every disk of its group plus those for all machines, each
+under its drive letter (two disks a machine could both get can't share one). The iSCSI daemon serves them read-only;
+each machine opens the `games.vhdx` inside through a differencing VHDX on its own SSD (`broom\games-<name>-child.vhdx`,
+deleted every boot), so a guest's writes stay on that machine until reboot and a games disk never changes. Mapping
+changes apply at each machine's next boot; nothing in the golden changes.
+
+To install or update games: pick the disk's **update machine** → (re)boot it → that drive is writable there (its writes
+are kept apart on the server) → install → shut it down properly → **Save**: a new version (`g1`, `g2`…) at once, no
+copy — the changed blocks become a layer over `games.img`. Each machine gets the new version at its next boot; machines
+already playing keep theirs. Once no machine has used an older version for 10 minutes, the layers are merged into
+`games.img` in the background. A new disk is formatted by its first update machine; the size can only grow (the update
+machine extends the drive on its next boot). No rollback for a games disk — back up its `games.img`.
+
+The Windows scripts (`broom-done`, `broom-bootorder`, `broom-games`, `broom-watch`) are the server's, not the images': written to
+`tftp/broom-scripts/` at every start and checked by the stage on every boot, so a new version reaches every machine
+without a publish. Images published before this version need **Publish** once to switch over.
+
 ## Versions, export
 
 - **Versions** (Images → Versions): snapshot / rollback the golden. A version is a hard link to the golden file of that
@@ -166,6 +213,7 @@ Everything lives next to the binary:
 ├── bootrom.db       # config, images, machines, leases (SQLite)
 ├── images/<name>/   # image.img = golden (raw, sparse)
 ├── storage/         # image versions (hard links to the goldens + manifests)
+├── games/<name>/    # games.img = a Windows games disk; layer-N/ = newer versions not merged yet; update.* = unsaved
 ├── tftp/            # boot files (kernel/initrd, Windows templates, stage) — served over HTTP /tftp + TFTP
 └── work/            # scratch for publish steps
 ```
@@ -208,6 +256,8 @@ changes it and signs out every other session. A few properties are inherent to d
 - **Update `disk`-cache images off-hours.** A `disk` image serves one shared golden file and refuses to
   publish or roll back while clients are connected (they would read changed bytes). Use the RAM (`zram`) cache to
   update live: each publish gets a fresh RAM copy + target, and the old one is kept until its clients drop.
+- **Games disk writes** are allowed from that disk's update machine IP only (iSCSI has no other proof of who is
+  connecting): a host faking that IP could write into the pending update. Check before saving; segment the LAN.
 
 ## Build
 

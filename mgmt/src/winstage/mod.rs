@@ -18,7 +18,7 @@ mod prep;
 mod stage;
 
 pub use prep::prep_script;
-use prep::{boot_storage_done, has_stub, broom_bootorder, broom_done};
+use prep::{boot_storage_done, has_stub, broom_bootorder, broom_done, broom_games, broom_watch};
 pub use stage::{build_bundle, ensure_stage};
 #[cfg(feature = "external-assets")]
 pub(crate) use stage::download; // assets.rs: the release's broom-assets.zip
@@ -31,6 +31,35 @@ use crate::{images_dir, SharedState};
 /// Windows stage (kernel + initrd) served at /tftp/broom-stage/.
 fn stage_dir() -> String {
     crate::tftp_dir().join("broom-stage").to_string_lossy().into_owned()
+}
+
+/// The Windows scripts the stage puts in BROOMWIN broom\ (the golden only holds fixed stubs that run them).
+const SCRIPTS: [(&str, fn() -> &'static str); 4] =
+    [("broom-done.ps1", broom_done), ("broom-bootorder.ps1", broom_bootorder), ("broom-games.ps1", broom_games), ("broom-watch.ps1", broom_watch)];
+
+/// At start: the Windows scripts of this version into tftp/broom-scripts/ + their scripts.sha256, which the stage
+/// checks BROOMWIN's copies against on every boot — like the stage itself, a new mgmt version reaches every client at
+/// its next boot, for every image, without a publish. Files first, list last (each by rename): a stage reading
+/// meanwhile gets a mismatch at worst, and reboots to try again.
+pub fn install_scripts() -> Result<(), String> {
+    let dir = crate::tftp_dir().join("broom-scripts");
+    std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    let mut sums = String::new();
+    for (f, body) in SCRIPTS {
+        let body = body().replace('\n', "\r\n");
+        let p = dir.join(f);
+        if std::fs::read(&p).ok().as_deref() != Some(body.as_bytes()) {
+            let tmp = dir.join(format!("{f}.tmp"));
+            std::fs::write(&tmp, &body).and_then(|_| std::fs::rename(&tmp, &p)).map_err(|e| format!("{}: {e}", p.display()))?;
+        }
+        let h = crate::hash::file_hash(&p.to_string_lossy()).ok_or(format!("sha256 of {f} failed"))?;
+        sums.push_str(&format!("{h}  {f}\n"));
+    }
+    let (p, tmp) = (dir.join("scripts.sha256"), dir.join("scripts.sha256.tmp"));
+    if std::fs::read_to_string(&p).ok().as_deref() != Some(sums.as_str()) {
+        std::fs::write(&tmp, &sums).and_then(|_| std::fs::rename(&tmp, &p)).map_err(|e| format!("{}: {e}", p.display()))?;
+    }
+    Ok(())
 }
 
 pub(crate) fn run(bin: &str, args: &[&str]) -> Result<String, String> {
@@ -113,14 +142,12 @@ pub fn publish(st: &SharedState, id: i64, name: &str, steps: &mut crate::publish
     // The stage checks these small files against this list on every boot (a guest could swap them on the SSD).
     // First line: the golden these files belong to — the stage applies them only to that golden (a client still on
     // the previous hash during a publish never gets the new templates next to its old golden).
-    // broom-done / boot-order: the golden only holds a fixed stub (prep) that runs the copy the stage puts in BROOMWIN
-    // broom\ — so a new mgmt version updates them without rebuilding the golden.
-    for (f, body) in [("broom-done.ps1", broom_done()), ("broom-bootorder.ps1", broom_bootorder())] {
-        let (p, tmp) = (format!("{out}/{f}"), format!("{out}/{f}.tmp"));
-        std::fs::write(&tmp, body.replace('\n', "\r\n")).and_then(|_| std::fs::rename(&tmp, &p)).map_err(|e| format!("{f}: {e}"))?;
+    // (The Windows scripts are not per image: install_scripts.)
+    for f in SCRIPTS.iter().map(|(f, _)| f) {
+        let _ = std::fs::remove_file(format!("{out}/{f}")); // per-image copies of older versions
     }
     let mut sums = format!("{hash}  golden\n");
-    for f in ["efi.tar.gz", "child-template.vhdx", "child-template.off", "base-template.vhdx", "broom-done.ps1", "broom-bootorder.ps1"] {
+    for f in ["efi.tar.gz", "child-template.vhdx", "child-template.off", "base-template.vhdx"] {
         let h = crate::hash::file_hash(&format!("{out}/{f}")).ok_or(format!("sha256 of {f} failed"))?;
         sums.push_str(&format!("{h}  {f}\n"));
     }

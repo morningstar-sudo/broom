@@ -12,7 +12,7 @@ for(const ev of ['click','change','input'])document.addEventListener(ev,e=>{
 });
 
 // ---- tabs: load HTML fragments on demand (/ui/<page>) + only load data for the tab being viewed ----
-const loaders={machines:loadStatus,devices:loadDevices,images:loadImages,drivers:loadDrivers,network:loadDhcp,system:loadCafe};
+const loaders={machines:loadStatus,devices:loadDevices,groups:loadGroups,images:()=>{loadImages();loadGames();},drivers:loadDrivers,network:loadDhcp,system:loadCafe};
 const fragCache={};
 let curPage=null;
 async function showPage(p){
@@ -68,7 +68,7 @@ function renderMachines(){
        <td>${m.hostname?esc(m.hostname):'<span class="mono">—</span>'} ${m.registered?'':'<span class="pill new">new</span>'}</td>
        <td class="mono">${m.grp?esc(m.grp):'—'}</td>
        <td class="mono">${esc(m.ip)}</td><td class="mono">${esc(m.mac)}</td>
-       <td><span class="led ${m.online?'on':'off'}">${m.online?'ON':'OFF'}</span>${m.not_reset?' <span class="pill" style="background:var(--off,#c33);color:#fff" title="Windows started from the SSD without a PXE boot at '+new Date(m.not_reset*1000).toLocaleString()+' — this session was NOT reset (cable out, server down, boot order changed?). Cleared by the next PXE boot.">not reset</span>':''}</td>
+       <td><span class="led ${m.online?'on':'off'}">${m.online?'ON':'OFF'}</span>${m.not_reset?' <span class="pill" style="background:var(--off,#c33);color:#fff" title="Windows started from the SSD without a PXE boot at '+new Date(m.not_reset*1000).toLocaleString()+' — this session was NOT reset (cable out, server down, boot order changed?). Cleared by the next PXE boot.">not reset</span>':''}${m.ssd_low?' <span class="pill" style="background:var(--off,#c33);color:#fff" title="SSD almost full during the session: '+gbs(m.ssd_low[0])+' free at '+new Date(m.ssd_low[1]*1000).toLocaleString()+' (the guest wrote a lot; Settings → SSD room). Cleared by the next PXE boot.">SSD full</span>':''}</td>
        <td class="mono" title="${esc(m.license_result||'')}">${licCell(m)}</td>
        <td class="row">${m.registered
           ? `<button class="ghost" ${act('wake',m.mac)}>Wake</button>
@@ -242,6 +242,7 @@ async function loadImages(){
   const rows=imgRows=await j('/api/images');
   document.querySelector('#images tbody').innerHTML=rows.map(i=>
     `<tr><td>${esc(i.name)}${i.export?`<div class="mono" style="font-size:12px" title="exported ${i.export.created?new Date(i.export.created*1000).toLocaleString():''} — save both into one folder, open the .vmx in VMware">⬇ <a href="/api/images/export-file?id=${i.id}&f=vmx">.vmx</a> · <a href="/api/images/export-file?id=${i.id}&f=vmdk">.vmdk ${gbs(i.export.size)}</a> (${esc(i.export.version)})</div>`:''}</td><td><span class="pill ${i.os}">${esc(i.os)}</span></td>
+       <td><a href="#" ${act('editImgGroups',i.id,i.name,i.groups)} title="machine groups that get it in their boot menu">${i.groups.length?esc(i.groups.join(', ')):'all'}</a></td>
        <td class="mono">${i.cache_mode==='zram'?'RAM':'disk'}</td>
        <td>${i.is_default?'<span class="ok">✓</span>':''}</td>
        <td>${i.boot_script?'<span class="ok">✓</span>':'<span class="mono">no</span>'}</td>
@@ -251,12 +252,13 @@ async function loadImages(){
          <button class="ghost" ${act('setDefault',i.id)}>Default</button>
          <button class="ghost" ${act('toggleCache',i.id,i.cache_mode||'disk',i.name)}>${(i.cache_mode==='zram')?'→disk':'→RAM'}</button>
          ${i.os==='windows'?`<button class="ghost" ${act('toggleBase',i.id,!i.base_mode)} title="BASE MODE: the first logon on each machine waits for a technician to set up apps, then restart (saved for every boot). Off: base is saved by itself.">${i.base_mode?'Base mode: ON':'Base mode: off'}</button>`:`<button class="ghost" ${act('toggleSsd',i.id,!i.use_ssd)} title="On: the golden is cached and the session's writes go to the machine's SSD (reset every boot). Off (one-time): nothing touches the SSD — golden over the network, writes in RAM, gone at power-off.">${i.use_ssd?'SSD: on':'SSD: off (one-time)'}</button>`}
+         ${i.os==='windows'?`<button class="ghost" ${act('togglePreload',i.id,!i.preload)} title="On: every machine that may boot it keeps it on its SSD ahead of use (fetched while another image boots: that boot takes longer once), so choosing it needs no download (its base is still built on its first boot). Off: fetched the first time it is chosen.">${i.preload?'Preload: on':'Preload: off'}</button>`:''}
          <button class="ghost" ${act('republish',i.id,i.name)}>Republish</button>
          <button class="ghost" ${act('showVersions',i.id,i.name,i.os)}>Versions</button>
          <button class="ghost" ${act('exportImage',i.id,i.name,null)} title="download as a VMware VM (.vmx + .vmdk) to edit the golden">Export</button>
          <button class="ghost" ${act('editBoot',i.id)}>Boot</button>
          <button class="ghost danger" ${act('delImage',i.id,i.name)}>Delete</button>
-       </td></tr>`).join('') || '<tr><td colspan=8 class="mono">no images yet</td></tr>';
+       </td></tr>`).join('') || '<tr><td colspan=9 class="mono">no images yet</td></tr>';
   // A job still running that this tab doesn't follow (page reloaded / opened meanwhile) → follow it on the status line.
   for(const i of rows)if(i.job&&i.job.startsWith('⏳')&&!jobWatch[i.name])watchJob(i.name,document.getElementById('img_status'));
   // srvhost inside the images fragment → set after it is injected.
@@ -273,6 +275,13 @@ async function toggleBase(id,on){
 async function toggleSsd(id,on){
   const el=document.getElementById('img_status');
   try{await j('/api/images/ssd',mk({id,on}));loadImages();}catch(e){el.textContent=' ✗ '+e.message;}}
+async function togglePreload(id,on){
+  const el=document.getElementById('img_status');
+  try{await j('/api/images/preload',mk({id,on}));loadImages();}catch(e){el.textContent=' ✗ '+e.message;}}
+async function editImgGroups(id,name,groups,el,e){e.preventDefault();
+  const g=prompt('Machine groups that get '+name+' in their boot menu, comma-separated (Devices page groups). Empty = every machine:',groups.join(', '));
+  if(g===null)return;const st=document.getElementById('img_status');
+  try{await j('/api/images/groups',mk({id,groups:[g]}));loadImages();}catch(err){st.textContent=' ✗ '+err.message;}}
 async function setDefault(id){await j('/api/images/default',mk({id}));loadImages()}
 // Job status by image name, pushed over SSE (/api/events "job") → text of el until ✓/✗.
 // done(): optional, called when the job finishes (e.g. refresh the versions list).
@@ -422,10 +431,77 @@ async function applyDhcp(){const b={};['mode','iface','server_ip','subnet','netm
   const m=document.getElementById('dhcp_msg');
   try{const r=await j('/api/dhcp',mk(b));m.textContent=' ✓ '+(r.status||'applied');}catch(e){m.textContent=' ✗ '+e.message;}}
 
+// ---- games disks (Images page) ----
+let gmDisks=[];
+async function loadGames(){const g=await j('/api/games');const tb=document.querySelector('#games tbody');if(!tb)return;
+  gmDisks=g.disks;
+  document.getElementById('gm_grouplist').innerHTML=g.groups.map(x=>`<option value="${esc(x)}">`).join('');
+  const opts=sel=>'<option value="">— none —</option>'+g.machines.map(m=>
+    `<option value="${m.id}"${m.id===sel?' selected':''}>${esc(m.name)}${m.grp?' ('+esc(m.grp)+')':''}</option>`).join('');
+  tb.innerHTML=g.disks.map(x=>{const d=x.disk,s=x.status;
+    return `<tr><td>${esc(d.name)}</td><td class="mono">${esc(d.letter)}:</td><td class="mono">${d.size_gb} GB</td>
+      <td>${d.groups.length?esc(d.groups.join(', ')):'<span class="mono">all</span>'}</td>
+      <td class="mono">${s?'g'+s.ver+(s.layers?` <span title="versions not merged into the disk yet (${gbs(s.layer_bytes)})">+${s.layers} ${s.merging?'merging…':'to merge'}</span>`:''):'<span class="no">not served</span>'}</td>
+      <td class="mono">${s?s.sessions+(s.old_sessions?` <span title="still on an older version until they reboot">(${s.old_sessions} older)</span>`:''):''}</td>
+      <td><select data-change="setGamesUpdate" data-args="${esc(JSON.stringify([d.name]))}">${opts(d.update)}</select>${d.update!=null&&!x.update_ip?' <span class="no" title="no fixed IP or lease known">no IP</span>':''}${s&&s.update_connected?' <span class="ok">● writable</span>':''}</td>
+      <td class="mono">${s&&s.update_bytes?gbs(s.update_bytes)+` <button ${act('saveGamesUpdate',d.name)}>Save</button> <button class="ghost" ${act('discardGamesUpdate',d.name)}>Discard</button>`:'—'}</td>
+      <td><button class="ghost" ${act('editGames',d.name)}>Edit</button> <button class="ghost" ${act('delGames',d.name)}>Delete</button></td></tr>`;}).join('')
+    ||'<tr><td colspan="9" class="hint">no games disk yet</td></tr>';}
+async function gamesCall(url,body,ask){if(ask&&!confirm(ask))return;const m=document.getElementById('gm_msg');
+  try{const r=await j(url,mk(body));m.textContent=' ✓ '+(r.status||'saved');}catch(e){m.textContent=' ✗ '+e.message;}loadGames();}
+const saveGames=()=>gamesCall('/api/games/disk',{name:v('gm_name'),letter:v('gm_letter'),size_gb:+v('gm_size'),groups:[v('gm_groups')]});
+const setGamesUpdate=(name,el)=>gamesCall('/api/games/update',{name,id:el.value?+el.value:null});
+const saveGamesUpdate=name=>gamesCall('/api/games/save',{name},'Save the update of '+name+' as its new version? Its update machine must be shut down. Each machine gets it at its next boot.');
+const discardGamesUpdate=name=>gamesCall('/api/games/discard',{name},'Throw the update of '+name+' away?');
+const delGames=name=>gamesCall('/api/games/delete',{name},'Delete games disk '+name+' and EVERY game on it? Machines using it keep it until they reboot.');
+function editGames(name){const d=gmDisks.find(x=>x.disk.name===name).disk;
+  for(const [k,val] of [['gm_name',d.name],['gm_letter',d.letter],['gm_size',d.size_gb],['gm_groups',d.groups.join(', ')]])document.getElementById(k).value=val;}
+
+// ---- groups (Groups page) ----
+let grData=null,grCur=null;
+const grIn=(x,n)=>x.groups.some(y=>y.toLowerCase()===n.toLowerCase());
+const grNames=l=>l.length?l.map(x=>esc(x.name)+(x.letter?' ('+esc(x.letter)+':)':'')).join(', '):'—';
+async function loadGroups(){const g=grData=await j('/api/groups');const tb=document.querySelector('#groups tbody');if(!tb)return;
+  const cnt=n=>g.machines.filter(m=>(m.grp||'').toLowerCase()===n.toLowerCase()).length;
+  tb.innerHTML=g.groups.map(n=>`<tr><td><b>${esc(n)}</b></td><td class="mono">${cnt(n)}</td>
+      <td>${grNames(g.images.filter(x=>grIn(x,n)))}</td><td>${grNames(g.disks.filter(x=>grIn(x,n)))}</td><td>${grNames(g.drivers.filter(x=>grIn(x,n)))}</td>
+      <td class="row"><button class="ghost" ${act('editGroup',n)}>Edit</button> <button class="ghost" ${act('renameGroup',n)}>Rename</button> <button class="ghost danger" ${act('deleteGroup',n)}>Delete</button></td></tr>`).join('')
+    +`<tr><td><i>every machine</i></td><td class="mono" title="machines without a group">${g.machines.filter(m=>!m.grp).length} without</td>
+      <td>${grNames(g.images.filter(x=>!x.groups.length))}</td><td>${grNames(g.disks.filter(x=>!x.groups.length))}</td><td>${grNames(g.drivers.filter(x=>x.all))}</td><td></td></tr>`;
+  if(grCur&&g.groups.some(n=>n===grCur))editGroup(grCur);else closeGroup();}
+function editGroup(n){if(!grData)return;grCur=n;const g=grData,lc=n.toLowerCase();
+  document.getElementById('gr_edit').style.display='';document.getElementById('gr_title').textContent='Group '+n;document.getElementById('gr_emsg').textContent='';
+  const box=(v,on,label,off,title)=>`<label style="display:block;white-space:nowrap"${title?` title="${esc(title)}"`:''}><input type="checkbox" data-v="${esc(String(v))}"${on?' checked':''}${off?' disabled':''}> ${label}</label>`;
+  const all=' <span class="mono">(every machine)</span>',allT='for every machine — limit it to groups on its own page';
+  document.getElementById('gr_machines').innerHTML=g.machines.map(m=>box(m.id,(m.grp||'').toLowerCase()===lc,
+    esc(m.name)+(m.grp&&m.grp.toLowerCase()!==lc?` <span class="mono">(${esc(m.grp)})</span>`:''))).join('')||'—';
+  document.getElementById('gr_images').innerHTML=g.images.map(i=>box(i.id,!i.groups.length||grIn(i,n),
+    esc(i.name)+` <span class="pill ${esc(i.os)}">${esc(i.os)}</span>`+(i.groups.length?'':all),!i.groups.length,i.groups.length?'':allT)).join('')||'—';
+  document.getElementById('gr_disks').innerHTML=g.disks.map(d=>box(d.name,!d.groups.length||grIn(d,n),
+    esc(d.name)+' ('+esc(d.letter)+':)'+(d.groups.length?'':all),!d.groups.length,d.groups.length?'':allT)).join('')||'—';
+  document.getElementById('gr_drivers').innerHTML=g.drivers.map(d=>box(d.id,d.all||grIn(d,n),
+    esc(d.name)+(d.all?all:''),d.all,d.all?'for every machine — change it on the Drivers page':'')).join('')||'—';}
+function closeGroup(){grCur=null;const e=document.getElementById('gr_edit');if(e)e.style.display='none';}
+async function saveGroup(){const m=document.getElementById('gr_emsg');
+  const ids=(id,num)=>[...document.querySelectorAll('#'+id+' input:checked:not(:disabled)')].map(e=>num?+e.dataset.v:e.dataset.v);
+  const body={name:grCur,machines:ids('gr_machines',1),images:ids('gr_images',1),disks:ids('gr_disks',0),drivers:ids('gr_drivers',1)};
+  try{await j('/api/groups/set',mk(body));m.textContent=' ✓ saved';}
+  catch(e){if(/EVERY machine/.test(e.message)&&confirm(e.message+'.\n\nSave anyway?')){
+      try{await j('/api/groups/set',mk({...body,allow_all:true}));m.textContent=' ✓ saved';}catch(e2){m.textContent=' ✗ '+e2.message;}}
+    else m.textContent=' ✗ '+e.message;}
+  loadGroups();}
+async function grCall(url,body,el){const m=document.getElementById(el||'gr_msg');
+  try{await j(url,mk(body));m.textContent=' ✓ done';}catch(e){m.textContent=' ✗ '+e.message;}loadGroups();}
+const createGroup=()=>{const n=v('gr_new');if(n)grCall('/api/groups/create',{name:n}).then(()=>{document.getElementById('gr_new').value='';});};
+function renameGroup(n){const to=prompt('New name for group '+n+' (an existing name merges the two):',n);
+  if(to&&to!==n){if(grCur===n)grCur=to.trim();grCall('/api/groups/rename',{from:n,to});}}
+function deleteGroup(n){if(confirm('Delete group '+n+'? Its machines get no group; it leaves every image, games disk and driver package.'))grCall('/api/groups/delete',{name:n});}
+
 // ---- system ----
 async function loadCafe(){
   j('/api/config').then(c=>{const t=document.getElementById('timeout'),z=document.getElementById('zram_reserve');
-    if(t)t.value=c.boot_timeout;if(z)z.value=c.zram_reserve_mb;}).catch(()=>{});
+    if(t)t.value=c.boot_timeout;if(z)z.value=c.zram_reserve_mb;
+    for(const k of ['room','warn','reboot']){const e=document.getElementById('ssd_'+k);if(e)e.value=c['ssd_'+k+'_gb'];}}).catch(()=>{});
   const c=await j('/api/cafe-user');
   const u=document.getElementById('cafe_user');if(u)u.value=c.user||'';
   const p=document.getElementById('cafe_password');if(p)p.placeholder=c.password_set?'(unchanged)':'set a password';}
@@ -441,6 +517,9 @@ async function savePw(){const m=document.getElementById('pw_msg'),g=id=>document
     for(const id of ['pw_cur','pw_new','pw_new2'])document.getElementById(id).value='';}
   catch(e){m.textContent=' ✗ '+e.message;}}
 async function setTimeout_(){await j('/api/config/timeout',mk({seconds:+document.getElementById('timeout').value}));document.getElementById('to_msg').textContent=' ✓ saved';}
+async function setSsd(){const m=document.getElementById('ssd_msg');
+  try{await j('/api/config/ssd',mk({room_gb:+v('ssd_room'),warn_gb:+v('ssd_warn'),reboot_gb:+v('ssd_reboot')}));m.textContent=' ✓ saved';}
+  catch(e){m.textContent=' ✗ '+e.message;}}
 async function setZramReserve(){await j('/api/config/zram-reserve',mk({mb:+document.getElementById('zram_reserve').value}));document.getElementById('zr_msg').textContent=' ✓ saved';}
 
 // ---- server liveness (SSE /api/events: "ping" on connect + every 5 s) ----
@@ -474,10 +553,12 @@ const ACTIONS={
   dvToggle:(k,el)=>dvToggle(k,el.checked), dvSelectAll:el=>dvSelectAll(el.checked),
   wake,manage,regMachine,loadStatus,clearMFilters,mPrev,mNext,setKey,rearmKey,
   loadDevices,dvOpen,dvSave,dvDelete,dvClose,dvBulk,dvRegister,dvImport,dvAdd,dvRender,
-  loadImages,addImage,setDefault,toggleCache,toggleBase,toggleSsd,republish,showVersions,exportImage,editBoot,delImage,
+  loadImages,addImage,setDefault,toggleCache,toggleBase,toggleSsd,togglePreload,editImgGroups,republish,showVersions,exportImage,editBoot,delImage,
   snapshotImage,rollbackImage,versionToImage,deleteVersion,
+  loadGames,saveGames,setGamesUpdate,saveGamesUpdate,discardGamesUpdate,editGames,delGames,
   loadDrivers,uploadDriver,saveDrvTargets,delDriver,
-  applyDhcp,savePw,saveCafe,setTimeout_,setZramReserve,logout,
+  loadGroups,editGroup,closeGroup,saveGroup,createGroup,renameGroup,deleteGroup,
+  applyDhcp,savePw,saveCafe,setTimeout_,setZramReserve,setSsd,logout,
 };
 
 let started=false;

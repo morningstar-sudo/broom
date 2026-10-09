@@ -36,6 +36,8 @@ struct MachineStatus {
     notes: Option<String>,
     /// Started Windows without a PXE boot just before (session not reset) — unix time, until the next PXE boot.
     not_reset: Option<u64>,
+    /// SSD almost full during the session: (bytes free, unix time), until the next PXE boot.
+    ssd_low: Option<(u64, u64)>,
 }
 
 /// Machines = registered (machines table) + discovered via DHCP (leases table, dhcp.rs) or a PXE boot (pxe_ip).
@@ -90,6 +92,7 @@ async fn status(State(st): State<SharedState>) -> Json<Vec<MachineStatus>> {
         }
     }
     let not_reset = st.not_reset.lock().unwrap().clone();
+    let ssd_low = st.ssd_low.lock().unwrap().clone();
     let mut out: Vec<MachineStatus> = entries
         .into_iter()
         .zip(online)
@@ -104,6 +107,7 @@ async fn status(State(st): State<SharedState>) -> Json<Vec<MachineStatus>> {
                 image_id: m.as_ref().and_then(|m| m.image_id),
                 notes: m.and_then(|m| m.notes),
                 not_reset: not_reset.get(&mac).copied(),
+                ssd_low: ssd_low.get(&mac).copied(),
                 mac,
                 ip,
                 hostname,
