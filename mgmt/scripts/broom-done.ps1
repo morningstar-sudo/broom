@@ -86,7 +86,7 @@ if (-not [IO.File]::Exists($v.Path + 'broom\basemode.txt')) {
 # THIS machine (e.g. FACEIT AC: open it, it wants one restart through its own RESTART button), then restarts -> that
 # restart commits base. Nobody there -> the next clean restart / shutdown commits it, whoever used the machine
 # meanwhile. A hard power-off does NOT (the VHDX is left dirty -> base is built again, the setup is lost).
-step 'BASE MODE: set up apps now (e.g. open FACEIT AC), then RESTART - that restart saves base for every boot'
+step 'BASE MODE: set up apps now), then RESTART - that restart saves base for every boot'
 $msg = "BASE MODE - this machine is building its base.`n`n" +
   "Everything done now is KEPT on this machine after every reset.`n`n" +
   "1. Open FACEIT AC (or other apps) and set them up.`n" +
