@@ -1,8 +1,11 @@
-// goldenram.rs — the RAM cache mode of Windows images: golden.vhdx held compressed in RAM (iscsid::ramimg, the same
-// 16 KB zstd blocks as the Linux RAM targets) and downloaded by the stages from there. After a publish a whole room
-// fetches the new golden at once: 30 streams at 30 different offsets keep an HDD seeking for an hour; from RAM the
-// disk is never touched. The file on disk stays the source: served from it while the copy loads, when the copy is
-// stale (golden rebuilt) or when the image is set back to disk.
+// goldenram.rs — what the stages download as tftp/broom-win/<name>/golden.vhdx. It is not a file: the VHDX is made
+// on the fly from image.img (vhdx::Virtual — header in memory, payload read straight from the raw disk), so a publish
+// never writes a 50 GB copy. Cache mode RAM: the same bytes held compressed in RAM (iscsid::ramimg, the same 16 KB
+// zstd blocks as the Linux RAM targets) — after a publish a whole room fetches the new golden at once, 30 streams at
+// 30 offsets would keep the disk seeking for an hour; from RAM it is never touched.
+// The golden being served keeps image.img open: a new upload / rollback renamed over it changes nothing until the
+// publish that installs the new golden. An image published by an older version (a real golden.vhdx file, no
+// golden.id) is served from that file until it is published again.
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, LazyLock, Mutex};
@@ -15,60 +18,103 @@ use axum::response::{IntoResponse, Response};
 use crate::iscsid::ramimg::RamImage;
 use crate::SharedState;
 
-/// image name → (hash::stamp of golden.vhdx it was loaded from, the copy).
-static COPIES: LazyLock<Mutex<HashMap<String, (String, Arc<RamImage>)>>> = LazyLock::new(Default::default);
-
-fn golden(name: &str) -> PathBuf {
-    crate::tftp_dir().join("broom-win").join(name).join("golden.vhdx")
+/// The golden an image serves right now.
+pub struct Golden {
+    /// hash::stamp of image.img when it was built (saved as golden.id): the same id → the same bytes and sha256.
+    pub id: String,
+    pub vhdx: Arc<crate::vhdx::Virtual>,
+    ram: Option<Arc<RamImage>>,
 }
 
-/// Make the RAM copy of an image's golden follow its cache mode: `ram` → loaded (kept if already from this very
-/// file), else dropped. Blocking (~a minute for 12 GB). Err = refused (RAM) or failed: the caller goes back to disk.
-pub fn sync(st: &SharedState, name: &str, ram: bool) -> Result<(), String> {
-    let p = golden(name);
-    let stamp = crate::hash::stamp(&p);
-    let mut copies = COPIES.lock().unwrap();
-    if !ram {
-        copies.remove(name);
+impl Golden {
+    fn size(&self) -> u64 {
+        self.vhdx.len()
+    }
+    fn read_at(&self, off: u64, buf: &mut [u8]) -> Result<(), String> {
+        match &self.ram {
+            Some(r) => r.read_at(off, buf),
+            None => self.vhdx.read_at(off, buf),
+        }
+    }
+}
+
+static SERVED: LazyLock<Mutex<HashMap<String, Arc<Golden>>>> = LazyLock::new(Default::default);
+
+fn served(name: &str) -> Option<Arc<Golden>> {
+    SERVED.lock().unwrap().get(name).cloned()
+}
+
+/// Id of the golden an image serves (None: none built by this version yet).
+pub fn served_id(name: &str) -> Option<String> {
+    served(name).map(|g| g.id.clone())
+}
+
+/// Serve this golden from now on (publish, start); no RAM copy yet (set_ram).
+pub fn install(name: &str, id: &str, vhdx: crate::vhdx::Virtual) {
+    SERVED.lock().unwrap().insert(name.to_string(), Arc::new(Golden { id: id.to_string(), vhdx: Arc::new(vhdx), ram: None }));
+}
+
+/// Make the served golden's RAM copy follow the cache mode: `ram` → loaded (kept if there), else dropped. Blocking
+/// (~a minute for 12 GB). Err = refused (RAM) or failed: the caller goes back to disk.
+pub fn set_ram(st: &SharedState, name: &str, ram: bool) -> Result<(), String> {
+    let g = served(name).ok_or("golden not built yet")?;
+    if ram == g.ram.is_some() {
         return Ok(());
     }
-    let stamp = stamp.ok_or_else(|| format!("{}: no golden", p.display()))?;
-    if copies.get(name).is_some_and(|(s, _)| *s == stamp) {
-        return Ok(());
+    let copy = if ram {
+        let v = g.vhdx.clone();
+        let blocks = v.len().div_ceil(crate::iscsid::ramimg::BLOCK as u64);
+        Some(Arc::new(RamImage::load_with(name, v.len(), blocks, crate::publish::ram_reserve(st), |off, buf| v.read_at(off, buf))?))
+    } else {
+        None
+    };
+    let mut s = SERVED.lock().unwrap();
+    // Only onto the golden it was made from (jobs of an image never overlap, so it is still that one).
+    if s.get(name).is_some_and(|cur| cur.id == g.id) {
+        s.insert(name.to_string(), Arc::new(Golden { id: g.id.clone(), vhdx: g.vhdx.clone(), ram: copy }));
     }
-    copies.remove(name); // the old copy's RAM back before checking room for the new one
-    drop(copies);
-    let img = RamImage::load(&p.to_string_lossy(), crate::publish::ram_reserve(st))?;
-    COPIES.lock().unwrap().insert(name.to_string(), (stamp, Arc::new(img)));
     Ok(())
 }
 
 /// The image is gone.
 pub fn forget(name: &str) {
-    COPIES.lock().unwrap().remove(name);
+    SERVED.lock().unwrap().remove(name);
 }
 
-/// RAM copies for every published Windows image set to RAM (at start: they live in this process). An image that no
-/// longer fits goes back to disk.
-pub fn load_all(st: &SharedState) {
+fn dir(name: &str) -> PathBuf {
+    crate::tftp_dir().join("broom-win").join(name)
+}
+
+/// At start: the golden of every published Windows image, made again from image.img (same id → same bytes, so no
+/// client downloads again), plus its RAM copy when set to RAM. image.img changed since (an upload whose publish did not
+/// finish) → not served until published.
+pub fn restore_all(st: &SharedState) {
     for img in st.db.images().unwrap_or_default() {
-        if img.os != "windows" || img.cache_mode != "zram" || img.boot_script.is_none() {
+        if img.os != "windows" || img.boot_script.is_none() {
             continue;
         }
-        match sync(st, &img.name, true) {
-            Ok(()) => tracing::info!("image {}: golden.vhdx in RAM", img.name),
+        let raw = crate::images_dir().join(&img.name).join("image.img");
+        let Some(id) = crate::hash::stamp(&raw) else { continue };
+        if std::fs::read_to_string(dir(&img.name).join("golden.id")).ok().as_deref().map(str::trim) != Some(id.as_str()) {
+            continue; // published by an older version (golden.vhdx file) or image.img changed since
+        }
+        match crate::vhdx::Virtual::open(&raw, &id) {
+            Ok(v) => install(&img.name, &id, v),
             Err(e) => {
-                tracing::warn!("image {}: golden not loaded into RAM ({e}) → cache_mode=disk", img.name);
-                let _ = st.db.set_cache_mode(img.id, "disk");
+                tracing::error!("image {}: golden not served: {e}", img.name);
+                continue;
+            }
+        }
+        if img.cache_mode == "zram" {
+            match set_ram(st, &img.name, true) {
+                Ok(()) => tracing::info!("image {}: golden.vhdx in RAM", img.name),
+                Err(e) => {
+                    tracing::warn!("image {}: golden not loaded into RAM ({e}) → cache_mode=disk", img.name);
+                    let _ = st.db.set_cache_mode(img.id, "disk");
+                }
             }
         }
     }
-}
-
-/// The copy, if it is of the file on disk right now (a publish renamed a new golden over it → the file wins).
-fn copy_of(name: &str) -> Option<Arc<RamImage>> {
-    let stamp = crate::hash::stamp(&golden(name))?;
-    COPIES.lock().unwrap().get(name).filter(|(s, _)| *s == stamp).map(|(_, c)| c.clone())
 }
 
 /// One byte range of `Range: bytes=...` → (first, last) inclusive. None = no / multi / unsupported range → whole file.
@@ -91,19 +137,20 @@ fn range(h: Option<&HeaderValue>, size: u64) -> Result<Option<(u64, u64)>, ()> {
     Ok(Some((first, last)))
 }
 
-/// GET /tftp/broom-win/{name}/golden.vhdx — from RAM when the image has a current copy, else the file.
+/// GET /tftp/broom-win/{name}/golden.vhdx — the served golden (RAM copy or made from image.img); an image published
+/// by an older version: its golden.vhdx file.
 pub async fn get(Path(name): Path<String>, req: Request) -> Response {
-    let Some(img) = crate::images::valid_name(&name).then(|| copy_of(&name)).flatten() else {
+    let Some(g) = crate::images::valid_name(&name).then(|| served(&name)).flatten() else {
         use tower::ServiceExt;
-        return match tower_http::services::ServeFile::new(golden(&name)).oneshot(req).await {
+        return match tower_http::services::ServeFile::new(dir(&name).join("golden.vhdx")).oneshot(req).await {
             Ok(r) => r.into_response(),
             Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
         };
     };
-    from_ram(img, req.headers())
+    serve(g, req.headers())
 }
 
-fn from_ram(img: Arc<RamImage>, headers: &HeaderMap) -> Response {
+fn serve(img: Arc<Golden>, headers: &HeaderMap) -> Response {
     let size = img.size();
     let (status, first, last) = match range(headers.get(header::RANGE), size) {
         Ok(Some((a, b))) => (StatusCode::PARTIAL_CONTENT, a, b),
@@ -113,7 +160,7 @@ fn from_ram(img: Arc<RamImage>, headers: &HeaderMap) -> Response {
         }
     };
     let len = if size == 0 { 0 } else { last - first + 1 };
-    // 1 MB at a time, unpacked off the async threads.
+    // 1 MB at a time, read (disk) / unpacked (RAM) off the async threads.
     let body = futures_util::stream::unfold(first, move |at| {
         let img = img.clone();
         async move {

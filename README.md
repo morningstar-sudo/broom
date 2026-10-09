@@ -11,7 +11,8 @@ Everything is **one static binary** — no dnsmasq, tftpd, targetcli or extra se
 - **TFTP** (serves the embedded iPXE)
 - **iSCSI** target built in (read-only goldens, from disk or a compressed RAM copy) — its own process
   (`broom-iscsid`), so restarting / upgrading the server never drops a client
-- **Image versions** — snapshot / rollback, deduplicated in 4 MB chunks (no ZFS)
+- **Image versions** — snapshot / rollback in no time: a version is a hard link to the golden file (no copy, no
+  ZFS)
 - **Linux goldens read in-process** — ext4 + LVM, no libguestfs
 
 VMDK/VHDX conversion, partition tables and archives are done in-process too (no qemu-img, sfdisk, cpio, tar,
@@ -29,7 +30,9 @@ Offline server: download `broom-stage.tar.gz` of the same release elsewhere and 
    serves it.
 3. Clients PXE-boot the golden read-only; their writes land on the local SSD and reset each boot.
    - **Linux:** RO iSCSI root + `overlayroot` (writeback on the SSD, reset every boot).
-   - **Windows:** `golden.vhdx` cached on the SSD, a child VHDX that resets every boot. With the image's cache set
+   - **Windows:** `golden.vhdx` cached on the SSD, a child VHDX that resets every boot. The server never stores
+     `golden.vhdx`: it is made from the image's raw disk while it is downloaded (a VHDX is a small header + the raw
+     disk's blocks), so a publish costs one read of the image (its sha256), not a 50 GB copy. With the image's cache set
      to RAM, the server keeps a compressed copy of `golden.vhdx` in memory and every download comes from it — a room
      fetching a new golden at once never hammers the server's disk.
 
@@ -141,8 +144,11 @@ sent, in parallel 8 MB chunks with retry) — or a single `.vmdk` / `.img` / `.z
 
 ## Versions, export
 
-- **Versions** (Images → Versions): snapshot / rollback the golden (deduplicated 4 MB chunks). **→ New image** turns a
-  version into a separate image on the list (only its manifest is copied — no extra disk space) and publishes it.
+- **Versions** (Images → Versions): snapshot / rollback the golden. A version is a hard link to the golden file of that
+  moment (`storage/files/`): instant, and free until the image gets another golden — from then on each version kept
+  holds its whole golden on disk, until deleted. An upload's first golden is saved as v1 by itself. Versions made by
+  older releases (4 MB chunks) still restore. **→ New image** turns a version into a separate image on the list (no
+  extra disk space) and publishes it.
 - **Export** (per image, or per version): builds a VMware VM (`<name>.vmx` + `<name>.vmdk`) to edit the golden again —
   download both into one folder, open the `.vmx`, edit, run broom-prep again, upload. Needs free space on the server
   ≈ the golden size. Windows: works for images uploaded with this version or later (publish trims the boot partitions
@@ -157,8 +163,8 @@ Everything lives next to the binary:
 ├── bootrom-mgmt     # the binary
 ├── bootrom.db       # config, images, machines, leases (SQLite)
 ├── images/<name>/   # image.img = golden (raw, sparse)
-├── storage/         # image versions (dedup chunks + manifests)
-├── tftp/            # boot files (kernel/initrd, golden.vhdx, stage) — served over HTTP /tftp + TFTP
+├── storage/         # image versions (hard links to the goldens + manifests)
+├── tftp/            # boot files (kernel/initrd, Windows templates, stage) — served over HTTP /tftp + TFTP
 └── work/            # scratch for publish steps
 ```
 
@@ -174,7 +180,7 @@ stderr. `RUST_LOG=debug` also logs every external command. Under systemd: `journ
 |---|---|---|
 | `bootrom.db` | config, admin password, machines + license keys, images list | `sqlite3 bootrom.db ".backup /backup/bootrom.db"` while running (`apt install sqlite3`), or stop the service and copy `bootrom.db*` (incl. `-wal`) |
 | `images/` | the goldens (`image.img`, sparse) | stop the service or pick a time with no publish running; `cp --sparse=always -a` / `rsync -S` |
-| `storage/` | image versions (chunks + manifests) | same as `images/` — copy both together |
+| `storage/` | image versions (hard links + manifests) | same as `images/` — copy both together, with `cp -a` / `rsync -H` (keeps the links) |
 | `tftp/` | boot files | optional: rebuilt by **Publish** on each image (back it up to skip that) |
 | `work/` | scratch | no |
 

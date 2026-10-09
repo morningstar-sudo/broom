@@ -76,7 +76,12 @@ scan
 # several disks asks on its screen. Prints the disk typed, nothing for Enter / anything else.
 ask_disk(){
   echo "broom: no Broom disk on this machine yet - one disk must be ERASED for Windows." > $CON
-  [ "$REG" = 1 ] || echo "broom: this machine is NOT registered on the server (Machines page)." > $CON
+  if [ "$REG" != 1 ]; then
+    # Its IP + MAC, to find it on the server's Machines page (network up now; quiet: stdout is the disk answer).
+    configure_networking > /dev/null 2>&1
+    ip=$(sed -n "s/^IPV4ADDR=['\"]*\([0-9.]*\).*/\1/p" /run/net-*.conf 2>/dev/null | head -n 1)
+    echo "broom: this machine is NOT registered on the server (Machines page): IP ${ip:-?}, MAC ${MAC:-?}" > $CON
+  fi
   for n in "$@"; do
     printf 'broom:   %-10s %6s GB  %s\n' "$n" "$(( $(cat $SYSB/$n/size) / 2097152 ))" "$(cat $SYSB/$n/device/model 2>/dev/null)" > $CON
   done

@@ -369,10 +369,10 @@ async fn main() {
         // (background: a RAM copy is slow).
         let st = state.clone();
         tokio::task::spawn_blocking(move || publish::start_iscsi(&st));
-        // Windows goldens set to RAM: their copies live in this process → rebuilt at every start (served from the
-        // file meanwhile).
+        // Windows goldens: made again from image.img (same bytes as before the restart) + their RAM copies when set to
+        // RAM (they live in this process).
         let st = state.clone();
-        tokio::task::spawn_blocking(move || goldenram::load_all(&st));
+        tokio::task::spawn_blocking(move || goldenram::restore_all(&st));
         // Prune expired DHCP leases every 10 min so a MAC flood can't grow the table without bound.
         let st = state.clone();
         tokio::spawn(async move {

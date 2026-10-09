@@ -193,16 +193,16 @@ struct SnapBody {
     label: String,
 }
 
-/// Save image.img as a new version (versions.rs: dedup 4 MB chunks). Background job.
+/// Save image.img as a new version (versions.rs: a hard link, instant). Background job.
 async fn snapshot(State(st): State<SharedState>, Json(b): Json<SnapBody>) -> Result<Json<serde_json::Value>, ApiError> {
     let name = name_of(&st, b.id)?;
     let label: String = b.label.chars().filter(|c| !c.is_control()).take(80).collect();
     spawn_job(&st, name, "snapshot", move |st, name, steps| {
-        steps.go("snapshot (hashing image.img)");
+        steps.go("snapshot");
         let _g = st.versions_lock.lock().unwrap_or_else(|p| p.into_inner());
-        let (m, new) = crate::versions::snapshot(name, label.trim())?;
+        let m = crate::versions::snapshot(name, label.trim())?;
         st.db.set_active_version(name_id(st, name)?, Some(&m.version))?;
-        Ok(format!("version {} saved ({new} new chunks)", m.version))
+        Ok(format!("version {} saved", m.version))
     })?;
     Ok(Json(serde_json::json!({"ok": true, "async": true})))
 }
@@ -240,7 +240,7 @@ async fn rollback(State(st): State<SharedState>, Json(b): Json<VersionBody>) -> 
         steps.go(&format!("restore {version}"));
         let (img_path, tmp) = (dir.join("image.img"), dir.join("image.img.new"));
         let _ = std::fs::remove_file(&tmp);
-        let n = {
+        {
             let _g = st.versions_lock.lock().unwrap_or_else(|p| p.into_inner());
             crate::versions::rehydrate_to(name, &version, &tmp)
         }
@@ -259,7 +259,7 @@ async fn rollback(State(st): State<SharedState>, Json(b): Json<VersionBody>) -> 
         std::fs::rename(&tmp, &img_path).map_err(|e| format!("{}: {e}", img_path.display()))?;
         st.db.set_active_version(img.id, Some(&version))?;
         let msg = crate::publish::run_publish(st, name, steps)?;
-        Ok(format!("rolled back to {version} ({n} chunks rewritten) — {msg}"))
+        Ok(format!("rolled back to {version} — {msg}"))
     })?;
     Ok(Json(serde_json::json!({"ok": true, "async": true})))
 }
@@ -340,7 +340,7 @@ async fn snapshots(State(st): State<SharedState>, Query(q): Query<HashMap<String
     let id: i64 = q.get("id").and_then(|s| s.parse().ok()).ok_or((StatusCode::BAD_REQUEST, "missing ?id=".to_string()))?;
     let img = st.db.image(id).map_err(ise)?.ok_or((StatusCode::NOT_FOUND, format!("image {id} not found")))?;
     let active = img.active_version.clone();
-    let versions = tokio::task::spawn_blocking(move || crate::versions::list_vs_current(&img.name, img.active_version.as_deref()))
+    let versions = tokio::task::spawn_blocking(move || crate::versions::list_vs_current(&img.name))
         .await
         .map_err(|e| ise(e.to_string()))?;
     Ok(Json(serde_json::json!({"active": active, "versions": versions})))
@@ -517,13 +517,14 @@ fn spawn_publish(st: &SharedState, name: String, upload: Option<std::path::PathB
         }
         // First golden of this image → keep it as v1: there is always a version to roll back to — also when the
         // publish failed (a later Publish has no upload left to take it from). A failed snapshot only gets a warning.
+        // A hard link to image.img: instant, no copy of the golden.
         steps.go("snapshot v1");
         let first_snap = {
             let _g = st.versions_lock.lock().unwrap_or_else(|p| p.into_inner());
             crate::versions::snapshot(name, "first upload")
         };
         let saved = match first_snap {
-            Ok((m, _)) => {
+            Ok(m) => {
                 st.db.set_active_version(name_id(st, name)?, Some(&m.version))?;
                 format!("saved as {}", m.version)
             }

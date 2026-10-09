@@ -11,7 +11,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 
-const BLOCK: usize = 16 << 10;
+pub(crate) const BLOCK: usize = 16 << 10;
 /// Blocks read from the file per worker job while loading (16 MB).
 const BATCH: usize = 1024;
 /// Unpacked blocks kept (64 MB). One lock per image: shard it if a profiler ever shows contention.
@@ -133,8 +133,20 @@ impl RamImage {
         use std::os::unix::fs::FileExt;
         let f = std::fs::File::open(path).map_err(|e| format!("{path}: {e}"))?;
         let size = f.metadata().map_err(|e| format!("{path}: {e}"))?.len();
+        let blocks = data_blocks(&f, size);
+        Self::load_with(path, size, blocks, reserve, |off, buf| f.read_exact_at(buf, off).map_err(|e| format!("{path} @{off}: {e}")))
+    }
+
+    /// Same from any source of `size` bytes, `blocks` of them (16 KB) possibly holding data.
+    pub fn load_with(
+        path: &str,
+        size: u64,
+        blocks: u64,
+        reserve: u64,
+        read: impl Fn(u64, &mut [u8]) -> Result<(), String> + Sync,
+    ) -> Result<RamImage, String> {
         let n = size.div_ceil(BLOCK as u64) as usize;
-        let worst = data_blocks(&f, size) * zstd::zstd_safe::compress_bound(BLOCK) as u64;
+        let worst = blocks * zstd::zstd_safe::compress_bound(BLOCK) as u64;
 
         let mut arena = {
             use std::os::fd::AsRawFd;
@@ -166,7 +178,7 @@ impl RamImage {
             let parts = crate::disk::par_map(group, |&first| {
                 let off = (first * BLOCK) as u64;
                 let mut buf = vec![0u8; ((size - off) as usize).min(BATCH * BLOCK)];
-                f.read_exact_at(&mut buf, off).map_err(|e| format!("{path} @{off}: {e}"))?;
+                read(off, &mut buf)?;
                 let mut z = zstd::bulk::Compressor::new(3).map_err(|e| format!("zstd: {e}"))?;
                 buf.chunks(BLOCK)
                     .map(|b| if b.iter().all(|&x| x == 0) { Ok(Vec::new()) } else { z.compress(b).map_err(|e| format!("zstd: {e}")) })

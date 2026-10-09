@@ -83,7 +83,6 @@ pub fn publish(st: &SharedState, id: i64, name: &str, steps: &mut crate::publish
     let raw = raw.to_string_lossy().to_string();
     let out = crate::tftp_dir().join("broom-win").join(name).to_string_lossy().into_owned();
     std::fs::create_dir_all(&out).map_err(|e| e.to_string())?;
-    let golden = format!("{out}/golden.vhdx");
     // Whatever can refuse the publish runs before anything is written: a failure here leaves the served golden as is.
     let ip = st.db.get_config("dhcp_server_ip", "");
     if ip.is_empty() {
@@ -92,31 +91,22 @@ pub fn publish(st: &SharedState, id: i64, name: &str, steps: &mut crate::publish
     steps.go("initrd stage");
     let stage = ensure_stage()?;
 
-    // golden.vhdx gets a new GUID on every convert → new hash → every client re-downloads. Golden still newer than
-    // image.img → keep it, only refresh the stage + scripts + boot_script (Publish with a new binary = cheap).
-    let fresh = golden_fresh(&raw, &out);
-    let drivers = if fresh {
-        "kept (golden already built from image.img + the current embedded logic)".to_string()
-    } else {
-        build_golden(&raw, &out, name, steps)?
-    };
-
+    // image.img unchanged since the golden was built (golden.id = its stamp) → keep it (same bytes, same hash: no client
+    // downloads again), only refresh the stage + scripts + boot_script (Publish with a new binary = cheap).
     // Hash (clients compare it to know whether to re-download, and check the whole download against it) + size (the
-    // stage checks its free space and the downloaded length). Golden kept + both present → reuse (13 GB takes ~2
-    // minutes on a slow disk). golden.sha256 is written LAST: the stage treats its absence as "publish running".
-    let (sum_file, size_file) = (format!("{out}/golden.sha256"), format!("{out}/golden.size"));
+    // stage checks its free space and the downloaded length). golden.sha256 is written LAST: the stage treats its
+    // absence as "publish running".
+    let sum_file = format!("{out}/golden.sha256");
     let _ = std::fs::remove_file(format!("{out}/golden.chunks")); // delta manifest of older versions
-    let cached = std::fs::read_to_string(&sum_file).ok().map(|s| s.trim().to_string()).filter(|s| s.len() == 64);
-    let hash = match cached {
-        Some(h) if fresh && Path::new(&size_file).exists() => h,
-        _ => {
-            let _ = std::fs::remove_file(&sum_file);
-            steps.go("sha256 golden");
-            let h = crate::hash::file_hash(&golden).ok_or_else(|| format!("sha256 of {golden} failed"))?;
-            let size = std::fs::metadata(&golden).map_err(|e| e.to_string())?.len();
-            std::fs::write(&size_file, size.to_string()).map_err(|e| format!("golden.size: {e}"))?;
-            h
+    let (drivers, hash) = match golden_fresh(&raw, &out) {
+        Some((id, hash)) => {
+            // After a server restart the golden is made again from image.img (same id → same bytes).
+            if crate::goldenram::served_id(name).as_deref() != Some(id.as_str()) {
+                crate::goldenram::install(name, &id, crate::vhdx::Virtual::open(Path::new(&raw), &id)?);
+            }
+            ("kept (golden already built from image.img)".to_string(), hash)
         }
+        None => build_golden(&raw, &out, name, steps)?,
     };
     // The stage checks these small files against this list on every boot (a guest could swap them on the SSD).
     // First line: the golden these files belong to — the stage applies them only to that golden (a client still on
@@ -137,7 +127,7 @@ pub fn publish(st: &SharedState, id: i64, name: &str, steps: &mut crate::publish
     let mut cache = "disk";
     if st.db.image(id)?.is_some_and(|i| i.cache_mode == "zram") {
         steps.go("golden → RAM");
-        match crate::goldenram::sync(st, name, true) {
+        match crate::goldenram::set_ram(st, name, true) {
             Ok(()) => cache = "RAM",
             Err(e) => {
                 tracing::warn!("image {name}: golden not loaded into RAM ({e}) → cache_mode=disk");
@@ -146,7 +136,7 @@ pub fn publish(st: &SharedState, id: i64, name: &str, steps: &mut crate::publish
             }
         }
     } else {
-        let _ = crate::goldenram::sync(st, name, false);
+        let _ = crate::goldenram::set_ram(st, name, false);
     }
     std::fs::write(format!("{out}/files.sha256"), sums).map_err(|e| format!("files.sha256: {e}"))?;
     std::fs::write(&sum_file, &hash).map_err(|e| format!("golden.sha256: {e}"))?;
@@ -177,14 +167,15 @@ fn rearm_for_image(st: &SharedState, img: &crate::db::Image) {
     }
 }
 
-/// All output files exist (golden.key = the last build finished) AND golden.vhdx is newer than image.img (not
-/// re-uploaded since). The server writes nothing into the golden, so new mgmt code never needs a rebuild (the scripts
-/// go to the client through BROOMWIN instead); the key's content doesn't matter.
-fn golden_fresh(raw: &str, out: &str) -> bool {
-    let mtime = |p: &str| std::fs::metadata(p).and_then(|m| m.modified()).ok();
-    let files = ["golden.vhdx", "base-template.vhdx", "child-template.vhdx", "child-template.off", "efi.tar.gz", "golden.key"];
-    files.iter().all(|f| Path::new(&format!("{out}/{f}")).exists())
-        && matches!((mtime(&format!("{out}/golden.vhdx")), mtime(raw)), (Some(g), Some(r)) if g > r)
+/// The last build is complete and still of image.img as it is (golden.id = its stamp: not re-uploaded / rolled back
+/// since) → (id, sha256). The server writes nothing into the golden, so new mgmt code never needs a rebuild (the
+/// scripts go to the client through BROOMWIN instead).
+fn golden_fresh(raw: &str, out: &str) -> Option<(String, String)> {
+    let files = ["base-template.vhdx", "child-template.vhdx", "child-template.off", "efi.tar.gz", "golden.size"];
+    let rd = |f: &str| std::fs::read_to_string(format!("{out}/{f}")).ok().map(|s| s.trim().to_string());
+    let id = rd("golden.id").filter(|id| crate::hash::stamp(Path::new(raw)).as_deref() == Some(id.as_str()))?;
+    let hash = rd("golden.sha256").filter(|h| h.len() == 64)?;
+    files.iter().all(|f| Path::new(&format!("{out}/{f}")).exists()).then_some((id, hash))
 }
 
 /// Hash of the parts, stable across Rust releases (std's DefaultHasher is not: a toolchain update would rebuild every
@@ -198,8 +189,9 @@ fn stable_key(parts: &[&str]) -> String {
     h.finalize().to_hex()[..16].to_string()
 }
 
-/// image.img (raw whole VM disk) → golden.vhdx + efi.tar.gz + 2 empty child VHDX. Returns the enabled drivers.
-fn build_golden(raw: &str, out: &str, name: &str, steps: &mut crate::publish::Steps) -> Result<String, String> {
+/// image.img (raw whole VM disk) → the served golden.vhdx (made from it, not written) + efi.tar.gz + 2 empty child
+/// VHDX. Returns (the enabled drivers, the golden's sha256).
+fn build_golden(raw: &str, out: &str, name: &str, steps: &mut crate::publish::Steps) -> Result<(String, String), String> {
     // 1. The partition holding Windows — check the hive BEFORE any write; then everything read from it that can refuse
     //    the publish (dirty volume, prep markers, EFI bundle) — the server never writes inside NTFS.
     steps.go("find Windows partition");
@@ -229,7 +221,8 @@ fn build_golden(raw: &str, out: &str, name: &str, steps: &mut crate::publish::St
 
     // 2. Edit image.img IN PLACE (no temporary full-disk copy): punch holes outside the Windows partition (ESP/
     //    MSR/Recovery don't go into the golden) + GPT with a single partition (standard native VHD boot), KEEP start →
-    //    NTFS "hidden sectors" still match. Re-running gives the same result (re-publishing is safe).
+    //    NTFS "hidden sectors" still match. An image already trimmed is not written at all: its stamp (= the golden's
+    //    identity, see vhdx::Virtual) stays, and a whole-file version sharing it (versions::pin) is never touched.
     steps.go("trim disk");
     // Export (export.rs) rebuilds the VM disk from what the trim below destroys → keep it first. Never blocks publish.
     if let Err(e) = crate::export::keep_boot_regions(Path::new(raw), name, (start, size)) {
@@ -238,44 +231,69 @@ fn build_golden(raw: &str, out: &str, name: &str, steps: &mut crate::publish::St
     const MB: u64 = 1024 * 1024;
     let total = std::fs::metadata(raw).map_err(|e| e.to_string())?.len();
     let end = start + size;
-    // Only the tables are rewritten — the NTFS data of the Windows partition stays as it is. FIRST, before any hole:
-    // once the table shows a single partition the disk counts as trimmed, so a publish cut off during the holes
-    // below never re-saves the (by then zeroed) boot partitions over the kept ones — it just punches again.
-    crate::disk::write_single_gpt(raw, start, size).map_err(|e| format!("golden single partition: {e}"))?;
     // Keep the first 1MB (primary GPT) + the last 1MB (backup GPT).
-    for (off, len) in [(MB, start.saturating_sub(MB)), (end, total.saturating_sub(MB).saturating_sub(end))] {
-        if len > 0 {
+    let holes = [(MB, start.saturating_sub(MB)), (end, total.saturating_sub(MB).saturating_sub(end))];
+    let single = crate::disk::read(raw)?.is_some_and(|t| t.parts.len() == 1 && (t.parts[0].start, t.parts[0].size) == (start, size));
+    let outside: Vec<(u64, u64)> = holes.into_iter().filter(|&(off, len)| len > 0 && has_data(raw, off, len)).collect();
+    if !single || !outside.is_empty() {
+        // A whole-file version shares this very file (its publish failed before the trim): trim a copy of it.
+        if std::os::unix::fs::MetadataExt::nlink(&std::fs::metadata(raw).map_err(|e| e.to_string())?) > 1 {
+            steps.go("trim disk (own copy: a version shares image.img)");
+            let tmp = format!("{raw}.new");
+            crate::versions::copy_sparse(Path::new(raw), Path::new(&tmp))
+                .and_then(|_| std::fs::rename(&tmp, raw).map_err(|e| e.to_string()))
+                .inspect_err(|_| {
+                    let _ = std::fs::remove_file(&tmp);
+                })?;
+        }
+        // Only the tables are rewritten — the NTFS data of the Windows partition stays as it is. FIRST, before any
+        // hole: once the table shows a single partition the disk counts as trimmed, so a publish cut off during the
+        // holes below never re-saves the (by then zeroed) boot partitions over the kept ones — it just punches again.
+        if !single {
+            crate::disk::write_single_gpt(raw, start, size).map_err(|e| format!("golden single partition: {e}"))?;
+        }
+        for (off, len) in outside {
             punch_hole(raw, off, len)?;
         }
     }
 
-    // 3. golden.vhdx (dynamic, blocks in disk order) + 2 empty child VHDX: base-template (parent golden) and
-    //    child-template (parent base.vhdx — base's GUID is only known on the client → the stage patches it at an offset).
-    steps.go("convert raw→vhdx");
-    let golden = format!("{out}/golden.vhdx");
-    let tmp = format!("{golden}.tmp");
-    // The VHDX holds the raw's allocated blocks (holes stay out), next to the old golden until it replaces it.
-    let used = std::fs::metadata(raw).map(|m| std::os::unix::fs::MetadataExt::blocks(&m) * 512).unwrap_or(0);
-    crate::publish::need_space(Path::new(out), used, "building golden.vhdx")?;
-    if let Err(e) = crate::disk::Source::file(Path::new(raw)).and_then(|src| crate::vhdx::write_dynamic(&src, &tmp)) {
-        let _ = std::fs::remove_file(&tmp);
-        return Err(e);
-    }
+    // 3. The golden.vhdx stages download: made from image.img as it is now (trimmed) — header in memory, payload read
+    //    from image.img, nothing written — identified by image.img's stamp. Its sha256 = one read of image.img.
+    steps.go("sha256 golden");
+    let id = crate::hash::stamp(Path::new(raw)).ok_or("image.img vanished")?;
+    let v = crate::vhdx::Virtual::open(Path::new(raw), &id)?;
+    let hash = v.sha256()?;
+
+    // 4. + 2 empty child VHDX: base-template (parent golden) and child-template (parent base.vhdx — base's GUID is only
+    //    known on the client → the stage patches it at an offset).
     // Until here the served files (old golden + templates + golden.sha256) still belong together, so a failure above
     // never disturbs a client. From now on they change: no golden.sha256 → a client downloading sees "publish running"
-    // instead of mixing two versions; no golden.key → a failure below makes the next publish rebuild everything.
-    for f in ["golden.sha256", "golden.size", "golden.key"] {
+    // instead of mixing two versions; no golden.id → a failure below makes the next publish rebuild everything.
+    for f in ["golden.sha256", "golden.size", "golden.id", "golden.key"] {
         let _ = std::fs::remove_file(format!("{out}/{f}"));
     }
-    std::fs::rename(&tmp, &golden).map_err(|e| e.to_string())?;
     std::fs::rename(format!("{out}/efi.tar.gz.new"), format!("{out}/efi.tar.gz")).map_err(|e| format!("efi.tar.gz: {e}"))?;
-    let gi = crate::vhdx::read_info(&golden)?;
-    crate::vhdx::write_empty(&format!("{out}/base-template.vhdx"), &gi, Some(".\\golden.vhdx"))?;
-    let placeholder = crate::vhdx::Info { data_write_guid: [0; 16], ..gi };
+    crate::vhdx::write_empty(&format!("{out}/base-template.vhdx"), &v.info, Some(".\\golden.vhdx"))?;
+    let placeholder = crate::vhdx::Info { data_write_guid: [0; 16], ..v.info };
     let off = crate::vhdx::write_empty(&format!("{out}/child-template.vhdx"), &placeholder, Some(".\\base.vhdx"))?;
     std::fs::write(format!("{out}/child-template.off"), off.to_string()).map_err(|e| e.to_string())?;
-    std::fs::write(format!("{out}/golden.key"), "built").map_err(|e| e.to_string())?;
-    Ok(drivers)
+    std::fs::write(format!("{out}/golden.size"), v.len().to_string()).map_err(|e| format!("golden.size: {e}"))?;
+    crate::goldenram::install(name, &id, v);
+    // The file an older version wrote (50 GB) is not served any more.
+    for f in ["golden.vhdx", "golden.vhdx.tmp"] {
+        let _ = std::fs::remove_file(format!("{out}/{f}"));
+    }
+    std::fs::write(format!("{out}/golden.id"), &id).map_err(|e| format!("golden.id: {e}"))?;
+    Ok((drivers, hash))
+}
+
+/// [off, off+len) of a file holds data (not entirely a hole).
+fn has_data(path: &str, off: u64, len: u64) -> bool {
+    use std::os::fd::AsRawFd;
+    let Ok(f) = std::fs::File::open(path) else { return true };
+    // SAFETY: lseek on a valid fd, no memory involved.
+    let d = unsafe { libc::lseek(f.as_raw_fd(), off as libc::off_t, libc::SEEK_DATA) };
+    d >= 0 && (d as u64) < off + len
 }
 
 /// Free [off, off+len) of a file without changing its size (fallocate PUNCH_HOLE|KEEP_SIZE; replaces

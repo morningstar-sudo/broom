@@ -294,12 +294,12 @@ function watchJob(name,el,done){
 let verImg=null;
 async function showVersions(id,name,os){verImg={id,name,os};
   const el=document.getElementById('img_versions');
-  el.innerHTML=`<h2>Versions — ${esc(name)}</h2><p class="mono">⏳ comparing with the current golden (the first time after a change reads the whole golden)...</p>`;
+  el.innerHTML=`<h2>Versions — ${esc(name)}</h2><p class="mono">⏳ loading...</p>`;
   const r=await j('/api/images/snapshots?id='+id);
   el.innerHTML=`<h2>Versions — ${esc(name)} <button class="ghost" ${act('snapshotImage')}>+ Snapshot now</button></h2>
-    <div class="scroll"><table><thead><tr><th>Version</th><th>Label</th><th>Created</th><th title="data that differs from the golden being served now (image list) — what a rollback to this version rewrites">vs current golden</th><th></th></tr></thead><tbody>${
+    <div class="scroll"><table><thead><tr><th>Version</th><th>Label</th><th>Created</th><th title="same = this version is the golden being served now">vs current golden</th><th></th></tr></thead><tbody>${
     r.versions.map(v=>`<tr><td class="mono">${esc(v.version)} ${v.version===r.active?'<span class="pill linux">active</span>':''}</td>
-      <td>${esc(v.label)}</td><td class="mono">${new Date(v.created*1000).toLocaleString()}</td><td class="mono" title="disk size ${gbs(v.size)}">${v.diff==null?'<span title="no golden on the server">?</span>':v.diff?'Δ '+gbs(v.diff):'same'}</td>
+      <td>${esc(v.label)}</td><td class="mono">${new Date(v.created*1000).toLocaleString()}</td><td class="mono" title="disk size ${gbs(v.size)}">${v.diff==null?'<span title="another golden than the one served now">—</span>':v.diff?'Δ '+gbs(v.diff):'same'}</td>
       <td class="row"><button class="ghost" ${act('rollbackImage',v.version)}>Rollback</button>
         <button class="ghost" ${act('exportImage',id,name,v.version)}>Export</button>
         <button class="ghost" ${act('versionToImage',v.version)} title="add this version as a new image on the list">→ New image</button>

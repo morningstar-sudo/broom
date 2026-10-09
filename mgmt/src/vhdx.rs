@@ -1,7 +1,8 @@
 // vhdx.rs — minimal VHDX (MS-VHDX v1.0) reader/writer for Windows native boot.
-// Write: the golden as a DYNAMIC VHDX from its raw disk (write_dynamic, replaces qemu-img), and empty DIFFERENCING
+// Write: the golden as a DYNAMIC VHDX of its raw disk, made on the fly, never stored (Virtual), and empty DIFFERENCING
 // files (BAT all "not present" → every read falls through to the parent) pointing to their parent via
-// parent_linkage + relative_path (write_empty). Read: disk parameters + DataWriteGuid (read_info).
+// parent_linkage + relative_path (write_empty). Read (tests only — they check what was written): disk parameters +
+// DataWriteGuid (read_info).
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom, Write};
 
@@ -73,10 +74,14 @@ fn rand_guid() -> [u8; 16] {
     b
 }
 
+#[cfg(test)]
 fn u16le(b: &[u8], o: usize) -> u16 { u16::from_le_bytes([b[o], b[o + 1]]) }
+#[cfg(test)]
 fn u32le(b: &[u8], o: usize) -> u32 { u32::from_le_bytes(b[o..o + 4].try_into().unwrap()) }
+#[cfg(test)]
 fn u64le(b: &[u8], o: usize) -> u64 { u64::from_le_bytes(b[o..o + 8].try_into().unwrap()) }
 
+#[cfg(test)]
 fn read_at(f: &mut File, off: u64, len: usize) -> Result<Vec<u8>, String> {
     let mut buf = vec![0u8; len];
     f.seek(SeekFrom::Start(off)).map_err(|e| e.to_string())?;
@@ -85,6 +90,7 @@ fn read_at(f: &mut File, off: u64, len: usize) -> Result<Vec<u8>, String> {
 }
 
 /// Verify the checksum of a block whose crc field is at bytes 4..8.
+#[cfg(test)]
 fn crc_ok(block: &[u8]) -> bool {
     let mut t = block.to_vec();
     let want = u32le(&t, 4);
@@ -93,6 +99,7 @@ fn crc_ok(block: &[u8]) -> bool {
 }
 
 /// Read parameters + DataWriteGuid (current header = highest valid seq).
+#[cfg(test)] // the stage reads goldens on the clients; here only the tests check what was written
 pub fn read_info(path: &str) -> Result<Info, String> {
     let mut f = File::open(path).map_err(|e| format!("{path}: {e}"))?;
     if read_at(&mut f, 0, 8)? != b"vhdxfile" {
@@ -149,14 +156,14 @@ struct Layout {
     head: Vec<u8>,
     meta: Vec<u8>,
     bat_off: u64,
-    bat_len: u64,
     meta_off: u64,
     /// Absolute offset of the parent_linkage GUID string (differencing only).
     linkage_abs: u64,
 }
 
-/// `block` = payload block size; `rel_parent` Some → differencing (parent_linkage = info's DataWriteGuid).
-fn layout(info: &Info, block: u64, rel_parent: Option<&str>) -> Layout {
+/// `block` = payload block size; `rel_parent` Some → differencing (parent_linkage = info's DataWriteGuid);
+/// `ids` = FileWriteGuid, DataWriteGuid, page 83 id.
+fn layout(info: &Info, block: u64, rel_parent: Option<&str>, ids: [[u8; 16]; 3]) -> Layout {
     let ls = info.logical_sector as u64;
     let chunk = (1u64 << 23) * ls / block;
     let data_blocks = info.virtual_size.div_ceil(block);
@@ -174,7 +181,7 @@ fn layout(info: &Info, block: u64, rel_parent: Option<&str>) -> Layout {
     head[0..8].copy_from_slice(b"vhdxfile");
     let creator = utf16("broom");
     head[8..8 + creator.len()].copy_from_slice(&creator);
-    let (fw, dw) = (rand_guid(), rand_guid());
+    let [fw, dw, page83] = ids;
     for (i, off) in [KB64, 2 * KB64].into_iter().enumerate() {
         let h = &mut head[off as usize..off as usize + 4096];
         h[0..4].copy_from_slice(b"head");
@@ -210,7 +217,7 @@ fn layout(info: &Info, block: u64, rel_parent: Option<&str>) -> Layout {
             v
         }, 4), // IsRequired
         (VDISK_SIZE, info.virtual_size.to_le_bytes().to_vec(), 6), // IsVirtualDisk|IsRequired
-        (PAGE83, rand_guid().to_vec(), 6),
+        (PAGE83, page83.to_vec(), 6),
         (LOGICAL_SS, info.logical_sector.to_le_bytes().to_vec(), 6),
         (PHYSICAL_SS, info.physical_sector.to_le_bytes().to_vec(), 6),
     ];
@@ -256,7 +263,7 @@ fn layout(info: &Info, block: u64, rel_parent: Option<&str>) -> Layout {
         }
         data_off += data.len().div_ceil(8) * 8;
     }
-    Layout { head, meta, bat_off, bat_len, meta_off, linkage_abs }
+    Layout { head, meta, bat_off, meta_off, linkage_abs }
 }
 
 /// Write an empty VHDX with the same size as `parent`. `rel_parent` Some → differencing pointing to the parent
@@ -264,7 +271,7 @@ fn layout(info: &Info, block: u64, rel_parent: Option<&str>) -> Layout {
 /// Returns the absolute offset of the parent_linkage GUID string (UTF-16, 76 bytes) — the client stage patches
 /// it there when the parent (base.vhdx) GUID is only known at run time.
 pub fn write_empty(path: &str, parent: &Info, rel_parent: Option<&str>) -> Result<u64, String> {
-    let l = layout(parent, CHILD_BLOCK, rel_parent);
+    let l = layout(parent, CHILD_BLOCK, rel_parent, [rand_guid(), rand_guid(), rand_guid()]);
     // BAT + log = all zeros (sparse, set_len). Write the header area + metadata.
     let mut f = File::create(path).map_err(|e| format!("{path}: {e}"))?;
     f.set_len(l.meta_off + MB).map_err(|e| e.to_string())?;
@@ -280,59 +287,97 @@ const GOLDEN_BLOCK: u64 = 32 * MB;
 /// BAT payload state: block fully present in the file.
 const PAYLOAD_FULLY_PRESENT: u64 = 6;
 
-/// `src` (a raw disk) → dynamic VHDX at `path` (replaces `qemu-img convert -O vhdx`). Blocks that are all zero
-/// are left out (BAT "not present" reads as zeros); the others are stored in VIRTUAL order, so the same golden
-/// always lays out the same way. Zero 1MB pieces inside a stored block stay holes in the server's file.
-pub fn write_dynamic(src: &crate::disk::Source, path: &str) -> Result<(), String> {
-    use std::os::unix::fs::FileExt;
-    if src.len % 512 != 0 || src.len == 0 {
-        return Err(format!("raw disk size {} is not a multiple of 512", src.len));
-    }
-    let info = Info { data_write_guid: [0; 16], virtual_size: src.len, logical_sector: 512, physical_sector: 4096 };
-    let l = layout(&info, GOLDEN_BLOCK, None);
-    let chunk = (1u64 << 23) * 512 / GOLDEN_BLOCK;
-    let f = File::create(path).map_err(|e| format!("{path}: {e}"))?;
-    let mut blocks = std::collections::BTreeSet::new();
-    for (a, b) in src.data_ranges() {
-        blocks.extend(a / GOLDEN_BLOCK..b.div_ceil(GOLDEN_BLOCK));
-    }
-    let blocks: Vec<u64> = blocks.into_iter().filter(|&i| i * GOLDEN_BLOCK < src.len).collect();
-    let mut bat = vec![0u8; l.bat_len as usize];
-    let mut next = l.meta_off + MB;
-    // A window of blocks is read in parallel, placed in virtual order, then written in parallel. The window's
-    // buffers are reused (RAM: workers × 32 MB, touched once).
-    let w = crate::disk::workers();
-    let bufs: Vec<std::sync::Mutex<Vec<u8>>> = (0..w).map(|_| std::sync::Mutex::new(vec![0u8; GOLDEN_BLOCK as usize])).collect();
-    for win in blocks.chunks(w) {
-        let slots: Vec<usize> = (0..win.len()).collect();
-        let present = crate::disk::par_map(&slots, |&k| {
-            let mut b = bufs[k].lock().unwrap();
-            src.read_at(win[k] * GOLDEN_BLOCK, &mut b)?;
-            Ok(b.iter().any(|&x| x != 0))
-        })?;
-        let mut jobs = Vec::new();
-        for (k, &i) in win.iter().enumerate().filter(|&(k, _)| present[k]) {
-            let e = ((next / MB) << 20) | PAYLOAD_FULLY_PRESENT;
-            let idx = (i + i / chunk) as usize * 8;
-            bat[idx..idx + 8].copy_from_slice(&e.to_le_bytes());
-            jobs.push((next, k));
-            next += GOLDEN_BLOCK;
+/// The golden as a dynamic VHDX that is never written out: a VHDX of a raw disk is a few MB of header, BAT and
+/// metadata followed by the raw disk's 32 MB blocks, byte for byte. So the header part is built here in memory and
+/// every payload byte is read straight from the raw file when a client downloads it — no 50 GB copy on the server.
+/// Blocks holding no data in the raw file (holes) are left out (BAT "not present" reads as zeros); the others are
+/// stored in virtual order. The GUIDs come from `id` (hash::stamp of the raw file): the same raw gives the same bytes,
+/// hence the same sha256, every time it is opened (a server restart doesn't make every client download again).
+/// The raw file stays open: a new image.img renamed over it doesn't change what this golden serves.
+pub struct Virtual {
+    raw: crate::disk::Source,
+    /// Bytes [0, payload start): file identifier, headers, region tables, log, BAT, metadata.
+    prefix: Vec<u8>,
+    /// Virtual block number of each stored payload block, in file order.
+    blocks: Vec<u64>,
+    pub info: Info,
+}
+
+impl Virtual {
+    pub fn open(raw: &std::path::Path, id: &str) -> Result<Virtual, String> {
+        let src = crate::disk::Source::file(raw)?;
+        if src.len % 512 != 0 || src.len == 0 {
+            return Err(format!("raw disk size {} is not a multiple of 512", src.len));
         }
-        crate::disk::par_map(&jobs, |&(at, k)| {
-            let b = bufs[k].lock().unwrap();
-            for (n, piece) in b.chunks(MB as usize).enumerate() {
-                if piece.iter().any(|&x| x != 0) {
-                    f.write_all_at(piece, at + n as u64 * MB).map_err(|e| format!("write {path}: {e}"))?;
-                }
-            }
-            Ok(())
-        })?;
+        let guid = |tag: &str| -> [u8; 16] {
+            let mut b: [u8; 16] = blake3::hash(format!("broom golden {id} {tag}").as_bytes()).as_bytes()[..16].try_into().unwrap();
+            b[7] = (b[7] & 0x0f) | 0x40; // version 4 layout, like rand_guid
+            b[8] = (b[8] & 0x3f) | 0x80;
+            b
+        };
+        let ids = [guid("file"), guid("data"), guid("page83")];
+        let info = Info { data_write_guid: ids[1], virtual_size: src.len, logical_sector: 512, physical_sector: 4096 };
+        let l = layout(&info, GOLDEN_BLOCK, None, ids);
+        let chunk = (1u64 << 23) * 512 / GOLDEN_BLOCK;
+        let mut set = std::collections::BTreeSet::new();
+        for (a, b) in src.data_ranges() {
+            set.extend(a / GOLDEN_BLOCK..b.div_ceil(GOLDEN_BLOCK));
+        }
+        let blocks: Vec<u64> = set.into_iter().filter(|&i| i * GOLDEN_BLOCK < src.len).collect();
+        let start = l.meta_off + MB;
+        let mut prefix = vec![0u8; start as usize];
+        prefix[..l.head.len()].copy_from_slice(&l.head);
+        for (k, &i) in blocks.iter().enumerate() {
+            let e = (((start + k as u64 * GOLDEN_BLOCK) / MB) << 20) | PAYLOAD_FULLY_PRESENT;
+            let at = (l.bat_off + (i + i / chunk) * 8) as usize;
+            prefix[at..at + 8].copy_from_slice(&e.to_le_bytes());
+        }
+        prefix[l.meta_off as usize..start as usize].copy_from_slice(&l.meta);
+        Ok(Virtual { raw: src, prefix, blocks, info })
     }
-    f.set_len(next).map_err(|e| e.to_string())?;
-    f.write_all_at(&l.head, 0).map_err(|e| e.to_string())?;
-    f.write_all_at(&bat, l.bat_off).map_err(|e| e.to_string())?;
-    f.write_all_at(&l.meta, l.meta_off).map_err(|e| e.to_string())?;
-    f.sync_all().map_err(|e| e.to_string())
+
+    pub fn len(&self) -> u64 {
+        self.prefix.len() as u64 + self.blocks.len() as u64 * GOLDEN_BLOCK
+    }
+
+    /// Bytes of the VHDX at `off` (inside it).
+    pub fn read_at(&self, mut off: u64, mut buf: &mut [u8]) -> Result<(), String> {
+        if off.checked_add(buf.len() as u64).is_none_or(|end| end > self.len()) {
+            return Err("read past the end of the golden".into());
+        }
+        let p = self.prefix.len() as u64;
+        while !buf.is_empty() {
+            let n = if off < p {
+                let n = ((p - off) as usize).min(buf.len());
+                buf[..n].copy_from_slice(&self.prefix[off as usize..off as usize + n]);
+                n
+            } else {
+                let (k, within) = ((off - p) / GOLDEN_BLOCK, (off - p) % GOLDEN_BLOCK);
+                let n = ((GOLDEN_BLOCK - within) as usize).min(buf.len());
+                // Past the raw disk's end (its last block is partial) Source reads zeros.
+                self.raw.read_at(self.blocks[k as usize] * GOLDEN_BLOCK + within, &mut buf[..n])?;
+                n
+            };
+            buf = &mut buf[n..];
+            off += n as u64;
+        }
+        Ok(())
+    }
+
+    /// sha256 of the whole VHDX, lower-case hex (what the stage checks a download against). Reads the raw disk once.
+    pub fn sha256(&self) -> Result<String, String> {
+        use sha2::{Digest, Sha256};
+        let mut h = Sha256::new();
+        let mut buf = vec![0u8; 4 << 20];
+        let (mut off, len) = (0u64, self.len());
+        while off < len {
+            let n = ((len - off) as usize).min(buf.len());
+            self.read_at(off, &mut buf[..n])?;
+            h.update(&buf[..n]);
+            off += n as u64;
+        }
+        Ok(h.finalize().iter().map(|b| format!("{b:02x}")).collect())
+    }
 }
 
 #[cfg(test)]
@@ -352,8 +397,8 @@ mod tests {
         assert_eq!(guid_bytes(BAT_GUID)[0], 0x66);
     }
 
-    /// Raw disk with data, holes and a partial last block → dynamic VHDX → qemu-img (independent reader) reads back
-    /// exactly the same bytes; zero blocks take no space; blocks are stored in virtual order.
+    /// Raw disk with data, holes and a partial last block → virtual dynamic VHDX → qemu-img (independent reader) reads
+    /// back exactly the same bytes; holes take no block; blocks are stored in virtual order.
     #[test]
     fn dynamic_matches_qemu() {
         use std::os::unix::fs::FileExt;
@@ -371,19 +416,33 @@ mod tests {
         f.write_all_at(&noise(4096), 0).unwrap(); // block 0
         f.write_all_at(&noise(3 * MB as usize), 70 * MB).unwrap(); // block 2, spans 1MB pieces
         f.write_all_at(&noise(700), len - 700).unwrap(); // partial last block
-        f.write_all_at(&vec![0u8; 4 * MB as usize], 130 * MB).unwrap(); // written zeros: still a zero block
+        f.write_all_at(&vec![0u8; 4 * MB as usize], 130 * MB).unwrap(); // written zeros: data on disk → stored
         drop(f);
+        let v = Virtual::open(&raw, "stamp-1").unwrap();
+        // The virtual golden, written out once here only to check it with qemu-img.
         let out = d.join("g.vhdx");
-        write_dynamic(&crate::disk::Source::file(&raw).unwrap(), out.to_str().unwrap()).unwrap();
+        let mut whole = vec![0u8; v.len() as usize];
+        v.read_at(0, &mut whole).unwrap();
+        std::fs::write(&out, &whole).unwrap();
         let i = read_info(out.to_str().unwrap()).unwrap();
         assert_eq!((i.virtual_size, i.logical_sector, i.physical_sector), (len, 512, 4096));
+        assert_eq!(i.data_write_guid, v.info.data_write_guid, "templates get the GUID the file really has");
         let q = |args: &[&str]| std::process::Command::new("qemu-img").args(args).status().unwrap().success();
         assert!(q(&["check", "-q", "-f", "vhdx", out.to_str().unwrap()]), "qemu-img check");
         let back = d.join("back.raw");
         assert!(q(&["convert", "-f", "vhdx", "-O", "raw", out.to_str().unwrap(), back.to_str().unwrap()]));
         assert!(std::fs::read(&back).unwrap() == std::fs::read(&raw).unwrap(), "same bytes");
-        // 3 stored blocks (0, 2, last) after header/log/BAT/metadata.
-        assert_eq!(std::fs::metadata(&out).unwrap().len(), 4 * MB + 3 * GOLDEN_BLOCK);
+        // 4 stored blocks (0, 2, 4, last) after header/log/BAT/metadata; holes (1, 3, 5) left out.
+        assert_eq!(v.len(), 4 * MB + 4 * GOLDEN_BLOCK);
+        // Any range reads the same bytes as the whole; the same raw + id → the same file (hash), another id → another.
+        let mut part = vec![0u8; 5 * MB as usize];
+        v.read_at(3 * MB + 7, &mut part).unwrap();
+        assert!(part[..] == whole[(3 * MB + 7) as usize..(8 * MB + 7) as usize]);
+        assert!(v.read_at(v.len() - 1, &mut [0u8; 2]).is_err());
+        let sha = v.sha256().unwrap();
+        assert_eq!(sha, crate::hash::file_hash(out.to_str().unwrap()).unwrap());
+        assert_eq!(Virtual::open(&raw, "stamp-1").unwrap().sha256().unwrap(), sha, "stable across opens (server restart)");
+        assert_ne!(Virtual::open(&raw, "stamp-2").unwrap().sha256().unwrap(), sha, "a new golden gets new GUIDs");
         let _ = std::fs::remove_dir_all(&d);
     }
 
@@ -395,9 +454,8 @@ mod tests {
         let _ = std::process::Command::new("sync").status();
         let out = format!("{raw}.broom.vhdx");
         let t = std::time::Instant::now();
-        write_dynamic(&crate::disk::Source::file(std::path::Path::new(&raw)).unwrap(), &out).unwrap();
-        let _ = std::process::Command::new("sync").status(); // both sides pay the flush
-        println!("broom vhdx:    {:?}", t.elapsed());
+        let sha = Virtual::open(std::path::Path::new(&raw), "bench").unwrap().sha256().unwrap();
+        println!("broom vhdx (virtual: layout + sha256 {}): {:?}", &sha[..12], t.elapsed());
         let t = std::time::Instant::now();
         let q = format!("{raw}.qemu.vhdx");
         assert!(std::process::Command::new("qemu-img")
