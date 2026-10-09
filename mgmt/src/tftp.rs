@@ -71,9 +71,9 @@ fn parse_rrq(b: &[u8]) -> Option<(String, Vec<(String, String)>)> {
 fn load(name: &str, server: Ipv4Addr) -> Result<Cow<'static, [u8]>, String> {
     let name = name.replace('\\', "/");
     match name.trim_start_matches('/') {
-        "snponly.efi" => Ok(Cow::Borrowed(crate::boot::SNPONLY_EFI)),
-        "sb/snponly-shim.efi" => Ok(Cow::Borrowed(crate::boot::SB_SHIM_EFI)),
-        "sb/snponly.efi" => Ok(Cow::Borrowed(crate::boot::SB_IPXE_EFI)),
+        "snponly.efi" => Ok(Cow::Borrowed(crate::boot::snponly_efi())),
+        "sb/snponly-shim.efi" => Ok(Cow::Borrowed(crate::boot::sb_shim_efi())),
+        "sb/snponly.efi" => Ok(Cow::Borrowed(crate::boot::sb_ipxe_efi())),
         "autoexec.ipxe" | "sb/autoexec.ipxe" => Ok(Cow::Owned(autoexec(server).into_bytes())),
         other => Err(format!("TFTP serves only the iPXE binaries (asked {other:?}); other files go over HTTP")),
     }
@@ -216,7 +216,7 @@ mod tests {
     #[tokio::test]
     async fn options_blocks_and_resend() {
         // TFTP serves only the embedded snponly.efi → use its first blocks to exercise OACK/blocks/resend/timeout.
-        let want = crate::boot::SNPONLY_EFI;
+        let want = crate::boot::snponly_efi();
         let srv = server().await;
         let c = UdpSocket::bind("127.0.0.1:0").await.unwrap();
 
@@ -257,10 +257,10 @@ mod tests {
         // snponly.efi comes from the binary itself; tsize probe then abort (UEFI does this).
         c.send_to(&rrq("snponly.efi", &[("tsize", "0")]), srv).await.unwrap();
         let (oack, tid) = recv(&c).await;
-        assert_eq!(oack, format!("\0\x06tsize\0{}\0", crate::boot::SNPONLY_EFI.len()).into_bytes());
+        assert_eq!(oack, format!("\0\x06tsize\0{}\0", crate::boot::snponly_efi().len()).into_bytes());
         c.send_to(b"\0\x05\0\x08abort\0", tid).await.unwrap();
         // The official Secure Boot pair under sb/ (shim → loads sb/snponly.efi by name).
-        for (name, want) in [("sb/snponly-shim.efi", crate::boot::SB_SHIM_EFI), ("sb/snponly.efi", crate::boot::SB_IPXE_EFI)] {
+        for (name, want) in [("sb/snponly-shim.efi", crate::boot::sb_shim_efi()), ("sb/snponly.efi", crate::boot::sb_ipxe_efi())] {
             c.send_to(&rrq(name, &[("tsize", "0")]), srv).await.unwrap();
             let (oack, tid) = recv(&c).await;
             assert_eq!(oack, format!("\0\x06tsize\0{}\0", want.len()).into_bytes(), "{name}");

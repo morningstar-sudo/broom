@@ -16,11 +16,11 @@ use crate::db::Machine;
 use crate::SharedState;
 
 /// iPXE built by mgmt/ipxe/build.sh (upstream + mgmt/ipxe/patches) (upgrading the mgmt binary = upgrading iPXE too).
-pub(crate) const SNPONLY_EFI: &[u8] = include_bytes!("../ipxe/snponly.efi");
+pub(crate) fn snponly_efi() -> &'static [u8] { crate::assets::bytes("ipxe/snponly.efi") }
 /// Official Secure Boot iPXE (mgmt/ipxe/fetch-signed.sh), served under `sb/` when "Secure Boot clients" is on:
 /// the iPXE shim (signed by Microsoft) loads `sb/snponly.efi` (signed by the iPXE CA) by name from the same directory.
-pub(crate) const SB_SHIM_EFI: &[u8] = include_bytes!("../ipxe/signed/snponly-shim.efi");
-pub(crate) const SB_IPXE_EFI: &[u8] = include_bytes!("../ipxe/signed/snponly.efi");
+pub(crate) fn sb_shim_efi() -> &'static [u8] { crate::assets::bytes("ipxe/signed/snponly-shim.efi") }
+pub(crate) fn sb_ipxe_efi() -> &'static [u8] { crate::assets::bytes("ipxe/signed/snponly.efi") }
 
 type Q = Query<HashMap<String, String>>;
 

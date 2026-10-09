@@ -19,9 +19,11 @@ VMDK/VHDX conversion, partition tables and archives are done in-process too (no 
 hivex), and the Windows client stage (kernel + initrd + Secure Boot shim) is built by CI and downloaded from the
 release on the first Windows publish — **the server needs no packages and no kernel modules** (no LIO, zram,
 loop or ntfs3): the iSCSI target, the RAM cache and NTFS reading are all in the binary.
-Offline server: download `broom-stage.tar.gz` of the same release elsewhere and copy it next to the binary (e.g.
-`/opt/bootrom/broom-stage.tar.gz`); the next Windows publish unpacks it. A locally built binary has no pinned stage: see
-*Build* for making its bundle.
+A release binary also downloads its `broom-assets.zip` (web UI, iPXE, scripts — ~1 MB) from the same release on its
+first start, keeps it next to the binary and loads it into RAM at every start; without it the server does not start.
+Offline server: download `broom-assets.zip` and `broom-stage.tar.gz` of the same release elsewhere and copy them next
+to the binary (e.g. `/opt/bootrom/`); the stage is unpacked by the next Windows publish. A locally built binary has
+the assets embedded and no pinned stage: see *Build* for making its bundle.
 
 ## How it works
 
@@ -236,9 +238,11 @@ Neither is committed. To change iPXE: commit inside `ipxe-src/`, regenerate the 
 `mgmt/ipxe/build.sh`), rebuild.
 
 CI (`.github/workflows/build.yml`) runs `./build.sh --ipxe` on every push / PR, builds the Windows stage bundle
-(`bootrom-mgmt build-stage` on Ubuntu's generic kernel + shim-signed), rebuilds the binary pinned to that bundle
-(its sha256 + URL appended to `mgmt/stage.pin`, embedded in the binary) and publishes `bootrom-mgmt`, `broom-stage.tar.gz`, `snponly.efi` and
-`SHA256SUMS`; pushes to `main` are tagged `v<version>-<short-sha>` and released.
+(`bootrom-mgmt build-stage` on Ubuntu's generic kernel + shim-signed) and the assets bundle (`bootrom-mgmt
+pack-assets`), rebuilds the binary pinned to both (sha256 + URL appended to `mgmt/stage.pin` / `mgmt/assets.pin`,
+embedded in the binary; with a pin, `build.sh` leaves the assets out of it) and publishes `bootrom-mgmt`,
+`broom-stage.tar.gz`, `broom-assets.zip`, `snponly.efi` and `SHA256SUMS`; pushes to `main` are tagged
+`v<version>-<short-sha>` and released.
 
 ## Repository layout
 

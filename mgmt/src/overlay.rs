@@ -41,12 +41,12 @@ const OVERLAYROOT_CONF: &str =
 ///     MISS → bring up the NIC + iscsistart -b (iBFT from iPXE sanhook) as before; broom-cache.service (golden)
 ///     copies golden iSCSI → SSD in the background for the next boot.
 ///  3. No sfdisk/losetup (old golden prep), unregistered machine or several disks → writeback in zram, no disk touched.
-const BROOM_ISCSI: &str = include_str!("../scripts/linux-iscsi-hook.sh");
+fn broom_iscsi() -> &'static str { crate::assets::text("scripts/linux-iscsi-hook.sh") }
 
 /// Runs in the REAL ROOT: broom-cache.service (baked into the golden via broom-prep) calls
 /// /run/broom-cache.sh copied out by the initrd hook → logic still injected by the server, tune without a golden rebuild.
 /// Mount /games from the SSD cache; MISS → copy golden iSCSI → SSD for the next boot.
-const CACHE_SCRIPT: &str = include_str!("../scripts/linux-cache.sh");
+fn cache_script() -> &'static str { crate::assets::text("scripts/linux-cache.sh") }
 
 /// Append one cpio.gz (overrides local-top/iscsi = attach golden + SSD writeback; + /etc/overlayroot.conf)
 /// to the end of the initrd → the kernel concatenates cpios, the later one overrides the golden's.
@@ -57,8 +57,8 @@ fn inject_initrd(initrd: &str, name: &str) -> Result<(), String> {
     let cpio = crate::archive::cpio_gz(&[
         Entry { path: "scripts", mode: 0o040755, data: &[] },
         Entry { path: "scripts/local-top", mode: 0o040755, data: &[] },
-        Entry { path: "scripts/local-top/iscsi", mode: 0o100755, data: BROOM_ISCSI.as_bytes() },
-        Entry { path: "scripts/broom-cache.sh", mode: 0o100644, data: CACHE_SCRIPT.as_bytes() },
+        Entry { path: "scripts/local-top/iscsi", mode: 0o100755, data: broom_iscsi().as_bytes() },
+        Entry { path: "scripts/broom-cache.sh", mode: 0o100644, data: cache_script().as_bytes() },
         Entry { path: "etc", mode: 0o040755, data: &[] },
         Entry { path: "etc/overlayroot.conf", mode: 0o100644, data: OVERLAYROOT_CONF.as_bytes() },
     ]);
@@ -73,27 +73,27 @@ fn inject_initrd(initrd: &str, name: &str) -> Result<(), String> {
 /// the broom-wb hook + overlayroot.conf are injected into the initrd by the server → no golden rebuild when tuning).
 /// Usage: curl -fsSL http://<server>/broom-prep | sudo bash
 /// __IP__ is replaced by the server IP.
-pub const PREP_SCRIPT: &str = include_str!("../scripts/prep-linux.sh");
+pub fn prep_script() -> &'static str { crate::assets::text("scripts/prep-linux.sh") }
 
 #[cfg(test)]
 mod tests {
     /// The hook injected into the initrd must be valid sh (error = client hangs in the initramfs).
     #[test]
     fn hook_syntax() {
-        for s in [super::BROOM_ISCSI, super::CACHE_SCRIPT, super::PREP_SCRIPT] {
+        for s in [super::broom_iscsi(), super::cache_script(), super::prep_script()] {
             // Wrapped in a never-called function: parsed only, even by a shell that ignores -n (busybox 1.30).
             let ok = std::process::Command::new("sh").args(["-n", "-c", &format!("broom_syntax_check(){{\n{s}\n}}")]).status().unwrap();
             assert!(ok.success());
         }
     }
 
-    /// Broom SSD layout in the Linux hook (cut from BROOM_ISCSI, fake /sys/block; the sfdisk mock creates the
+    /// Broom SSD layout in the Linux hook (cut from broom_iscsi(), fake /sys/block; the sfdisk mock creates the
     /// partitions its script names): shared with the Windows stage by partition names — Windows' layout without the
     /// Linux part is laid out again, a shared one is used as is (cache formatted only once), several unknown disks
     /// stay untouched.
     #[test]
     fn hook_shared_ssd_layout() {
-        let s = super::BROOM_ISCSI;
+        let s = super::broom_iscsi();
         let block = &s[s.find("has_label(){").unwrap()..s.find("# mkfs discards").unwrap()];
         // disks: (name, partition names already there); formatted: devices whose filesystem label is broomcache.
         let run = |tag: &str, disks: &[(&str, &[&str])], reg: &str, lx: u32, formatted: &[&str]| {
@@ -159,12 +159,12 @@ mod tests {
         assert_eq!(run("nossd", &[("sda", ALL)], "1", 55, &[]), ("WB= CACHE=".into(), String::new(), String::new()));
     }
 
-    /// Cache script (cut from CACHE_SCRIPT, wget mocked): copies the server no longer lists (or of another version)
+    /// Cache script (cut from cache_script(), wget mocked): copies the server no longer lists (or of another version)
     /// go, the others stay; the golden is copied whole and hashed on the way, valid only when hash and size match. No
     /// answer from the server → nothing removed.
     #[test]
     fn cache_list_and_copy() {
-        let s = super::CACHE_SCRIPT;
+        let s = super::cache_script();
         let part = &s[s.find("# Every image this machine uses").unwrap()..];
         let d = std::env::temp_dir().join("broom_t_cache_copy");
         let golden: Vec<u8> = (0..5_000_000u32).map(|i| (i % 253) as u8).collect();

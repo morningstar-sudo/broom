@@ -36,6 +36,11 @@ ntfs = { git = "https://github.com/ColinFinck/ntfs", rev = "47ae0168f6c607208b27
 zstd = "0.14.0"   # RAM cache mode of Linux goldens: 16 KB blocks compressed in the iSCSI daemon (iscsid/ramimg.rs)
 mimalloc = "0.1.52"   # global allocator: musl's malloc serializes threads (iSCSI daemon QD32 reads: 2× slower with it)
 
+[features]
+# Release build (CI): web UI / iPXE / scripts not embedded — loaded from the release's broom-assets.zip (assets.rs).
+# build.sh turns it on by itself when assets.pin holds a pin.
+external-assets = []
+
 [profile.release]
 strip = true
 lto = true

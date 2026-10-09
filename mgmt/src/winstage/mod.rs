@@ -18,8 +18,10 @@ mod prep;
 mod stage;
 
 pub use prep::prep_script;
-use prep::{boot_storage_done, has_stub, BROOM_BOOTORDER, BROOM_DONE};
+use prep::{boot_storage_done, has_stub, broom_bootorder, broom_done};
 pub use stage::{build_bundle, ensure_stage};
+#[cfg(feature = "external-assets")]
+pub(crate) use stage::download; // assets.rs: the release's broom-assets.zip
 
 use std::path::Path;
 use std::process::Command;
@@ -113,7 +115,7 @@ pub fn publish(st: &SharedState, id: i64, name: &str, steps: &mut crate::publish
     // the previous hash during a publish never gets the new templates next to its old golden).
     // broom-done / boot-order: the golden only holds a fixed stub (prep) that runs the copy the stage puts in BROOMWIN
     // broom\ — so a new mgmt version updates them without rebuilding the golden.
-    for (f, body) in [("broom-done.ps1", BROOM_DONE), ("broom-bootorder.ps1", BROOM_BOOTORDER)] {
+    for (f, body) in [("broom-done.ps1", broom_done()), ("broom-bootorder.ps1", broom_bootorder())] {
         let (p, tmp) = (format!("{out}/{f}"), format!("{out}/{f}.tmp"));
         std::fs::write(&tmp, body.replace('\n', "\r\n")).and_then(|_| std::fs::rename(&tmp, &p)).map_err(|e| format!("{f}: {e}"))?;
     }

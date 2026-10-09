@@ -13,13 +13,13 @@ fn write_exec(path: &str, body: &str) -> Result<(), String> {
 
 /// mkinitramfs hook for the stage: tools + modules for partitioning / NTFS / download / EFI.
 /// Copied to /broom/bin (ahead of busybox in PATH — needs the full od/tar/wget...).
-const STAGE_HOOK: &str = include_str!("../../scripts/stage-hook.sh");
+fn stage_hook() -> &'static str { crate::assets::text("scripts/stage-hook.sh") }
 
 /// Tools of the machine building the bundle that the hook copies into the stage (/broom/bin, ahead of busybox).
 const STAGE_TOOLS: &str = "sfdisk blkid mkfs.fat mkntfs ntfsfix efibootmgr wget sha256sum tar gzip od dd awk";
 
 /// Stage init-premount script — runs on the client, does NOT mount root; reboots into Windows when done.
-const STAGE_SCRIPT: &str = include_str!("../../scripts/stage.sh");
+fn stage_script() -> &'static str { crate::assets::text("scripts/stage.sh") }
 
 /// Build the stage: kernel `kernel` (None = the running one) + initrd (mkinitramfs, own confdir) → `sd`.
 /// Kernel + script + hook unchanged → keep the previous build (mkinitramfs MODULES=most takes about a minute).
@@ -33,10 +33,10 @@ fn build_stage(kernel: Option<&str>, sd: &str) -> Result<String, String> {
     // zstd: multithreaded compression + faster decompression than gzip; a builder without zstd → gzip.
     let compress = if run("sh", &["-c", "command -v zstd"]).is_ok() { "zstd" } else { "gzip" };
     let initramfs_conf = format!("MODULES=most\nBUSYBOX=y\nCOMPRESS={compress}\n");
-    let hook = STAGE_HOOK.replace("__TOOLS__", STAGE_TOOLS);
+    let hook = stage_hook().replace("__TOOLS__", STAGE_TOOLS);
     // Where each tool resolves on the builder is part of the key: a tool installed later (e.g. wget) → rebuilt.
     let tools = run("sh", &["-c", &format!("for b in {STAGE_TOOLS}; do command -v $b; done; true")]).unwrap_or_default();
-    let key = stable_key(&[kv.as_str(), initramfs_conf.as_str(), hook.as_str(), STAGE_SCRIPT, tools.as_str()]);
+    let key = stable_key(&[kv.as_str(), initramfs_conf.as_str(), hook.as_str(), stage_script(), tools.as_str()]);
     let key_file = format!("{sd}/stage.key");
     let have = |f: &str| Path::new(&format!("{sd}/{f}")).exists();
     if have("stage.img") && have("vmlinuz") && std::fs::read_to_string(&key_file).ok().as_deref() == Some(key.as_str()) {
@@ -50,7 +50,7 @@ fn build_stage(kernel: Option<&str>, sd: &str) -> Result<String, String> {
     std::fs::write(format!("{conf}/initramfs.conf"), &initramfs_conf).map_err(|e| e.to_string())?;
     std::fs::write(format!("{conf}/modules"), "").map_err(|e| e.to_string())?;
     write_exec(&format!("{conf}/hooks/broom-stage"), &hook)?;
-    write_exec(&format!("{conf}/scripts/init-premount/broom-stage"), STAGE_SCRIPT)?;
+    write_exec(&format!("{conf}/scripts/init-premount/broom-stage"), stage_script())?;
     std::fs::create_dir_all(&sd).map_err(|e| e.to_string())?;
     let tmp = format!("{sd}/stage.img.tmp");
     run("mkinitramfs", &["-d", conf, "-o", &tmp, &kv])?;
@@ -157,7 +157,7 @@ pub fn ensure_stage() -> Result<String, String> {
         let dl = crate::work_dir().join(format!("broom-stage-{}.tar.gz", unique()));
         std::fs::create_dir_all(crate::work_dir()).map_err(|e| e.to_string())?;
         tracing::info!("downloading the Windows stage: {url}");
-        let r = download(url, &dl)
+        let r = download(url, &dl, STAGE_MAX)
             .map_err(|e| format!("{e} — no internet on this server? download broom-stage.tar.gz of this release elsewhere and copy it to {}", local.display()))
             .and_then(|()| install_bundle(&dl, want, &sd))
             .map(|()| "installed from the release bundle".to_string());
@@ -231,9 +231,9 @@ fn install_bundle(file: &Path, want: &str, sd: &str) -> Result<(), String> {
 }
 
 /// HTTPS GET → `dest` (rustls, built-in CA roots: works on a server without ca-certificates).
-fn download(url: &str, dest: &Path) -> Result<(), String> {
+pub(crate) fn download(url: &str, dest: &Path, max: u64) -> Result<(), String> {
     let resp = ureq::get(url).call().map_err(|e| format!("download {url}: {e}"))?;
-    let mut r = resp.into_body().into_with_config().limit(STAGE_MAX).reader();
+    let mut r = resp.into_body().into_with_config().limit(max).reader();
     let mut f = std::fs::File::create(dest).map_err(|e| format!("{}: {e}", dest.display()))?;
     std::io::copy(&mut r, &mut f).map_err(|e| format!("download {url}: {e}"))?;
     Ok(())
@@ -292,7 +292,7 @@ mod tests {
     #[test]
     fn stage_function_names_unique() {
         let mut seen = std::collections::HashSet::new();
-        for l in super::STAGE_SCRIPT.lines() {
+        for l in super::stage_script().lines() {
             let t = l.trim_start();
             if let Some(name) = t.split_once("(){").map(|(n, _)| n).filter(|n| !n.is_empty() && n.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')) {
                 assert!(seen.insert(name.to_string()), "stage function {name}() defined twice");
@@ -303,7 +303,7 @@ mod tests {
     /// The stage script runs inside the initramfs — a syntax error = client stuck in a shell.
     #[test]
     fn stage_syntax() {
-        for s in [super::STAGE_SCRIPT, super::STAGE_HOOK] {
+        for s in [super::stage_script(), super::stage_hook()] {
             // Busybox 1.30 (Ubuntu 22.04) ignores -n with -c and RUNS the script (partitions /dev/sda, reboots) →
             // wrap it in a function that is never called: the whole body is parsed, nothing executes.
             let ok = stage_sh().args(["-n", "-c", &format!("broom_syntax_check(){{\n{s}\n}}")]).status().unwrap();
@@ -311,12 +311,12 @@ mod tests {
         }
     }
 
-    /// Shell functions vhdx_guid + patch16 (cut from STAGE_SCRIPT) run on a VHDX generated by vhdx.rs:
+    /// Shell functions vhdx_guid + patch16 (cut from stage_script()) run on a VHDX generated by vhdx.rs:
     /// read the right DataWriteGuid of "base" and patch it into child-template → Rust reads it back equal.
     #[test]
     fn stage_guid_patch() {
         use crate::vhdx;
-        let s = super::STAGE_SCRIPT;
+        let s = super::stage_script();
         let funcs = &s[s.find("vhdx_guid(){").unwrap()..s.find("# 2. base/child state machine").unwrap()];
         let dir = std::env::temp_dir();
         let (base, child) = (dir.join("broom_t_base.vhdx"), dir.join("broom_t_child.vhdx"));
@@ -335,13 +335,13 @@ mod tests {
         let _ = std::fs::remove_file(child);
     }
 
-    /// Stage disk choice (cut from STAGE_SCRIPT, fake /sys/block with GPT partition names): a registered machine with
+    /// Stage disk choice (cut from stage_script(), fake /sys/block with GPT partition names): a registered machine with
     /// ONE internal disk is partitioned by itself; USB disks never count; anything else asks — Enter / an unknown name
     /// = reboot untouched. The Broom SSD is known by its partition names: Windows' layout is reused, one laid out by a
     /// Linux boot only gets formatted, an older Linux-only layout is laid out again; a late disk is looked for.
     #[test]
     fn stage_disk_choice() {
-        let s = super::STAGE_SCRIPT;
+        let s = super::stage_script();
         let part = &s[s.find("part(){").unwrap()..s.find("# end disk choice").unwrap()];
         // disks: name ("+" suffix = shows up only after the stage's pause), usb, partition names ("" = none) and
         // whether p2 already holds the BROOMWIN filesystem.
@@ -406,7 +406,7 @@ mod tests {
     /// → two partitions only.
     #[test]
     fn stage_ssd_layout() {
-        let s = super::STAGE_SCRIPT;
+        let s = super::stage_script();
         let f = &s[s.find("layout(){").unwrap()..s.find("\nscan\n").unwrap()];
         let run = |sectors: u64, lx: u32| {
             let d = std::env::temp_dir().join(format!("broom_t_layout_{sectors}_{lx}"));
@@ -424,11 +424,11 @@ mod tests {
         assert!(!run(80 * gib, 55).contains("broomwb"), "80 GB disk: Windows would get < 32 GB → no Linux part");
     }
 
-    /// Stage vs server golden.sha256 before downloading (cut from STAGE_SCRIPT, wget mocked by a list of answers,
+    /// Stage vs server golden.sha256 before downloading (cut from stage_script(), wget mocked by a list of answers,
     /// "" = no file): same hash → go on; missing → wait; other hash → reboot; missing for good → die.
     #[test]
     fn stage_waits_for_server_hash() {
-        let s = super::STAGE_SCRIPT;
+        let s = super::stage_script();
         let lp = &s[s.find("  srv_hash(){").unwrap()..s.find("  D=$B/dl-$HASH").unwrap()];
         let run = |answers: &[&str]| {
             let d = std::env::temp_dir().join(format!("broom_t_hash_{}", answers.len()));
@@ -450,11 +450,11 @@ mod tests {
         assert_eq!(run(&[""; 50]), "DIE");
     }
 
-    /// Stage license part (cut from STAGE_SCRIPT): a new generation rebuilds base, the same one keeps it,
+    /// Stage license part (cut from stage_script()): a new generation rebuilds base, the same one keeps it,
     /// no key keeps base (activation stays) and drops lic.txt; srv.txt always written.
     #[test]
     fn stage_license_rebuilds_base() {
-        let s = super::STAGE_SCRIPT;
+        let s = super::stage_script();
         let part = &s[s.find("# License key (Machines page)").unwrap()..s.find("# Drivers (Drivers page)").unwrap()];
         let run = |lic: &str, base_lic: &str| {
             let d = std::env::temp_dir().join(format!("broom_t_lic_{lic}_{base_lic}"));
@@ -479,7 +479,7 @@ mod tests {
     /// (the reset child's parent is base itself).
     #[test]
     fn stage_forged_first_pending_ignored() {
-        let s = super::STAGE_SCRIPT;
+        let s = super::stage_script();
         let part = &s[s.find("# 2. base/child state machine").unwrap()..s.find("# Machine name (Machines table").unwrap()];
         let d = std::env::temp_dir().join("broom_t_forged");
         let _ = std::fs::remove_dir_all(&d);
@@ -498,7 +498,7 @@ mod tests {
     /// folder is gone), an archive that doesn't match its sha256 is left out.
     #[test]
     fn stage_drivers_reextracted_for_base() {
-        let s = super::STAGE_SCRIPT;
+        let s = super::stage_script();
         let part = &s[s.find("  for x in drivers/*; do").unwrap()..s.find("  cp base-template.vhdx child.vhdx || die").unwrap()];
         let d = std::env::temp_dir().join("broom_t_drvx");
         let _ = std::fs::remove_dir_all(&d);
@@ -522,11 +522,11 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
     }
 
-    /// Stage drivers part (cut from STAGE_SCRIPT, wget mocked, real tar.gz): download + extract, base rebuilt only
+    /// Stage drivers part (cut from stage_script(), wget mocked, real tar.gz): download + extract, base rebuilt only
     /// when the set present changes, removal, no answer → keep, failed download → not counted (retried).
     #[test]
     fn stage_drivers_sync() {
-        let s = super::STAGE_SCRIPT;
+        let s = super::stage_script();
         let d = std::env::temp_dir().join("broom_t_drv");
         let _ = std::fs::remove_dir_all(&d);
         let (b, run) = (d.join("b"), d.join("run"));
@@ -580,11 +580,11 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
     }
 
-    /// Stage boot order (cut from STAGE_SCRIPT, efibootmgr mocked with a real-board-like list): the PXE entry is
+    /// Stage boot order (cut from stage_script(), efibootmgr mocked with a real-board-like list): the PXE entry is
     /// BootCurrent whatever its name; other network entries go after Windows; unknown BootCurrent → old matching.
     #[test]
     fn stage_boot_order_by_bootcurrent() {
-        let s = super::STAGE_SCRIPT;
+        let s = super::stage_script();
         let part = &s[s.find("all=$(efibootmgr -v)").unwrap()..s.find("# Stage log on BROOMWIN").unwrap()];
         let v = "Boot0000* Windows Boot Manager\tHD(1,GPT,aaaa)/File(\\EFI\\Microsoft\\Boot\\bootmgfw.efi)\n\
                  Boot0001* UEFI: SanDisk\tPciRoot(0x0)/Pci(0x14,0x0)/USB(1,0)\n\
@@ -624,11 +624,11 @@ mod tests {
         assert_eq!((set.as_str(), file.as_str(), strict.as_str()), ("0003,0004,0005,0001", "0003,0004,0005,0001", "0007,0000"));
     }
 
-    /// Stage golden download (cut from STAGE_SCRIPT, wget/getfile mocked): the old golden + base go, the golden is
+    /// Stage golden download (cut from stage_script(), wget/getfile mocked): the old golden + base go, the golden is
     /// downloaded whole and hashed on the way; a short file (disk full / cut stream) is never accepted.
     #[test]
     fn stage_whole_golden_download() {
-        let s = super::STAGE_SCRIPT;
+        let s = super::stage_script();
         let part = &s[s.find("  D=$B/dl-$HASH").unwrap()..s.find("# 1b. ").unwrap()];
         let golden: Vec<u8> = (0..3_000_000u32).map(|i| (i % 251) as u8).collect();
         let run = |short: bool| {
@@ -669,13 +669,13 @@ mod tests {
         assert_eq!((out.as_str(), sum_ok, old_gone), ("DIE", false, true), "short golden never accepted");
     }
 
-    /// Image folders (cut from STAGE_SCRIPT, wget mocked): the booting image's set comes to the top of broom\, the
+    /// Image folders (cut from stage_script(), wget mocked): the booting image's set comes to the top of broom\, the
     /// previous one is parked in img.<name>\ (its unfinished session dropped); parked images the server no longer
     /// lists (or of another version) are removed — none when the server doesn't answer; a pre-folders disk keeps its
     /// top set as this image's.
     #[test]
     fn stage_image_folders() {
-        let s = super::STAGE_SCRIPT;
+        let s = super::stage_script();
         let part = &s[s.find("# 0. Every Windows image").unwrap()..s.find("# 1. Golden hash mismatch").unwrap()];
         let run = |tag: &str, files: &[(&str, &str)], name: &str, list: Option<&str>| {
             let d = std::env::temp_dir().join(format!("broom_t_folders_{tag}"));
@@ -721,7 +721,7 @@ mod tests {
     /// one unused the longest first; nothing left to remove → die.
     #[test]
     fn stage_room_evicts_oldest_parked() {
-        let s = super::STAGE_SCRIPT;
+        let s = super::stage_script();
         let oldest = &s[s.find("oldest(){").unwrap()..s.find("# Room for this session").unwrap()];
         let part = format!("{oldest}\n{}", &s[s.find("  gb(){").unwrap()..s.find("  # $f.ok = file fully downloaded").unwrap()]);
         let d = std::env::temp_dir().join("broom_t_room");
@@ -748,7 +748,7 @@ mod tests {
     /// → nothing removed.
     #[test]
     fn stage_session_room() {
-        let s = super::STAGE_SCRIPT;
+        let s = super::stage_script();
         let part = &s[s.find("oldest(){").unwrap()..s.find("# 1. Golden hash mismatch").unwrap()];
         let part = &part[..part.find("cd /").unwrap()]; // up to the end of step 0
         let run = |avail_kb: &str| {
@@ -778,7 +778,7 @@ mod tests {
     #[ignore]
     fn download_https() {
         let p = std::env::temp_dir().join("broom_t_download");
-        super::download("https://github.com/ipxe/ipxe/releases/download/v2.0.0/ipxeboot.tar.gz", &p).unwrap();
+        super::download("https://github.com/ipxe/ipxe/releases/download/v2.0.0/ipxeboot.tar.gz", &p, super::STAGE_MAX).unwrap();
         let sha = crate::hash::file_hash(&p.to_string_lossy()).unwrap();
         assert_eq!(sha, "01a526d4cc791fc30362259c609d6c506cc64a7bdff51b9a5eb788354e17eee1", "pinned in fetch-signed.sh");
         let _ = std::fs::remove_file(p);

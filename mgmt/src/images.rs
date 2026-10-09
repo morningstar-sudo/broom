@@ -636,7 +636,7 @@ async fn broom_prep(State(st): State<SharedState>) -> impl IntoResponse {
     let ip = st.db.get_config("dhcp_server_ip", "10.0.0.12");
     (
         [(header::CONTENT_TYPE, "text/x-shellscript; charset=utf-8")],
-        crate::overlay::PREP_SCRIPT.replace("__IP__", &ip),
+        crate::overlay::prep_script().replace("__IP__", &ip),
     )
 }
 

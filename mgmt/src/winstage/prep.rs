@@ -36,14 +36,14 @@ fn xml(s: &str) -> String {
 /// Diskless tweaks → EFI bundle C:\broom\efi → unattend (guest user + autologon + skip OOBE) +
 /// stubs broom-done.ps1 / broom-bootorder.ps1 → sysprep /generalize /quit → boot-start disk drivers (Start=0) →
 /// power off the VM.
-const PREP_WIN: &str = include_str!("../../scripts/prep-win.ps1");
+fn prep_win() -> &'static str { crate::assets::text("scripts/prep-win.ps1") }
 
 /// First logon (when base.vhdx is created on each machine): write base.ok to BROOMWIN, then restart at once → the stage
 /// commits base. With base mode on for the image (broom\basemode.txt from the stage): a popup tells the technician to
 /// set up apps (FACEIT AC...) and restart; that restart → the stage commits base. BROOMWIN has no
 /// drive letter (GPT bit 63, set by the stage) → write directly via the volume path `\\?\Volume{..}\`. ASCII only
 /// (Set-Content -Encoding ascii).
-pub(super) const BROOM_DONE: &str = include_str!("../../scripts/broom-done.ps1");
+pub(super) fn broom_done() -> &'static str { crate::assets::text("scripts/broom-done.ps1") }
 
 /// BroomBootOrder task (SYSTEM, at startup + every 5 minutes): Windows pulls "Windows Boot Manager"
 /// to the top of BootOrder every boot → the next power-on skips PXE (no reset). Restores the order the stage
@@ -51,7 +51,7 @@ pub(super) const BROOM_DONE: &str = include_str!("../../scripts/broom-done.ps1")
 /// entry name (PXE entries are named anything: "IBA GE Slot 0100", "Realtek PXE B03"...). Reads/writes the UEFI
 /// BootOrder variable directly (kernel32; SYSTEM + SeSystemEnvironmentPrivilege). Entries not in the file (added
 /// later) are kept, after. Writes NVRAM only when different. ASCII only.
-pub(super) const BROOM_BOOTORDER: &str = include_str!("../../scripts/broom-bootorder.ps1");
+pub(super) fn broom_bootorder() -> &'static str { crate::assets::text("scripts/broom-bootorder.ps1") }
 
 /// /broom-prep-win: embeds the guest user/password (config shared with Linux).
 pub fn prep_script(db: &dyn Db) -> String {
@@ -63,19 +63,19 @@ pub fn prep_script(db: &dyn Db) -> String {
     fill_prep(&esc(&user), &esc(&pass))
 }
 
-/// PREP_WIN with its placeholders filled (user/password already escaped).
+/// prep_win() with its placeholders filled (user/password already escaped).
 fn fill_prep(user: &str, pass: &str) -> String {
     let drivers = BOOT_STORAGE.iter().map(|d| format!("'{d}'")).collect::<Vec<_>>().join(", ");
-    PREP_WIN
-        .replace("__STUB_DONE__", &STUB.replace("__SCRIPT__", "broom-done.ps1"))
-        .replace("__STUB_BOOTORDER__", &STUB.replace("__SCRIPT__", "broom-bootorder.ps1"))
+    prep_win()
+        .replace("__STUB_DONE__", &stub().replace("__SCRIPT__", "broom-done.ps1"))
+        .replace("__STUB_BOOTORDER__", &stub().replace("__SCRIPT__", "broom-bootorder.ps1"))
         .replace("__BOOT_STORAGE__", &drivers)
         .replace("__USER__", user)
         .replace("__PASS__", pass)
 }
 
 /// What the prep puts in the golden as broom-done.ps1 / broom-bootorder.ps1: runs the stage's copy from BROOMWIN.
-const STUB: &str = include_str!("../../scripts/broom-stub.ps1");
+fn stub() -> &'static str { crate::assets::text("scripts/broom-stub.ps1") }
 const STUB_MARK: &str = "broom-stub v1";
 
 /// The golden holds the stubs (prep of this version or newer). An older golden still has full scripts of the version
@@ -93,9 +93,9 @@ mod tests {
     fn prep_win_filled() {
         let s = super::fill_prep("guest", "1");
         assert!(!s.contains("__"), "placeholder left unreplaced");
-        assert!(super::BROOM_DONE.is_ascii(), "broom-done is written with -Encoding ascii");
-        assert!(super::BROOM_BOOTORDER.is_ascii());
-        assert!(super::STUB.is_ascii());
+        assert!(super::broom_done().is_ascii(), "broom-done is written with -Encoding ascii");
+        assert!(super::broom_bootorder().is_ascii());
+        assert!(super::stub().is_ascii());
         // The golden gets the two stubs, not the scripts themselves (those come from BROOMWIN, newest every boot).
         assert!(s.contains("broom\\broom-done.ps1") && s.contains("broom\\broom-bootorder.ps1"));
         assert_eq!(s.matches(super::STUB_MARK).count(), 2);

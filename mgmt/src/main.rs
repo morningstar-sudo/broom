@@ -3,6 +3,7 @@
 // (Linux) + winstage (Windows), machines/devices/license/settings (web API), auth, disk/archive/vmdk/vhdx (formats).
 mod api;
 mod archive;
+mod assets;
 mod auth;
 mod boot;
 mod db;
@@ -150,26 +151,22 @@ fn clean_leftovers() {
     each(&work_dir().join("export"), &|n| !n.ends_with(".new"));
 }
 
-/// Web admin embedded in the binary — deploy a single file, no static/ directory to ship.
-const INDEX_HTML: &str = include_str!("../static/index.html");
-/// Standalone login/setup page (auth.rs). Served at /login; unauthenticated page requests are redirected here.
-const LOGIN_HTML: &str = include_str!("../static/login.html");
-const LOGIN_JS: &str = include_str!("../static/login.js");
 /// Version (Cargo.toml) — shown on the web + in logs to tell deployed builds apart.
 const VERSION: &str = env!("CARGO_PKG_VERSION");
-/// The web admin's script (index.html loads it as /app.js?v=<version>, so a new build is never served from cache).
-const APP_JS: &str = include_str!("../static/app.js");
+// Web admin (assets.rs: embedded, or the release's broom-assets.zip) — deploy a single file, no static/ directory.
+// index.html loads the script as /app.js?v=<version>, so a new build is never served from cache. /login is the
+// standalone login/setup page (auth.rs); unauthenticated page requests are redirected there.
 async fn index() -> Html<String> {
-    Html(INDEX_HTML.replace("__VERSION__", VERSION))
+    Html(assets::text("static/index.html").replace("__VERSION__", VERSION))
 }
 async fn app_js() -> impl axum::response::IntoResponse {
-    ([(axum::http::header::CONTENT_TYPE, "text/javascript; charset=utf-8")], APP_JS)
+    ([(axum::http::header::CONTENT_TYPE, "text/javascript; charset=utf-8")], assets::text("static/app.js"))
 }
 async fn login_page() -> Html<&'static str> {
-    Html(LOGIN_HTML)
+    Html(assets::text("static/login.html"))
 }
 async fn login_js() -> impl axum::response::IntoResponse {
-    ([(axum::http::header::CONTENT_TYPE, "text/javascript; charset=utf-8")], LOGIN_JS)
+    ([(axum::http::header::CONTENT_TYPE, "text/javascript; charset=utf-8")], assets::text("static/login.js"))
 }
 
 /// Server events (SSE): "ping" on connect + every 5 s (keep-alive) for the sidebar dot — the browser marks
@@ -198,20 +195,9 @@ async fn events(
 }
 
 // Per-tab fragments — loaded on demand via /ui/<page> (the web only fetches the tab being viewed).
-const PAGE_MACHINES: &str = include_str!("../static/page-machines.html");
-const PAGE_IMAGES: &str = include_str!("../static/page-images.html");
-const PAGE_NETWORK: &str = include_str!("../static/page-network.html");
-const PAGE_SYSTEM: &str = include_str!("../static/page-system.html");
-const PAGE_DRIVERS: &str = include_str!("../static/page-drivers.html");
-const PAGE_DEVICES: &str = include_str!("../static/page-devices.html");
 async fn ui_page(axum::extract::Path(p): axum::extract::Path<String>) -> Html<&'static str> {
     Html(match p.as_str() {
-        "machines" => PAGE_MACHINES,
-        "images" => PAGE_IMAGES,
-        "network" => PAGE_NETWORK,
-        "system" => PAGE_SYSTEM,
-        "drivers" => PAGE_DRIVERS,
-        "devices" => PAGE_DEVICES,
+        "machines" | "images" | "network" | "system" | "drivers" | "devices" => assets::text(&format!("static/page-{p}.html")),
         _ => "",
     })
 }
@@ -287,6 +273,7 @@ async fn main() {
         Some("install-service") => setup::install_service(&args),
         Some("build-stage") => winstage::build_bundle(&args), // CI: the Windows stage bundle
         Some("iscsid") => iscsid::run(&args).await,            // the iSCSI target daemon (started by iscsi.rs)
+        Some("pack-assets") => assets::pack(&args),            // CI: broom-assets.zip for the release binary
         _ => {}
     }
 
@@ -319,6 +306,15 @@ async fn main() {
     }
     std::mem::forget(lock); // held for the life of the process
     clean_leftovers(); // no other instance (and so no job) can be running
+    // Web UI, iPXE, scripts: a release binary loads (first start: downloads) its broom-assets.zip. Without them clients
+    // would get no iPXE → refuse to start, saying how to fix it.
+    match tokio::task::spawn_blocking(assets::init).await.unwrap_or_else(|e| Err(e.to_string())) {
+        Ok(s) => info!("{s}"),
+        Err(e) => {
+            error!("{e}");
+            std::process::exit(1);
+        }
+    }
 
     // Preflight (root; kernel modules only warn) → stop if it fails. Network never configured → setup detects it and
     // seeds the DHCP config (dev: --skip-preflight skips both).

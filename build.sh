@@ -53,8 +53,11 @@ cd "$root/mgmt"
 # "GLIBC_2.xx not found"). Needs musl-tools (musl-gcc) for the bundled SQLite C code.
 target=x86_64-unknown-linux-musl
 command -v musl-gcc >/dev/null || { echo "missing musl-gcc: sudo apt install musl-tools" >&2; exit 1; }
-echo "== [2/3] mgmt (cargo build --release --target $target → $CARGO_TARGET_DIR)"
-cargo build --release --target $target
+# assets.pin holds a pin (CI's release build) → web UI / iPXE / scripts come from broom-assets.zip, not embedded.
+features=""
+grep -qE '^[0-9a-f]{64}$' assets.pin && features="--features external-assets"
+echo "== [2/3] mgmt (cargo build --release --target $target $features → $CARGO_TARGET_DIR)"
+cargo build --release --target $target $features
 if [ "$test" = 1 ]; then
   echo "== cargo test"
   cargo test

@@ -1,7 +1,8 @@
 # Build iPXE (snponly.efi = upstream at mgmt/ipxe/IPXE_COMMIT + mgmt/ipxe/patches) + the mgmt binary (static musl, iPXE +
-# web UI + scripts embedded), run the unit tests, build the Windows stage bundle and pin it in a final binary; keep
-# binary + bundle + snponly.efi as artifacts. Every push to main also tags the commit v<Cargo.toml version>-<short sha>
-# (e.g. v0.5.3-a1b2c3d) and publishes a release with those files.
+# web UI + scripts embedded), run the unit tests, build the Windows stage bundle and the assets bundle (web UI, iPXE,
+# scripts), then a final binary pinned to both and without the assets inside; keep binary + bundles + snponly.efi as
+# artifacts. Every push to main also tags the commit v<Cargo.toml version>-<short sha> (e.g. v0.5.3-a1b2c3d) and
+# publishes a release with those files.
 name: build
 
 on:
@@ -69,21 +70,30 @@ jobs:
           echo "kernel $kv - broom-stage.tar.gz sha256 $sha"
           echo "sha=$sha" >> "$GITHUB_OUTPUT"
 
-      # The same binary again, now pinned to that bundle (mgmt/stage.pin, embedded at build time): it downloads it
-      # from this release on the first Windows publish and accepts nothing else.
-      - name: Pin the stage bundle in the binary
+      # Web UI, iPXE, scripts → broom-assets.zip, packed by the binary that still embeds them (assets.rs keeps the list).
+      - name: Assets bundle
+        id: assets
         run: |
-          printf '%s\n%s\n' "${{ steps.stage.outputs.sha }}" \
-            "https://github.com/${{ github.repository }}/releases/download/${{ steps.tag.outputs.name }}/broom-stage.tar.gz" \
-            >> mgmt/stage.pin
-          cat mgmt/stage.pin
+          sha=$(mgmt/dist/bootrom-mgmt pack-assets "$PWD/stage-out/broom-assets.zip" | tail -1)
+          echo "broom-assets.zip sha256 $sha"
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+
+      # The same binary again, now pinned to both bundles (mgmt/stage.pin + mgmt/assets.pin, embedded at build time)
+      # and without the assets inside (build.sh sees the pin): it downloads them from this release — the assets on its
+      # first start, the stage on the first Windows publish — and accepts nothing else.
+      - name: Pin the bundles in the binary
+        run: |
+          url="https://github.com/${{ github.repository }}/releases/download/${{ steps.tag.outputs.name }}"
+          printf '%s\n%s\n' "${{ steps.stage.outputs.sha }}" "$url/broom-stage.tar.gz" >> mgmt/stage.pin
+          printf '%s\n%s\n' "${{ steps.assets.outputs.sha }}" "$url/broom-assets.zip" >> mgmt/assets.pin
+          cat mgmt/stage.pin mgmt/assets.pin
           bash build.sh --no-test
 
       - name: Checksums
         run: |
-          cp stage-out/broom-stage.tar.gz mgmt/dist/
+          cp stage-out/broom-stage.tar.gz stage-out/broom-assets.zip mgmt/dist/
           cd mgmt
-          sha256sum dist/bootrom-mgmt ipxe/snponly.efi dist/broom-stage.tar.gz | tee SHA256SUMS
+          sha256sum dist/bootrom-mgmt ipxe/snponly.efi dist/broom-stage.tar.gz dist/broom-assets.zip | tee SHA256SUMS
           file dist/bootrom-mgmt
 
       - uses: actions/upload-artifact@v4
@@ -93,6 +103,7 @@ jobs:
             mgmt/dist/bootrom-mgmt
             mgmt/ipxe/snponly.efi
             mgmt/dist/broom-stage.tar.gz
+            mgmt/dist/broom-assets.zip
             mgmt/SHA256SUMS
           if-no-files-found: error
 
@@ -109,5 +120,6 @@ jobs:
             mgmt/dist/bootrom-mgmt
             mgmt/ipxe/snponly.efi
             mgmt/dist/broom-stage.tar.gz
+            mgmt/dist/broom-assets.zip
             mgmt/SHA256SUMS
           generate_release_notes: true
