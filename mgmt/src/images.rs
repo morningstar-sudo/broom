@@ -27,7 +27,6 @@ pub fn routes() -> Router<SharedState> {
         .route("/api/images/base-mode", post(set_base_mode))
         .route("/api/images/ssd", post(set_use_ssd))
         .route("/api/cache-list", get(cache_list))
-        .route("/api/prep-token", post(prep_token))
         .route("/api/images/job", get(job_status))
         .route("/broom-prep", get(broom_prep))
         .route("/broom-prep-win", get(broom_prep_win))
@@ -690,40 +689,12 @@ async fn set_use_ssd(State(st): State<SharedState>, Json(b): Json<SsdBody>) -> R
     Ok(Json(serde_json::json!({"ok": true})))
 }
 
-/// One-time links for /broom-prep-win: token → expiry. The script carries the guest password, so it is not public.
-static PREP_TOKENS: std::sync::LazyLock<std::sync::Mutex<HashMap<String, u64>>> = std::sync::LazyLock::new(Default::default);
-const PREP_TOKEN_SECS: u64 = 3600;
-
-/// POST /api/prep-token (admin) → {token}: valid once, for an hour. Refused while the guest password is the default.
-async fn prep_token(State(st): State<SharedState>) -> Result<Json<serde_json::Value>, ApiError> {
-    let pw = st.db.get_config("ltsp_password", "");
-    if pw.is_empty() || pw == "123456" {
-        return Err((StatusCode::BAD_REQUEST, "set a guest password first (Settings → Guest user) — it is baked into the golden".into()));
-    }
-    let (tok, now) = (crate::auth::random_token(), crate::now_secs());
-    let mut t = PREP_TOKENS.lock().unwrap();
-    t.retain(|_, exp| *exp > now);
-    t.insert(tok.clone(), now + PREP_TOKEN_SECS);
-    tracing::info!("Windows prep link issued (valid once, {} min)", PREP_TOKEN_SECS / 60);
-    Ok(Json(serde_json::json!({"token": tok})))
-}
-
-/// Consume a prep token: true once per token, while unexpired.
-fn take_prep_token(t: &mut HashMap<String, u64>, tok: &str, now: u64) -> bool {
-    let hit = t.keys().find(|k| crate::auth::same(k.as_str(), tok)).cloned();
-    hit.and_then(|k| t.remove(&k)).is_some_and(|exp| exp > now)
-}
-
 /// Script that prepares a Windows golden (tweaks + EFI + unattend + sysprep), run INSIDE the Windows VM.
-/// GET /broom-prep-win?t=<one-time token from the Images page>  →  irm "http://<server>/broom-prep-win?t=…" | iex
-async fn broom_prep_win(State(st): State<SharedState>, Query(q): Query<HashMap<String, String>>) -> Result<impl IntoResponse, ApiError> {
-    let tok = q.get("t").map_or("", String::as_str);
-    if !take_prep_token(&mut PREP_TOKENS.lock().unwrap(), tok, crate::now_secs()) {
-        tracing::warn!("broom-prep-win refused: missing, used or expired link");
-        return Err((StatusCode::FORBIDDEN, "this link is used or expired — copy a new one from the web admin (Images → Windows prep command)".into()));
-    }
-    tracing::info!("broom-prep-win script handed out (link used)");
-    Ok(([(header::CONTENT_TYPE, "text/plain; charset=utf-8")], crate::winstage::prep_script(&*st.db)))
+/// GET /broom-prep-win  →  irm http://<server>/broom-prep-win | iex. Open on purpose (same command every time): it
+/// carries the guest user + password, readable by anyone on the boot LAN — like the golden itself.
+async fn broom_prep_win(State(st): State<SharedState>) -> impl IntoResponse {
+    tracing::info!("broom-prep-win script handed out");
+    ([(header::CONTENT_TYPE, "text/plain; charset=utf-8")], crate::winstage::prep_script(&*st.db))
 }
 
 #[cfg(test)]
@@ -741,15 +712,5 @@ mod tests {
             img("draft", "linux", None, true),        // not published
         ];
         assert_eq!(super::cache_lines(&list), "win11 aa\nubuntu bb\n");
-    }
-
-    #[test]
-    fn prep_token_once_and_expires() {
-        let mut t = std::collections::HashMap::from([("aaa".to_string(), 2000u64), ("old".to_string(), 500u64)]);
-        assert!(!super::take_prep_token(&mut t, "", 1000), "no token");
-        assert!(!super::take_prep_token(&mut t, "bbb", 1000), "unknown token");
-        assert!(super::take_prep_token(&mut t, "aaa", 1000));
-        assert!(!super::take_prep_token(&mut t, "aaa", 1000), "used once");
-        assert!(!super::take_prep_token(&mut t, "old", 1000), "expired");
     }
 }

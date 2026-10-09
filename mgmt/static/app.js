@@ -258,7 +258,7 @@ async function loadImages(){
          <button class="ghost danger" ${act('delImage',i.id,i.name)}>Delete</button>
        </td></tr>`).join('') || '<tr><td colspan=8 class="mono">no images yet</td></tr>';
   // srvhost inside the images fragment → set after it is injected.
-  try{document.getElementById('srvhost2').textContent=location.host;}catch(_){}
+  for(const id of ['srvhost2','srvhost3']){const e=document.getElementById(id);if(e)e.textContent=location.host;}
 }
 async function toggleCache(id,cur,name){const mode=cur==='zram'?'disk':'zram';
   if(!confirm('Switch image cache to "'+(mode==='zram'?'RAM':'disk')+'"? (republish; RAM keeps a compressed copy of the golden in memory and serves clients from it)'))return;
@@ -271,11 +271,6 @@ async function toggleBase(id,on){
 async function toggleSsd(id,on){
   const el=document.getElementById('img_status');
   try{await j('/api/images/ssd',mk({id,on}));loadImages();}catch(e){el.textContent=' ✗ '+e.message;}}
-// One-time link for the Windows prep script (it carries the guest password): valid once, for an hour.
-async function prepCmd(){const el=document.getElementById('prep_cmd');
-  try{const r=await j('/api/prep-token',{method:'POST'});
-    el.textContent='irm "http://'+location.host+'/broom-prep-win?t='+r.token+'" | iex';}
-  catch(e){el.textContent='✗ '+e.message;}}
 async function setDefault(id){await j('/api/images/default',mk({id}));loadImages()}
 // Job status by image name, pushed over SSE (/api/events "job") → text of el until ✓/✗.
 // done(): optional, called when the job finishes (e.g. refresh the versions list).
@@ -472,7 +467,7 @@ const ACTIONS={
   dvToggle:(k,el)=>dvToggle(k,el.checked), dvSelectAll:el=>dvSelectAll(el.checked),
   wake,manage,regMachine,loadStatus,clearMFilters,mPrev,mNext,setKey,rearmKey,
   loadDevices,dvOpen,dvSave,dvDelete,dvClose,dvBulk,dvRegister,dvImport,dvAdd,dvRender,
-  loadImages,addImage,prepCmd,setDefault,toggleCache,toggleBase,toggleSsd,republish,showVersions,exportImage,editBoot,delImage,
+  loadImages,addImage,setDefault,toggleCache,toggleBase,toggleSsd,republish,showVersions,exportImage,editBoot,delImage,
   snapshotImage,rollbackImage,versionToImage,deleteVersion,
   loadDrivers,uploadDriver,saveDrvTargets,delDriver,
   applyDhcp,savePw,saveCafe,setTimeout_,setZramReserve,logout,

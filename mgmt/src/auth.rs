@@ -414,7 +414,7 @@ mod tests {
         assert!(pub_get("/boot.ipxe") && pub_get("/tftp/broom/x/vmlinuz"));
         assert!(pub_post("/api/license") && pub_post("/api/auth/login") && pub_post("/api/booted"));
         assert!(!pub_get("/api/golden-chunk"), "delta chunks are gone");
-        assert!(!pub_post("/api/prep-token") && !pub_post("/api/images/base-mode"), "admin only");
+        assert!(pub_get("/broom-prep-win") && !pub_post("/api/images/base-mode"), "prep script open, admin APIs not");
         // guarded now: the app shell + its fragments (login is a separate page)
         assert!(!pub_get("/") && !pub_get("/machines") && !pub_get("/ui/images"));
         assert!(!pub_get("/api/status") && !pub_get("/api/images") && !pub_post("/api/images/delete"));

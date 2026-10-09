@@ -119,13 +119,13 @@ sent, in parallel 8 MB chunks with retry) — or a single `.vmdk` / `.img` / `.z
   ```
   Power off → upload (OS = Linux, cache `disk` or RAM).
 
-- **Windows 11 Pro** — set the guest password first (Settings → Guest user; the default is refused). Then on the
-  Images page click **Windows prep command** and run it inside the VM in Audit Mode (PowerShell as Admin):
+- **Windows 11 Pro** — set the guest user + password (Settings → Guest user), then run inside the VM in Audit Mode
+  (PowerShell as Admin; also shown on the Images page):
   ```powershell
-  irm "http://<server>/broom-prep-win?t=<one-time token>" | iex
+  irm http://<server>/broom-prep-win | iex
   ```
-  The link works once, for an hour (the script carries the guest password). The VM syspreps and powers off by
-  itself → upload (OS = Windows).
+  The script carries the guest password and is readable by anyone on the boot LAN (like the golden itself). The VM
+  syspreps and powers off by itself → upload (OS = Windows).
 - **Base build on each machine:** on its first boot (and after a new golden, a rename or a driver change) every
   Windows machine specializes the golden once and saves that as its *base*; every later boot resets to it. By default
   the base is saved automatically (the machine restarts by itself after the first logon). Tick **Base mode** on an
