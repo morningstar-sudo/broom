@@ -213,39 +213,93 @@ fn sparse_to(p: &Path, n: u64, out: &File, base: u64) -> Result<(), String> {
     let gd_at = h.gd_off.checked_mul(SECTOR).ok_or_else(|| format!("{}: corrupt VMDK header", p.display()))?;
     let gd = rd(&f, gd_at, gd_len as usize)?;
     let compressed = h.flags & COMPRESSED_GRAINS != 0;
-    // One grain table (its grains land at fixed raw offsets) per task, in parallel.
-    let tables: Vec<(u64, u64)> = (0..ngt).map(|g| (g, u32le(&gd, g as usize * 4) as u64)).filter(|&(_, s)| s != 0).collect();
-    crate::disk::par_map(&tables, |&(g, gt_sec)| {
-        let mut buf = vec![0u8; gbytes as usize];
+
+    // Every allocated grain as (file sector, virtual grain), then read IN FILE ORDER. VMware lays grains out in the
+    // order the guest wrote them (installing Windows = all over the disk): following virtual order means a 64 KB read
+    // at a random place per grain — a few MB/s on an HDD. File order = big sequential reads.
+    let mut grains: Vec<(u32, u32)> = Vec::new();
+    for g in 0..ngt {
+        let gt_sec = u32le(&gd, g as usize * 4) as u64;
+        if gt_sec == 0 {
+            continue;
+        }
         let gt = rd(&f, gt_sec * SECTOR, (h.gtes * 4) as usize)?;
         for j in 0..h.gtes {
             let vg = g * h.gtes + j;
             if vg >= ngr {
                 break;
             }
-            let e = u32le(&gt, j as usize * 4) as u64;
-            if e <= 1 {
-                continue; // 0 = not allocated, 1 = zero grain
+            let e = u32le(&gt, j as usize * 4);
+            if e > 1 {
+                // 0 = not allocated, 1 = zero grain. Each real grain has its own place in the file: more of them than
+                // the file can hold (tables pointing at the same data) is a corrupt / crafted file, not a RAM bill.
+                if grains.len() as u64 >= (flen / SECTOR).min(32 << 20) || vg > u32::MAX as u64 {
+                    return Err(format!("{}: corrupt VMDK (more grains than the file holds)", p.display()));
+                }
+                grains.push((e, vg as u32));
             }
+        }
+    }
+    grains.sort_unstable();
+    // Runs of grains close together in the file, read with one call each (up to 16 MB; a gap over 1 MB starts a new run).
+    const RUN: u64 = 16 << 20;
+    let slot = if compressed { 2 * gbytes + 4096 + 12 } else { gbytes }; // the most one grain can take in the file
+    let mut runs: Vec<&[(u32, u32)]> = Vec::new();
+    let mut i = 0;
+    while i < grains.len() {
+        let start = grains[i].0 as u64 * SECTOR;
+        let mut k = i + 1;
+        while k < grains.len() {
+            let at = grains[k].0 as u64 * SECTOR;
+            if at + slot - start > RUN || at > grains[k - 1].0 as u64 * SECTOR + slot + (1 << 20) {
+                break;
+            }
+            k += 1;
+        }
+        runs.push(&grains[i..k]);
+        i = k;
+    }
+    crate::disk::par_map(&runs, |run| {
+        let start = run[0].0 as u64 * SECTOR;
+        let end = (run[run.len() - 1].0 as u64 * SECTOR + slot).min(flen);
+        let buf = rd(&f, start, end.checked_sub(start).ok_or("corrupt VMDK grain table")? as usize)?;
+        let corrupt = || format!("{}: corrupt grain", p.display());
+        // Grains next to each other on the virtual disk too are written with one call.
+        let mut pending: (u64, Vec<u8>) = (0, Vec::new());
+        let flush = |p: &mut (u64, Vec<u8>)| -> Result<(), String> {
+            if !p.1.is_empty() {
+                out.write_all_at(&p.1, base + p.0).map_err(|e| format!("write raw: {e}"))?;
+                p.1.clear();
+            }
+            Ok(())
+        };
+        let mut grain = vec![0u8; gbytes as usize];
+        for &(e, vg) in *run {
+            let at = (e as u64 * SECTOR - start) as usize;
+            let off = vg as u64 * gbytes;
+            let m = gbytes.min(cap - off) as usize;
             if compressed {
                 // Grain marker: LBA (u64) + compressed size (u32) + zlib data.
-                let size = u32le(&rd(&f, e * SECTOR, 12)?, 8) as u64;
-                if size > 2 * gbytes + 4096 {
-                    return Err(format!("{}: corrupt compressed grain", p.display()));
-                }
-                let z = rd(&f, e * SECTOR + 12, size as usize)?;
-                buf.fill(0);
-                let mut d = Vec::with_capacity(gbytes as usize);
-                ZlibDecoder::new(&z[..]).take(gbytes).read_to_end(&mut d).map_err(|e| format!("{}: grain: {e}", p.display()))?;
-                buf[..d.len()].copy_from_slice(&d);
+                let size = u32le(buf.get(at..at + 12).ok_or_else(corrupt)?, 8) as usize;
+                let z = buf.get(at + 12..at + 12 + size).ok_or_else(corrupt)?;
+                grain.fill(0);
+                let mut d = &mut grain[..];
+                std::io::copy(&mut ZlibDecoder::new(z).take(gbytes), &mut d).map_err(|e| format!("{}: grain: {e}", p.display()))?;
             } else {
-                f.read_exact_at(&mut buf, e * SECTOR).map_err(|e| format!("{}: grain: {e}", p.display()))?;
+                grain.copy_from_slice(buf.get(at..at + gbytes as usize).ok_or_else(corrupt)?);
             }
-            let off = vg * gbytes;
-            let m = gbytes.min(cap - off) as usize;
-            write_nonzero(out, &buf[..m], base + off)?;
+            let g = &grain[..m];
+            if g.iter().all(|&b| b == 0) {
+                flush(&mut pending)?; // stays a hole
+                continue;
+            }
+            if pending.1.is_empty() || pending.0 + pending.1.len() as u64 != off {
+                flush(&mut pending)?;
+                pending.0 = off;
+            }
+            pending.1.extend_from_slice(g);
         }
-        Ok(())
+        flush(&mut pending)
     })?;
     Ok(())
 }
@@ -420,6 +474,38 @@ mod tests {
             assert!(std::fs::read(&out).unwrap() == want, "{sub}: same bytes");
         }
         let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// Grains stored in another order than on the virtual disk (how a VM that installed Windows looks) — read in file
+    /// order, every byte lands where it belongs; zero data stays a hole.
+    #[test]
+    fn reads_out_of_order_grains() {
+        let d = dir("order");
+        let v = d.join("disk.vmdk");
+        qemu(&["create", "-q", "-f", "vmdk", "-o", "subformat=monolithicSparse", v.to_str().unwrap(), "8M"]);
+        let io = |cmd: &str| assert!(Command::new("qemu-io").args(["-f", "vmdk", "-c", cmd, v.to_str().unwrap()]).output().unwrap().status.success(), "{cmd}");
+        for (pat, off, len) in [(0x11, 6 << 20, 64 << 10), (0x22, 1 << 20, 192 << 10), (0x33, 3 << 20, 64 << 10), (0x00, 5 << 20, 64 << 10)] {
+            io(&format!("write -P {pat} {off} {len}"));
+        }
+        let out = d.join("back.raw");
+        to_raw(&v, &out).unwrap();
+        let got = std::fs::read(&out).unwrap();
+        let mut want = vec![0u8; 8 << 20];
+        want[6 << 20..(6 << 20) + (64 << 10)].fill(0x11);
+        want[1 << 20..(1 << 20) + (192 << 10)].fill(0x22);
+        want[3 << 20..(3 << 20) + (64 << 10)].fill(0x33);
+        assert!(got == want, "same bytes");
+        use std::os::unix::fs::MetadataExt;
+        assert!(std::fs::metadata(&out).unwrap().blocks() * 512 <= 1 << 20, "zero grain + unallocated stay holes");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// Timing only: BROOM_VMDK=<file> BROOM_OUT=<raw> cargo test -- --ignored --exact vmdk::tests::bench_to_raw
+    #[test]
+    #[ignore]
+    fn bench_to_raw() {
+        let (Ok(v), Ok(o)) = (std::env::var("BROOM_VMDK"), std::env::var("BROOM_OUT")) else { return };
+        to_raw(Path::new(&v), Path::new(&o)).unwrap();
     }
 
     #[test]
