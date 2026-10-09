@@ -377,7 +377,7 @@ mod tests {
                 .replace("lbl(){ blkid -s LABEL -o value \"$1\" 2>/dev/null; }", &lbl)
                 .replace("SYSB=/sys/block; CON=/dev/console", &format!("SYSB={}/block; CON=/dev/null", d.display()))
                 .replace("read -r ans < $CON", &format!("read -r ans < {}/answer", d.display()));
-            let sh = format!("REG={reg}; LX=50\nlog(){{ :; }}; die(){{ echo DIE; exit; }}; restart(){{ echo RESTART; exit; }}\n{body}\necho \"DISK $disk ${{NEWDISK:--}} ${{FORMAT:--}}\"");
+            let sh = format!("REG={reg}; LX=50\nlog(){{ :; }}; die(){{ echo DIE; exit; }}; restart(){{ echo RESTART; exit; }}; configure_networking(){{ :; }}\n{body}\necho \"DISK $disk ${{NEWDISK:--}} ${{FORMAT:--}}\"");
             let o = stage_sh().args(["-c", &sh]).output().unwrap();
             let _ = std::fs::remove_dir_all(&d);
             String::from_utf8_lossy(&o.stdout).trim().to_string()
@@ -400,6 +400,11 @@ mod tests {
         assert_eq!(run("j", &[("sda", false, OTHER, false), ("sdb", false, ALL, false)], "", ""), "DISK sdb - 1", "laid out by Linux → only formatted");
         assert_eq!(run("k", &[("sda", false, ALL, true)], "1", ""), "DISK sda - -", "shared layout, Windows part ready");
         assert_eq!(run("l", &[("sda", false, OTHER, false), ("sdb", false, OLD_LINUX, false)], "", ""), "DISK sdb 1 -", "older Linux-only layout → laid out again, no question");
+        // ask_disk runs in $(...): configure_networking there would be forgotten (IP=done lives in a shell variable)
+        // and the next call would run DHCP again on the configured NIC — downloads then crawled at ~200 KB/s.
+        let ask = &s[s.find("ask_disk(){").unwrap()..];
+        let ask = &ask[..ask.find("\n}\n").unwrap()];
+        assert!(!ask.lines().any(|l| !l.trim_start().starts_with('#') && l.contains("configure_networking")), "no network setup in the subshell");
     }
 
     /// The Broom SSD layout: Windows gets what the Linux share leaves; no Linux share (or < 32 GB left for Windows)

@@ -77,8 +77,9 @@ scan
 ask_disk(){
   echo "broom: no Broom disk on this machine yet - one disk must be ERASED for Windows." > $CON
   if [ "$REG" != 1 ]; then
-    # Its IP + MAC, to find it on the server's Machines page (network up now; quiet: stdout is the disk answer).
-    configure_networking > /dev/null 2>&1
+    # Its IP + MAC, to find it on the server's Machines page. The network was brought up by the caller: NOT here —
+    # this runs in $(...), and configure_networking remembers it is done only in a shell variable (IP=done) that a
+    # subshell loses → the next call would run DHCP again on the configured NIC (seen: downloads at ~200 KB/s).
     ip=$(sed -n "s/^IPV4ADDR=['\"]*\([0-9.]*\).*/\1/p" /run/net-*.conf 2>/dev/null | head -n 1)
     echo "broom: this machine is NOT registered on the server (Machines page): IP ${ip:-?}, MAC ${MAC:-?}" > $CON
   fi
@@ -108,6 +109,7 @@ if [ -z "$disk" ]; then
   if [ "$REG" = 1 ] && [ $# -eq 1 ] && [ "$1" = "$one" ]; then
     disk=$1
   else
+    [ "$REG" = 1 ] || configure_networking # in this shell (see ask_disk): its IP is shown on the screen
     disk=$(ask_disk "$@")
     [ -n "$disk" ] || restart "no disk chosen -> nothing was touched"
   fi
