@@ -257,6 +257,8 @@ async function loadImages(){
          <button class="ghost" ${act('editBoot',i.id)}>Boot</button>
          <button class="ghost danger" ${act('delImage',i.id,i.name)}>Delete</button>
        </td></tr>`).join('') || '<tr><td colspan=8 class="mono">no images yet</td></tr>';
+  // A job still running that this tab doesn't follow (page reloaded / opened meanwhile) → follow it on the status line.
+  for(const i of rows)if(i.job&&i.job.startsWith('⏳')&&!jobWatch[i.name])watchJob(i.name,document.getElementById('img_status'));
   // srvhost inside the images fragment → set after it is injected.
   for(const id of ['srvhost2','srvhost3']){const e=document.getElementById(id);if(e)e.textContent=location.host;}
 }
@@ -276,8 +278,13 @@ async function setDefault(id){await j('/api/images/default',mk({id}));loadImages
 // done(): optional, called when the job finishes (e.g. refresh the versions list).
 const jobWatch={};
 function showJob(name,s){const w=jobWatch[name];if(!w||!s)return;
-  w.el.textContent=' '+s;
-  if(s.startsWith('✓')||s.startsWith('✗')){delete jobWatch[name];loadImages();if(w.done)w.done();}}
+  // The page may have been rebuilt since the watch started (tab switch): then the Images page's status line.
+  const el=w.el.isConnected?w.el:document.getElementById('img_status');
+  if(el)el.textContent=' '+(el===w.el?'':name+': ')+s;
+  if(s.startsWith('✓')||s.startsWith('✗')){delete jobWatch[name];
+    if(curPage==='images')loadImages().then(()=>{   // an open Versions panel of this image follows too (new v1, rollback…)
+      const r=imgRows.find(x=>x.name===name);if(r&&verImg&&verImg.name===name)showVersions(r.id,r.name,r.os);}).catch(()=>{});
+    if(w.done)w.done();}}
 function watchJob(name,el,done){
   el.textContent=' ⏳ working...';jobWatch[name]={el,done};
   // catch up once: the job may have moved on (or finished) before this tab started watching
@@ -480,6 +487,8 @@ function startApp(){
   srvEvents.addEventListener('ping',()=>{lastPing=Date.now();setServer(true);});
   srvEvents.addEventListener('job',e=>{const d=JSON.parse(e.data);showJob(d.name,d.status);});
   srvEvents.onerror=()=>setServer(false);
+  // (Re)connected: job events sent while the link was down are lost → ask for the status of every followed job.
+  srvEvents.onopen=()=>{for(const n in jobWatch)j('/api/images/job?name='+encodeURIComponent(n)).then(r=>showJob(n,r.status)).catch(()=>{});};
   setInterval(()=>{if(lastPing&&Date.now()-lastPing>12000)setServer(false);},3000);
   if(location.pathname!=='/'+pageFromPath())history.replaceState(null,'','/'+pageFromPath());
   showPage(pageFromPath());

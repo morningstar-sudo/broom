@@ -47,15 +47,18 @@ fn name_of(st: &SharedState, id: i64) -> Result<String, ApiError> {
     st.db.image(id).map_err(ise)?.map(|i| i.name).ok_or((StatusCode::NOT_FOUND, format!("image {id} not found")))
 }
 
-/// Image rows + size of the golden being served (image.img): `size` = virtual disk, `used` = bytes on disk (sparse).
+/// Image rows + size of the golden being served (image.img): `size` = virtual disk, `used` = bytes on disk (sparse);
+/// `job` = its job status (a page opened while a job runs picks it up from here).
 async fn list(State(st): State<SharedState>) -> Result<Json<Vec<serde_json::Value>>, ApiError> {
     use std::os::unix::fs::MetadataExt;
+    let jobs = st.jobs.lock().unwrap().clone();
     let rows = st.db.images().map_err(ise)?.into_iter().map(|i| {
         let m = std::fs::metadata(crate::images_dir().join(&i.name).join("image.img")).ok();
         let mut v = serde_json::to_value(&i).unwrap_or_default();
         v["size"] = m.as_ref().map(|m| m.len()).into();
         v["used"] = m.as_ref().map(|m| m.blocks() * 512).into();
         v["export"] = crate::export::export_info(&i.name);
+        v["job"] = jobs.get(&i.name).cloned().into();
         v
     });
     Ok(Json(rows.collect()))

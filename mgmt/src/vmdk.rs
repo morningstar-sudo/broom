@@ -240,6 +240,28 @@ fn sparse_to(p: &Path, n: u64, out: &File, base: u64) -> Result<(), String> {
             }
         }
     }
+    // The raw file's blocks reserved in VIRTUAL order first: the writes below come in file order (= all over the
+    // disk), and without this the filesystem would place image.img's blocks in that scattered order too — every later
+    // pass over image.img (golden.vhdx, snapshot) would then read it seeking. Best effort (fallocate may be missing).
+    {
+        use std::os::fd::AsRawFd;
+        let mut vs: Vec<u32> = grains.iter().map(|g| g.1).collect();
+        vs.sort_unstable();
+        let mut i = 0;
+        while i < vs.len() {
+            let mut k = i + 1;
+            while k < vs.len() && vs[k] == vs[k - 1] + 1 {
+                k += 1;
+            }
+            let (off, end) = (vs[i] as u64 * gbytes, ((vs[k - 1] as u64 + 1) * gbytes).min(cap));
+            // SAFETY: fallocate on a valid fd; plain integers.
+            let r = unsafe { libc::fallocate(out.as_raw_fd(), 0, (base + off) as libc::off_t, (end - off) as libc::off_t) };
+            if r != 0 {
+                break;
+            }
+            i = k;
+        }
+    }
     grains.sort_unstable();
     // Runs of grains close together in the file, read with one call each (up to 16 MB; a gap over 1 MB starts a new run).
     const RUN: u64 = 16 << 20;
