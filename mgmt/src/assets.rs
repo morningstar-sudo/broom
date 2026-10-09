@@ -25,7 +25,6 @@ assets!(
     "static/page-system.html",
     "static/page-drivers.html",
     "static/page-devices.html",
-    "static/page-groups.html",
     "ipxe/snponly.efi",
     "ipxe/signed/snponly-shim.efi",
     "ipxe/signed/snponly.efi",
@@ -38,7 +37,6 @@ assets!(
     "scripts/broom-done.ps1",
     "scripts/broom-bootorder.ps1",
     "scripts/broom-games.ps1",
-    "scripts/broom-watch.ps1",
     "scripts/broom-stub.ps1",
 );
 
