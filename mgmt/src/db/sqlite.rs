@@ -17,6 +17,9 @@ pub struct Sqlite {
 
 const SCHEMA: &str = r#"
     PRAGMA journal_mode = WAL;
+    -- Per connection, so it is part of every open. WAL + NORMAL: no fsync per commit (each DHCP lease write),
+    -- still consistent; a power loss can only drop the last commits.
+    PRAGMA synchronous = NORMAL;
 
     CREATE TABLE IF NOT EXISTS images(
         id          INTEGER PRIMARY KEY,
@@ -602,6 +605,8 @@ mod tests {
         drop(Sqlite::open(&p2).unwrap());
         let v: i64 = Connection::open(&p2).unwrap().query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
         assert_eq!(v, SCHEMA_VERSION);
+        let sync: i64 = Sqlite::open(&p2).unwrap().c().query_row("PRAGMA synchronous", [], |r| r.get(0)).unwrap();
+        assert_eq!(sync, 1, "NORMAL on every open (per-connection pragma)");
         tmp("broom_test_migrate.db");
         tmp("broom_test_migrate_new.db");
     }

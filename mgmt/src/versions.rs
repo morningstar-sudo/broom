@@ -158,25 +158,47 @@ fn snapshot_at(root: &Path, img: &Path, name: &str, label: &str) -> Result<(Mani
     let used = std::os::unix::fs::MetadataExt::blocks(&f.metadata().map_err(e("stat image"))?) * 512;
     std::fs::create_dir_all(root).map_err(e("mkdir storage"))?;
     crate::publish::need_space(root, used, "snapshot")?;
+    // New chunks are written as .tmp without a flush each (a 12 GB first snapshot = ~3000 of them), flushed together
+    // by one syncfs, and only then renamed: a final chunk name still always means its whole data is on disk.
+    static RUN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let tag = format!("{}-{}.tmp", std::process::id(), RUN.fetch_add(1, std::sync::atomic::Ordering::Relaxed));
+    let mut pending: std::collections::HashMap<String, (PathBuf, PathBuf)> = Default::default();
     let mut chunks = Vec::new();
-    let mut new = 0;
     let mut buf = Vec::new();
-    for i in 0..size.div_ceil(CHUNK) {
-        match read_chunk(&f, i, size, &mut buf)? {
-            None => chunks.push(ZERO.to_string()),
-            Some(h) => {
-                let p = chunk_path(root, &h);
-                // Reused only when the stored chunk has the right length: a chunk cut short by a power loss under its
-                // final name would otherwise poison every version that shares it.
-                if std::fs::metadata(&p).map(|m| m.len()).ok() != Some(buf.len() as u64) {
-                    std::fs::create_dir_all(p.parent().unwrap()).map_err(e("mkdir chunks"))?;
-                    write_durable(&p, &buf).map_err(e("store chunk"))?;
-                    new += 1;
+    let r = (|| {
+        for i in 0..size.div_ceil(CHUNK) {
+            match read_chunk(&f, i, size, &mut buf)? {
+                None => chunks.push(ZERO.to_string()),
+                Some(h) => {
+                    let p = chunk_path(root, &h);
+                    // Reused only when the stored chunk has the right length: a chunk cut short by a power loss under
+                    // its final name would otherwise poison every version that shares it.
+                    if !pending.contains_key(&h) && std::fs::metadata(&p).map(|m| m.len()).ok() != Some(buf.len() as u64) {
+                        std::fs::create_dir_all(p.parent().unwrap()).map_err(e("mkdir chunks"))?;
+                        let tmp = p.with_extension(&tag);
+                        std::fs::write(&tmp, &buf).map_err(e("store chunk"))?;
+                        pending.insert(h.clone(), (tmp, p));
+                    }
+                    chunks.push(h);
                 }
-                chunks.push(h);
             }
         }
+        if !pending.is_empty() {
+            sync_fs(root)?; // data first...
+            for (tmp, p) in pending.values() {
+                std::fs::rename(tmp, p).map_err(e("store chunk"))?;
+            }
+            sync_fs(root)?; // ...then the names, before the manifest that points at them
+        }
+        Ok::<_, String>(())
+    })();
+    if let Err(err) = r {
+        for (tmp, _) in pending.values() {
+            let _ = std::fs::remove_file(tmp); // already renamed → gone, nothing removed
+        }
+        return Err(err);
     }
+    let new = pending.len();
     let dir = manifest_dir(root, name);
     std::fs::create_dir_all(&dir).map_err(e("mkdir manifests"))?;
     let n = list_at(root, name, None).first().and_then(|m| m.version[1..].parse::<u64>().ok()).unwrap_or(0) + 1;
@@ -184,6 +206,17 @@ fn snapshot_at(root: &Path, img: &Path, name: &str, label: &str) -> Result<(Mani
     let m = Manifest { version: format!("v{n}"), label: label.to_string(), created, size, chunk_size: CHUNK, chunks, diff: None };
     write_durable(&dir.join(format!("{}.json", m.version)), &serde_json::to_vec(&m).unwrap()).map_err(e("store manifest"))?;
     Ok((Manifest { chunks: Vec::new(), ..m }, new))
+}
+
+/// Flush everything written on the filesystem holding `dir` (one call instead of an fsync per file).
+fn sync_fs(dir: &Path) -> Result<(), String> {
+    use std::os::fd::AsRawFd;
+    let d = File::open(dir).map_err(e("open storage"))?;
+    // SAFETY: valid fd; syncfs only flushes.
+    if unsafe { libc::syncfs(d.as_raw_fd()) } != 0 {
+        return Err(format!("syncfs {}: {}", dir.display(), std::io::Error::last_os_error()));
+    }
+    Ok(())
 }
 
 /// Write `data` as `p`: a temp file, flushed to disk, then renamed — after a power loss `p` is either whole or absent.
@@ -353,6 +386,13 @@ mod tests {
         let (root, img) = (d.join("storage"), d.join("image.img"));
         std::fs::write(&img, vec![7u8; 1000]).unwrap();
         let (v1, _) = snapshot_at(&root, &img, "img", "").unwrap();
+        // The same new chunk twice in one snapshot: stored once, no .tmp left behind.
+        let twice = d.join("twice.img");
+        std::fs::write(&twice, [vec![5u8; CHUNK as usize], vec![5u8; CHUNK as usize]].concat()).unwrap();
+        assert_eq!(snapshot_at(&root, &twice, "twice", "").unwrap().1, 1);
+        assert_eq!(walk_count(&root.join("chunks")), 2);
+        assert!(gc(&root).is_ok()); // v1 of "img" + "twice": nothing to free
+        assert_eq!(walk_count(&root.join("chunks")), 2);
         // A chunk cut short under its final name → the next snapshot stores it again instead of reusing it.
         let h = load(&root, "img", &v1.version).unwrap().chunks[0].clone();
         std::fs::write(chunk_path(&root, &h), b"").unwrap();

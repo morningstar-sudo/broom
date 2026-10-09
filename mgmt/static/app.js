@@ -242,14 +242,14 @@ async function loadImages(){
   const rows=imgRows=await j('/api/images');
   document.querySelector('#images tbody').innerHTML=rows.map(i=>
     `<tr><td>${esc(i.name)}${i.export?`<div class="mono" style="font-size:12px" title="exported ${i.export.created?new Date(i.export.created*1000).toLocaleString():''} — save both into one folder, open the .vmx in VMware">⬇ <a href="/api/images/export-file?id=${i.id}&f=vmx">.vmx</a> · <a href="/api/images/export-file?id=${i.id}&f=vmdk">.vmdk ${gbs(i.export.size)}</a> (${esc(i.export.version)})</div>`:''}</td><td><span class="pill ${i.os}">${esc(i.os)}</span></td>
-       <td class="mono">${esc(i.cache_mode||'disk')}</td>
+       <td class="mono">${i.cache_mode==='zram'?'RAM':'disk'}</td>
        <td>${i.is_default?'<span class="ok">✓</span>':''}</td>
        <td>${i.boot_script?'<span class="ok">✓</span>':'<span class="mono">no</span>'}</td>
        <td class="mono" title="used on disk / virtual disk">${i.size==null?'—':gbs(i.used)+' / '+gbs(i.size)}${i.active_version?' <span class="pill linux">'+esc(i.active_version)+'</span>':''}</td>
        <td class="mono" title="${esc(i.hash||'')}">${i.hash?esc(i.hash).slice(0,10):'—'}</td>
        <td class="row">
          <button class="ghost" ${act('setDefault',i.id)}>Default</button>
-         <button class="ghost" ${act('toggleCache',i.id,i.cache_mode||'disk',i.name)}>${(i.cache_mode==='zram')?'→disk':'→zram'}</button>
+         <button class="ghost" ${act('toggleCache',i.id,i.cache_mode||'disk',i.name)}>${(i.cache_mode==='zram')?'→disk':'→RAM'}</button>
          ${i.os==='windows'?`<button class="ghost" ${act('toggleBase',i.id,!i.base_mode)} title="BASE MODE: the first logon on each machine waits for a technician to set up apps, then restart (saved for every boot). Off: base is saved by itself.">${i.base_mode?'Base mode: ON':'Base mode: off'}</button>`:`<button class="ghost" ${act('toggleSsd',i.id,!i.use_ssd)} title="On: the golden is cached and the session's writes go to the machine's SSD (reset every boot). Off (one-time): nothing touches the SSD — golden over the network, writes in RAM, gone at power-off.">${i.use_ssd?'SSD: on':'SSD: off (one-time)'}</button>`}
          <button class="ghost" ${act('republish',i.id,i.name)}>Republish</button>
          <button class="ghost" ${act('showVersions',i.id,i.name,i.os)}>Versions</button>
@@ -261,7 +261,7 @@ async function loadImages(){
   try{document.getElementById('srvhost2').textContent=location.host;}catch(_){}
 }
 async function toggleCache(id,cur,name){const mode=cur==='zram'?'disk':'zram';
-  if(!confirm('Switch image cache to "'+mode+'"? (republish; zram loads the img into RAM)'))return;
+  if(!confirm('Switch image cache to "'+(mode==='zram'?'RAM':'disk')+'"? (republish; RAM keeps a compressed copy of the golden in memory and serves clients from it)'))return;
   const el=document.getElementById('img_status');
   try{await j('/api/images/cache-mode',mk({id,mode}));watchJob(name,el);}catch(e){el.textContent=' ✗ '+e.message;}}
 async function toggleBase(id,on){

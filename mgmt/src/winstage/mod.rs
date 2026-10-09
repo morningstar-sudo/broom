@@ -18,7 +18,7 @@ mod prep;
 mod stage;
 
 pub use prep::prep_script;
-use prep::{boot_storage_done, silent_oobe, write_broom_done, BOOT_STORAGE, BROOM_BOOTORDER, BROOM_DONE};
+use prep::{boot_storage_done, has_stub, BROOM_BOOTORDER, BROOM_DONE};
 pub use stage::{build_bundle, ensure_stage};
 
 use std::path::Path;
@@ -54,68 +54,20 @@ fn ntfs_parts(t: &crate::disk::Table) -> Vec<(u64, u64)> {
     parts
 }
 
-/// Mount partition [start, start+size) of a raw file (loop), run f(mnt), always unmount + detach the loop.
-fn with_part<T>(
-    raw: &str,
-    (start, size): (u64, u64),
-    mnt: &str,
-    ro: bool,
-    f: impl FnOnce(&str) -> Result<T, String>,
-) -> Result<T, String> {
-    let (o, s) = (start.to_string(), size.to_string());
-    let mut args = vec!["-f", "--show"];
-    if ro {
-        args.push("-r");
-    }
-    args.extend(["-o", o.as_str(), "--sizelimit", s.as_str(), raw]);
-    let dev = run("losetup", &args)?;
-    let _ = std::fs::create_dir_all(mnt);
-    // Mount left over from an interrupted publish (mgmt restarted midway) → unmount everything first.
-    while run("umount", &[mnt]).is_ok() {}
-    let opt = if ro { "ro" } else { "rw" };
-    // The kernel's ntfs3 driver (no ntfs-3g package). It refuses a dirty volume → same hint as a read-only mount.
-    let r = run("mount", &["-t", "ntfs3", "-o", opt, &dev, mnt])
-        .map_err(|e| {
-            format!(
-                "mount the Windows partition (ntfs3): {e} — if the kernel has ntfs3, Windows was not shut down cleanly \
-                 (hibernated, Fast Startup or forced power-off): boot the VM, run the prep command again, let it power off"
-            )
-        })
-        .and_then(|_| {
-            // A read-only fallback must not pass as success: probe a write first.
-            let probe = format!("{mnt}/.broom-rw");
-            let r = if !ro && std::fs::write(&probe, b"").is_err() {
-                Err("Windows partition mounted read-only: Windows was not shut down cleanly (hibernated, Fast Startup or \
-                     forced power-off) — boot the VM, run the prep command again and let it power off by itself, then upload"
-                    .into())
-            } else {
-                let _ = std::fs::remove_file(&probe);
-                f(mnt)
-            };
-            let _ = run("umount", &[mnt]);
-            r
-        });
-    let _ = run("losetup", &["-d", &dev]);
-    r
-}
-
-/// The partition that CONTAINS Windows (has the SYSTEM hive) — mounts each NTFS partition read-only, largest first.
+/// The partition that CONTAINS Windows (has the SYSTEM hive) — reads each NTFS partition, largest first.
 /// No guessing by size: picking the wrong one would let the later in-place edits wreck image.img.
-fn find_windows(raw: &str, mnt: &str) -> Result<(u64, u64), String> {
+fn find_windows(raw: &str) -> Result<(u64, u64), String> {
     let parts = ntfs_parts(&crate::disk::read(raw)?.ok_or("golden has no partition table")?);
     let mut seen = Vec::new();
     for p in &parts {
-        let probe = with_part(raw, *p, mnt, true, |m| {
-            let hive = Path::new(&format!("{m}/Windows/System32/config/SYSTEM")).exists();
-            let top: Vec<String> = std::fs::read_dir(m)
-                .map(|rd| rd.flatten().take(12).map(|e| e.file_name().to_string_lossy().to_string()).collect())
-                .unwrap_or_default();
-            Ok((hive, top))
-        });
-        match probe {
-            Ok((true, _)) => return Ok(*p),
-            Ok((false, top)) => seen.push(format!("{}GB [{}]", p.1 >> 30, top.join(", "))),
-            Err(e) => seen.push(format!("{}GB (mount error: {e})", p.1 >> 30)),
+        match crate::ntfsread::Vol::open(raw, *p) {
+            Ok(mut v) => {
+                if v.exists("Windows/System32/config/SYSTEM") {
+                    return Ok(*p);
+                }
+                seen.push(format!("{}GB [{}]", p.1 >> 30, v.root_names(12).join(", ")));
+            }
+            Err(e) => seen.push(format!("{}GB (read error: {e})", p.1 >> 30)),
         }
     }
     Err(format!(
@@ -141,8 +93,7 @@ pub fn publish(st: &SharedState, id: i64, name: &str, steps: &mut crate::publish
     let stage = ensure_stage()?;
 
     // golden.vhdx gets a new GUID on every convert → new hash → every client re-downloads. Golden still newer than
-    // image.img → keep it, only refresh the stage + boot_script (Publish with a new binary = cheap).
-    // Note: changing the extract/registry logic needs a rebuild → upload again or `touch image.img`.
+    // image.img → keep it, only refresh the stage + scripts + boot_script (Publish with a new binary = cheap).
     let fresh = golden_fresh(&raw, &out);
     let drivers = if fresh {
         "kept (golden already built from image.img + the current embedded logic)".to_string()
@@ -170,10 +121,32 @@ pub fn publish(st: &SharedState, id: i64, name: &str, steps: &mut crate::publish
     // The stage checks these small files against this list on every boot (a guest could swap them on the SSD).
     // First line: the golden these files belong to — the stage applies them only to that golden (a client still on
     // the previous hash during a publish never gets the new templates next to its old golden).
+    // broom-done / boot-order: the golden only holds a fixed stub (prep) that runs the copy the stage puts in BROOMWIN
+    // broom\ — so a new mgmt version updates them without rebuilding the golden.
+    for (f, body) in [("broom-done.ps1", BROOM_DONE), ("broom-bootorder.ps1", BROOM_BOOTORDER)] {
+        let (p, tmp) = (format!("{out}/{f}"), format!("{out}/{f}.tmp"));
+        std::fs::write(&tmp, body.replace('\n', "\r\n")).and_then(|_| std::fs::rename(&tmp, &p)).map_err(|e| format!("{f}: {e}"))?;
+    }
     let mut sums = format!("{hash}  golden\n");
-    for f in ["efi.tar.gz", "child-template.vhdx", "child-template.off", "base-template.vhdx"] {
+    for f in ["efi.tar.gz", "child-template.vhdx", "child-template.off", "base-template.vhdx", "broom-done.ps1", "broom-bootorder.ps1"] {
         let h = crate::hash::file_hash(&format!("{out}/{f}")).ok_or(format!("sha256 of {f} failed"))?;
         sums.push_str(&format!("{h}  {f}\n"));
+    }
+    // Cache mode RAM: the copy loaded BEFORE golden.sha256 tells the stages to download, so the room's first rush
+    // reads RAM. Refused (not enough RAM) or failed → the image goes back to disk, the publish still succeeds.
+    let mut cache = "disk";
+    if st.db.image(id)?.is_some_and(|i| i.cache_mode == "zram") {
+        steps.go("golden → RAM");
+        match crate::goldenram::sync(st, name, true) {
+            Ok(()) => cache = "RAM",
+            Err(e) => {
+                tracing::warn!("image {name}: golden not loaded into RAM ({e}) → cache_mode=disk");
+                let _ = st.db.set_cache_mode(id, "disk");
+                cache = "disk (RAM refused: see the log)";
+            }
+        }
+    } else {
+        let _ = crate::goldenram::sync(st, name, false);
     }
     std::fs::write(format!("{out}/files.sha256"), sums).map_err(|e| format!("files.sha256: {e}"))?;
     std::fs::write(&sum_file, &hash).map_err(|e| format!("golden.sha256: {e}"))?;
@@ -189,7 +162,7 @@ pub fn publish(st: &SharedState, id: i64, name: &str, steps: &mut crate::publish
         rearm_for_image(st, &img);
     }
     Ok(format!(
-        "Publish OK — Windows '{name}': golden.vhdx + EFI + child templates; stage {stage}; boot-start disk drivers: {drivers}"
+        "Publish OK — Windows '{name}': golden.vhdx ({cache}) + EFI + child templates; stage {stage}; boot-start disk drivers: {drivers}"
     ))
 }
 
@@ -204,20 +177,14 @@ fn rearm_for_image(st: &SharedState, img: &crate::db::Image) {
     }
 }
 
-/// All 5 output files exist AND golden.vhdx is newer than image.img (not re-uploaded since the last build).
+/// All output files exist (golden.key = the last build finished) AND golden.vhdx is newer than image.img (not
+/// re-uploaded since). The server writes nothing into the golden, so new mgmt code never needs a rebuild (the scripts
+/// go to the client through BROOMWIN instead); the key's content doesn't matter.
 fn golden_fresh(raw: &str, out: &str) -> bool {
     let mtime = |p: &str| std::fs::metadata(p).and_then(|m| m.modified()).ok();
-    let files = ["golden.vhdx", "base-template.vhdx", "child-template.vhdx", "child-template.off", "efi.tar.gz"];
+    let files = ["golden.vhdx", "base-template.vhdx", "child-template.vhdx", "child-template.off", "efi.tar.gz", "golden.key"];
     files.iter().all(|f| Path::new(&format!("{out}/{f}")).exists())
         && matches!((mtime(&format!("{out}/golden.vhdx")), mtime(raw)), (Some(g), Some(r)) if g > r)
-        && std::fs::read_to_string(format!("{out}/golden.key")).ok().as_deref() == Some(golden_key().as_str())
-}
-
-/// Version of the mgmt parts EMBEDDED in the golden (broom-* scripts, disk drivers, unattend patch). Changing
-/// that code → key changes → the next publish rebuilds the golden BY ITSELF (no manual `touch image.img`; an old
-/// golden keeps old scripts = out of sync with the new stage, e.g. old broom-done couldn't write base.ok → OOBE loop).
-fn golden_key() -> String {
-    stable_key(&[BROOM_DONE, BROOM_BOOTORDER, &BOOT_STORAGE.join(","), "skip-oobe-v1"])
 }
 
 /// Hash of the parts, stable across Rust releases (std's DefaultHasher is not: a toolchain update would rebuild every
@@ -233,10 +200,32 @@ fn stable_key(parts: &[&str]) -> String {
 
 /// image.img (raw whole VM disk) → golden.vhdx + efi.tar.gz + 2 empty child VHDX. Returns the enabled drivers.
 fn build_golden(raw: &str, out: &str, name: &str, steps: &mut crate::publish::Steps) -> Result<String, String> {
-    let mnt = crate::work_dir().join(format!("mnt-{name}")).to_string_lossy().into_owned();
-    // 1. The partition holding Windows — check the hive (read-only) BEFORE any write.
+    // 1. The partition holding Windows — check the hive BEFORE any write; then everything read from it that can refuse
+    //    the publish (dirty volume, prep markers, EFI bundle) — the server never writes inside NTFS.
     steps.go("find Windows partition");
-    let (start, size) = find_windows(raw, &mnt)?;
+    let (start, size) = find_windows(raw)?;
+    steps.go("read prep results + EFI");
+    let mut vol = crate::ntfsread::Vol::open(raw, (start, size))?;
+    if vol.is_dirty()? {
+        return Err("Windows was not shut down cleanly (hibernated, Fast Startup or forced power-off) — boot the VM, run \
+                    the prep command again and let it power off by itself, then upload"
+            .into());
+    }
+    let mut drivers = boot_storage_done(&mut vol)?;
+    if !vol.exists("broom/efi/EFI/Microsoft/Boot/BCD") {
+        return Err("golden is missing C:\\broom\\efi\\EFI\\Microsoft\\Boot\\BCD — run broom-prep-win in the VM before sysprep".into());
+    }
+    let efi = crate::work_dir().join(format!("efi-{name}"));
+    let _ = std::fs::remove_dir_all(&efi);
+    // Served under its real name only once the new golden is in place (below), like every other output file.
+    let r = vol.extract_dir("broom/efi", &efi).and_then(|_| crate::archive::tar_gz(&efi, Path::new(&format!("{out}/efi.tar.gz.new"))));
+    let _ = std::fs::remove_dir_all(&efi);
+    r?;
+    if !has_stub(&mut vol) {
+        drivers.push_str("; WARNING: golden prepped by an older version — broom-done/boot-order scripts inside it won't \
+                          update with the server (run the Windows prep again when convenient)");
+    }
+    drop(vol);
 
     // 2. Edit image.img IN PLACE (no temporary full-disk copy): punch holes outside the Windows partition (ESP/
     //    MSR/Recovery don't go into the golden) + GPT with a single partition (standard native VHD boot), KEEP start →
@@ -260,25 +249,7 @@ fn build_golden(raw: &str, out: &str, name: &str, steps: &mut crate::publish::St
         }
     }
 
-    // 3. Mount read-write: check the boot-start disk drivers (set by the prep) + silent OOBE + current broom-done /
-    //    bootorder scripts + take the EFI bundle.
-    steps.go("registry + EFI");
-    let drivers = with_part(raw, (start, size), &mnt, false, |m| {
-        let mut drv = boot_storage_done(m)?;
-        if silent_oobe(m)? {
-            drv.push_str("; OOBE runs silently (SkipMachineOOBE)");
-        }
-        if write_broom_done(m)? {
-            drv.push_str("; new broom-done.ps1");
-        }
-        if !Path::new(&format!("{m}/broom/efi/EFI/Microsoft/Boot/BCD")).exists() {
-            return Err("golden is missing C:\\broom\\efi\\EFI\\Microsoft\\Boot\\BCD — run broom-prep-win in the VM before sysprep".into());
-        }
-        crate::archive::tar_gz(Path::new(&format!("{m}/broom/efi")), Path::new(&format!("{out}/efi.tar.gz")))?;
-        Ok(drv)
-    })?;
-
-    // 4. golden.vhdx (dynamic, blocks in disk order) + 2 empty child VHDX: base-template (parent golden) and
+    // 3. golden.vhdx (dynamic, blocks in disk order) + 2 empty child VHDX: base-template (parent golden) and
     //    child-template (parent base.vhdx — base's GUID is only known on the client → the stage patches it at an offset).
     steps.go("convert raw→vhdx");
     let golden = format!("{out}/golden.vhdx");
@@ -297,12 +268,13 @@ fn build_golden(raw: &str, out: &str, name: &str, steps: &mut crate::publish::St
         let _ = std::fs::remove_file(format!("{out}/{f}"));
     }
     std::fs::rename(&tmp, &golden).map_err(|e| e.to_string())?;
+    std::fs::rename(format!("{out}/efi.tar.gz.new"), format!("{out}/efi.tar.gz")).map_err(|e| format!("efi.tar.gz: {e}"))?;
     let gi = crate::vhdx::read_info(&golden)?;
     crate::vhdx::write_empty(&format!("{out}/base-template.vhdx"), &gi, Some(".\\golden.vhdx"))?;
     let placeholder = crate::vhdx::Info { data_write_guid: [0; 16], ..gi };
     let off = crate::vhdx::write_empty(&format!("{out}/child-template.vhdx"), &placeholder, Some(".\\base.vhdx"))?;
     std::fs::write(format!("{out}/child-template.off"), off.to_string()).map_err(|e| e.to_string())?;
-    std::fs::write(format!("{out}/golden.key"), golden_key()).map_err(|e| e.to_string())?;
+    std::fs::write(format!("{out}/golden.key"), "built").map_err(|e| e.to_string())?;
     Ok(drivers)
 }
 

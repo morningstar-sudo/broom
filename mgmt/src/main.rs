@@ -12,13 +12,16 @@ mod disk;
 mod drivers;
 mod export;
 mod golden;
+mod goldenram;
 mod hash;
 mod images;
 mod iscsi;
+mod iscsid;
 mod license;
 mod linuxfs;
 mod machines;
 mod monitor;
+mod ntfsread;
 mod overlay;
 mod preflight;
 mod publish;
@@ -37,6 +40,11 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 use tower_http::services::ServeDir;
 use tracing::{error, info, warn};
+
+/// The static musl build's own malloc takes a global lock: with every tokio worker allocating (iSCSI reads, HTTP),
+/// it halves the iSCSI daemon's throughput. mimalloc keeps per-thread heaps.
+#[global_allocator]
+static ALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 /// Home of all server data = the binary's own directory (wherever it is started from); override with
 /// BOOTROM_HOME. Layout: bootrom.db, images/<name>/image.img, storage/ (versions), tftp/ (boot files).
@@ -278,6 +286,7 @@ async fn main() {
     match args.get(1).map(String::as_str) {
         Some("install-service") => setup::install_service(&args),
         Some("build-stage") => winstage::build_bundle(&args), // CI: the Windows stage bundle
+        Some("iscsid") => iscsid::run(&args).await,            // the iSCSI target daemon (started by iscsi.rs)
         _ => {}
     }
 
@@ -356,9 +365,14 @@ async fn main() {
         }
         // Stage bundle checked + fetched if missing (background: a download), then its Secure Boot shim → tftp/shim/.
         tokio::task::spawn_blocking(publish::prepare_stage);
-        // configfs targets + zram are lost on server reboot → re-export / rebuild (background, zram is slow).
+        // The iSCSI daemon (its own process: survives this one's restarts) checked / started, missing targets restored
+        // (background: a RAM copy is slow).
         let st = state.clone();
-        tokio::task::spawn_blocking(move || publish::restore_targets(&st));
+        tokio::task::spawn_blocking(move || publish::start_iscsi(&st));
+        // Windows goldens set to RAM: their copies live in this process → rebuilt at every start (served from the
+        // file meanwhile).
+        let st = state.clone();
+        tokio::task::spawn_blocking(move || goldenram::load_all(&st));
         // Prune expired DHCP leases every 10 min so a MAC flood can't grow the table without bound.
         let st = state.clone();
         tokio::spawn(async move {
@@ -372,15 +386,17 @@ async fn main() {
                 }
             }
         });
-        // Superseded iSCSI generations (+ their zram RAM) go as soon as their last client logs out — a busy lab never
+        // Superseded iSCSI generations (+ their RAM copies) go as soon as their last client logs out — a busy lab never
         // has a moment with no client at all, and a publish only cleans up what is idle at that moment. Images with
         // a running job are skipped (their old generation is still in the boot script until the publish saves it).
+        // Same pass: an iSCSI daemon of an older build is replaced once no client uses it.
         let st = state.clone();
         tokio::spawn(async move {
             loop {
                 tokio::time::sleep(std::time::Duration::from_secs(60)).await;
                 let st = st.clone();
                 let _ = tokio::task::spawn_blocking(move || {
+                    iscsi::upgrade_if_idle();
                     for img in st.db.images().unwrap_or_default().into_iter().filter(|i| i.os == "linux") {
                         let busy = st.jobs.lock().unwrap().get(&img.name).is_some_and(|s| s.starts_with('⏳'));
                         if !busy {
@@ -418,7 +434,9 @@ async fn main() {
         .merge(monitor::routes()) // online status, Wake-on-LAN
         .merge(auth::routes()) // admin login
         // Serve boot assets over HTTP (kernel/initrd much faster than TFTP).
-        // /tftp/... -> <home>/tftp/... (e.g. http://SERVER/tftp/broom-stage/vmlinuz)
+        // /tftp/... -> <home>/tftp/... (e.g. http://SERVER/tftp/broom-stage/vmlinuz); a Windows golden set to RAM
+        // from its RAM copy.
+        .route("/tftp/broom-win/{name}/golden.vhdx", get(goldenram::get))
         .nest_service("/tftp", ServeDir::new(tftp_dir()))
         // Guard EVERYTHING: Host check + a session for non-public routes (auth.rs::is_public lists the open ones).
         .layer(axum::middleware::from_fn_with_state(state.clone(), auth::guard))

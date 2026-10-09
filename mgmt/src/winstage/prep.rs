@@ -1,45 +1,9 @@
 // winstage/prep.rs — what goes INTO the Windows golden: the prep script run in the VM (scripts/prep-win.ps1, with the
-// guest user + boot-start disk drivers filled in), the first-logon/boot-order scripts the server writes into the
-// golden at publish, and the unattend tweak (silent OOBE).
-use std::path::Path;
-
+// guest user, boot-start disk drivers and the two fixed script stubs filled in), and the checks the publish reads back
+// from the golden (the server never writes inside it). The real broom-done / boot-order scripts reach the client
+// through the stage (BROOMWIN broom\), see winstage::publish.
 use crate::db::Db;
-
-/// Insert SkipMachineOOBE/SkipUserOOBE into the <OOBE> block (if missing). None = no OOBE block.
-fn add_skip_oobe(xml: &str) -> Option<String> {
-    if xml.contains("SkipMachineOOBE") {
-        return Some(xml.to_string());
-    }
-    let i = xml.find("<OOBE>")? + "<OOBE>".len();
-    Some(format!(
-        "{}\n        <SkipMachineOOBE>true</SkipMachineOOBE>\n        <SkipUserOOBE>true</SkipUserOOBE>{}",
-        &xml[..i],
-        &xml[i..]
-    ))
-}
-
-/// Sysprep copies /unattend to C:\Windows\Panther\unattend.xml — Setup reads that file during
-/// specialize/oobeSystem. Patching it there → OOBE shows no page at all (not even the network page),
-/// and an old golden doesn't need prep again. Returns true if patched. File name matched case-insensitively.
-pub(super) fn silent_oobe(mnt: &str) -> Result<bool, String> {
-    let dir = format!("{mnt}/Windows/Panther");
-    let Some(p) = std::fs::read_dir(&dir).ok().and_then(|rd| {
-        rd.flatten()
-            .map(|e| e.path())
-            .find(|p| p.file_name().map_or(false, |n| n.to_string_lossy().eq_ignore_ascii_case("unattend.xml")))
-    }) else {
-        return Ok(false);
-    };
-    let xml = std::fs::read_to_string(&p).map_err(|e| format!("{}: {e}", p.display()))?;
-    match add_skip_oobe(&xml) {
-        Some(new) if new != xml => {
-            std::fs::write(&p, new).map_err(|e| format!("{}: {e}", p.display()))?;
-            Ok(true)
-        }
-        Some(_) => Ok(true),
-        None => Ok(false),
-    }
-}
+use crate::ntfsread::Vol;
 
 /// Disk controller drivers shipped with Windows 10/11 (AHCI, NVMe, Intel RST, LSI/Broadcom, AMD,
 /// VMware PVSCSI…). The golden only loads the golden VM's controller driver at boot → a machine with another
@@ -53,11 +17,10 @@ pub(super) const BOOT_STORAGE: &[&str] = &[
 /// The prep script set Start=0 + StartOverride\0=0 for the BOOT_STORAGE drivers this Windows has, right after
 /// sysprep generalized it, and listed them in C:\broom\boot-storage.ok. A golden prepped by an older version (the
 /// server used to edit the hive itself) lacks that marker → it would not boot on other controllers → refuse.
-pub(super) fn boot_storage_done(mnt: &str) -> Result<String, String> {
-    let f = format!("{mnt}/broom/boot-storage.ok");
-    match std::fs::read_to_string(&f) {
-        Ok(s) => Ok(s.trim().to_string()),
-        Err(_) => Err("this golden was prepared by an older version (C:\\broom\\boot-storage.ok missing) — boot the VM, \
+pub(super) fn boot_storage_done(vol: &mut Vol) -> Result<String, String> {
+    match vol.read("broom/boot-storage.ok")? {
+        Some(s) => Ok(String::from_utf8_lossy(&s).trim().to_string()),
+        None => Err("this golden was prepared by an older version (C:\\broom\\boot-storage.ok missing) — boot the VM, \
                        run the Windows prep command again (Images page), let it power off, then upload"
             .into()),
     }
@@ -71,8 +34,8 @@ fn xml(s: &str) -> String {
 /// Script run INSIDE the golden Windows VM (PowerShell Admin, preferably in Audit Mode: Ctrl+Shift+F3 at OOBE).
 /// Usage: irm "http://<server>/broom-prep-win?t=<one-time token>" | iex (Images page → Windows prep command).
 /// Diskless tweaks → EFI bundle C:\broom\efi → unattend (guest user + autologon + skip OOBE) +
-/// broom-done.ps1 (first logon: write base.ok to BROOMWIN + reboot) → sysprep /generalize /quit → boot-start disk
-/// drivers (Start=0) → power off the VM.
+/// stubs broom-done.ps1 / broom-bootorder.ps1 → sysprep /generalize /quit → boot-start disk drivers (Start=0) →
+/// power off the VM.
 const PREP_WIN: &str = include_str!("../../scripts/prep-win.ps1");
 
 /// First logon (when base.vhdx is created on each machine): write base.ok to BROOMWIN, then restart at once → the stage
@@ -104,27 +67,24 @@ pub fn prep_script(db: &dyn Db) -> String {
 fn fill_prep(user: &str, pass: &str) -> String {
     let drivers = BOOT_STORAGE.iter().map(|d| format!("'{d}'")).collect::<Vec<_>>().join(", ");
     PREP_WIN
-        .replace("__BROOM_DONE__", BROOM_DONE)
+        .replace("__STUB_DONE__", &STUB.replace("__SCRIPT__", "broom-done.ps1"))
+        .replace("__STUB_BOOTORDER__", &STUB.replace("__SCRIPT__", "broom-bootorder.ps1"))
         .replace("__BOOT_STORAGE__", &drivers)
         .replace("__USER__", user)
         .replace("__PASS__", pass)
 }
 
-/// Overwrite broom-done.ps1 in the golden (a golden prepped with an old version still gets the new logic).
-pub(super) fn write_broom_done(mnt: &str) -> Result<bool, String> {
-    let dir = format!("{mnt}/Windows/Setup/Scripts");
-    if !Path::new(&dir).is_dir() {
-        return Ok(false);
-    }
-    for (f, body) in [("broom-done.ps1", BROOM_DONE), ("broom-bootorder.ps1", BROOM_BOOTORDER)] {
-        std::fs::write(format!("{dir}/{f}"), body.replace('\n', "\r\n")).map_err(|e| format!("write {f}: {e}"))?;
-    }
-    // The default hook an earlier prep wrote (open FACEIT, kill it after 120 s) — broom-done handles FACEIT itself now.
-    let hook = format!("{mnt}/broom/base-hook.ps1");
-    if std::fs::read_to_string(&hook).is_ok_and(|s| s.contains("[hook] FACEIT AC")) {
-        let _ = std::fs::remove_file(&hook);
-    }
-    Ok(true)
+/// What the prep puts in the golden as broom-done.ps1 / broom-bootorder.ps1: runs the stage's copy from BROOMWIN.
+const STUB: &str = include_str!("../../scripts/broom-stub.ps1");
+const STUB_MARK: &str = "broom-stub v1";
+
+/// The golden holds the stubs (prep of this version or newer). An older golden still has full scripts of the version
+/// the server last wrote into it: they keep working, just never update.
+pub(super) fn has_stub(vol: &mut Vol) -> bool {
+    vol.read("Windows/Setup/Scripts/broom-done.ps1")
+        .ok()
+        .flatten()
+        .is_some_and(|s| String::from_utf8_lossy(&s).contains(STUB_MARK))
 }
 
 #[cfg(test)]
@@ -135,20 +95,14 @@ mod tests {
         assert!(!s.contains("__"), "placeholder left unreplaced");
         assert!(super::BROOM_DONE.is_ascii(), "broom-done is written with -Encoding ascii");
         assert!(super::BROOM_BOOTORDER.is_ascii());
-        assert!(s.contains("WriteAllText"));
+        assert!(super::STUB.is_ascii());
+        // The golden gets the two stubs, not the scripts themselves (those come from BROOMWIN, newest every boot).
+        assert!(s.contains("broom\\broom-done.ps1") && s.contains("broom\\broom-bootorder.ps1"));
+        assert_eq!(s.matches(super::STUB_MARK).count(), 2);
+        assert!(!s.contains("Register-ScheduledTask -TaskName BroomBootOrder"), "broom-done itself is not baked in");
         // Boot-start disk drivers: set by the prep AFTER sysprep generalized (/quit, not /shutdown), then power off.
         assert!(s.contains("@('storahci', 'stornvme', "));
         let (sp, reg, off) = (s.find("'/quit'").unwrap(), s.find("reg add $k /v Start").unwrap(), s.find("Stop-Computer -Force").unwrap());
         assert!(sp < reg && reg < off && s.contains("boot-storage.ok"));
-    }
-
-    #[test]
-    fn skip_oobe_patch() {
-        let x = "<OOBE>\n  <HideEULAPage>true</HideEULAPage>\n</OOBE>";
-        let y = super::add_skip_oobe(x).unwrap();
-        assert!(y.starts_with("<OOBE>\n        <SkipMachineOOBE>true</SkipMachineOOBE>"));
-        assert!(y.contains("<SkipUserOOBE>true</SkipUserOOBE>") && y.contains("<HideEULAPage>"));
-        assert_eq!(super::add_skip_oobe(&y).unwrap(), y); // not inserted twice
-        assert!(super::add_skip_oobe("<unattend/>").is_none());
     }
 }

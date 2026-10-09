@@ -2,7 +2,7 @@
 # build.sh — build the whole project in one go (Linux / WSL):
 #   1. iPXE snponly.efi   (upstream + mgmt/ipxe/patches; only when a patch, IPXE_COMMIT or ipxe-src changed, or --ipxe)
 #   2. mgmt release binary (embeds snponly.efi + web UI + scripts) + unit tests (skip with --no-test);
-#      --live also runs the root-only live tests (real LIO / zram / ping / LVM, asks for sudo)
+#      --live also runs the root-only live tests (NTFS via ntfs-3g / ping / LVM, asks for sudo)
 #   3. copy to mgmt/dist/bootrom-mgmt  → deploy that single file to the server
 # Windows: double-click build.cmd (runs this script in WSL).
 # Needs: Rust stable via rustup (https://rustup.rs), musl-tools, git, gcc, make, perl, liblzma-dev (iPXE).
@@ -60,9 +60,9 @@ if [ "$test" = 1 ]; then
   cargo test
 fi
 if [ "$live" = 1 ]; then
-  # Built as the user (rustup), only the test binary runs as root. They create + remove a LIO target,
-  # a zram device, a loop/LVM VG "brtest" → run on a build box / WSL, not a busy server.
-  echo "== live tests (root: LIO, zram, ping, LVM)"
+  # Built as the user (rustup), only the test binary runs as root. They mount a scratch NTFS image (ntfs-3g),
+  # make a loop/LVM VG "brtest" → run on a build box / WSL, not a busy server.
+  echo "== live tests (root: NTFS, ping, LVM)"
   tbin=$(cargo test --no-run 2>&1 | sed -n 's/.*Executable .*(\(.*\)).*/\1/p' | head -1)
   [ -n "$tbin" ] || { echo "live tests: test binary not found" >&2; exit 1; }
   sudo "$tbin" --ignored live

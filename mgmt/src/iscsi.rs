@@ -1,127 +1,176 @@
-// iscsi.rs — shared read-only iSCSI targets for Linux goldens, configured straight through the
-// kernel LIO configfs tree (/sys/kernel/config/target). Replaces targetcli + target.service: the
-// kernel does the iSCSI I/O, this file only creates/removes the objects. configfs is not
-// persistent → main() re-exports every published image at start (restore_targets in publish.rs).
+// iscsi.rs — mgmt's side of the iSCSI target: starts the daemon (iscsid/, same binary, `iscsid` subcommand) and drives
+// it over its control socket. The daemon runs from its own copy of the binary (<home>/run/iscsid-<id>), outside the
+// mgmt service's cgroup: restarting / upgrading mgmt (overwriting bootrom-mgmt) never stops it, so clients stay
+// connected. A daemon of another build is replaced only once no client is logged in.
 //
-// Per image:  core/fileio_0/<name>  (file golden)  or  core/iblock_0/<name>  (zram block device)
-//             iscsi/<iqn>/tpgt_1/lun/lun_0/<link → backstore>, np/0.0.0.0:3260,
-//             attrib: no auth, dynamic ACLs, demo-mode write-protect (read-only for every initiator).
+// Also clears targets an older version made in the kernel's LIO (configfs) — they hold port 3260.
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::OnceLock;
 
-pub enum Backing<'a> {
-    /// Golden image file (cache_mode=disk).
-    File { path: &'a str, size: u64 },
-    /// Block device holding the golden (cache_mode=zram → /dev/zramN).
-    Block { dev: &'a str },
+pub use crate::iscsid::TargetInfo;
+use crate::iscsid::{Entry, Req, Resp, SOCK};
+
+/// Identity of this build (blake3 of the executable): tells a daemon of another build apart, even with the same version.
+pub fn exe_id() -> String {
+    static ID: OnceLock<String> = OnceLock::new();
+    ID.get_or_init(|| {
+        std::fs::read("/proc/self/exe").map_or_else(|_| env!("CARGO_PKG_VERSION").to_string(), |b| blake3::hash(&b).to_hex()[..16].to_string())
+    })
+    .clone()
 }
 
-pub struct Lio {
-    root: PathBuf,
-}
-
-const CONFIGFS: &str = "/sys/kernel/config";
-
-fn write(p: &Path, v: &str) -> Result<(), String> {
-    std::fs::write(p, v).map_err(|e| format!("write {} = {v:?}: {e}", p.display()))
-}
-
-fn mkdir(p: &Path) -> Result<(), String> {
-    std::fs::create_dir_all(p).map_err(|e| format!("mkdir {}: {e}", p.display()))
-}
-
-/// configfs drops a directory's default groups (attrib/, param/…) together with it on rmdir; a
-/// plain directory (unit tests on a temp tree) needs remove_dir_all to behave the same.
-fn rmdir(p: &Path) {
-    if std::fs::remove_dir(p).is_err() && !p.starts_with(CONFIGFS) {
-        let _ = std::fs::remove_dir_all(p);
+/// One request to the daemon. Err = not running / unreachable, or its error.
+fn call(req: &Req) -> Result<Resp, String> {
+    use std::io::{BufRead, Write};
+    let mut s = std::os::unix::net::UnixStream::connect(SOCK).map_err(|e| format!("iSCSI daemon not running ({SOCK}: {e})"))?;
+    let mut line = serde_json::to_vec(req).unwrap();
+    line.push(b'\n');
+    s.write_all(&line).map_err(|e| format!("iSCSI daemon: {e}"))?;
+    let mut out = String::new();
+    std::io::BufReader::new(s).read_line(&mut out).map_err(|e| format!("iSCSI daemon: {e}"))?;
+    let r: Resp = serde_json::from_str(&out).map_err(|e| format!("iSCSI daemon answer: {e}"))?;
+    match r.err {
+        Some(e) => Err(e),
+        None => Ok(r),
     }
 }
 
-fn subdirs(p: &Path) -> Vec<PathBuf> {
-    std::fs::read_dir(p)
-        .map(|rd| rd.flatten().map(|e| e.path()).filter(|p| p.is_dir() && !p.is_symlink()).collect())
-        .unwrap_or_default()
+/// Like call(), starting the daemon first if it isn't running (it crashed and systemd hasn't restarted it yet…).
+fn call_up(req: &Req) -> Result<Resp, String> {
+    if std::os::unix::net::UnixStream::connect(SOCK).is_err() {
+        ensure_daemon()?;
+    }
+    call(req)
 }
 
-impl Lio {
-    /// The live kernel tree: loads the LIO modules (best effort — they may be built in) and mounts
-    /// configfs if needed.
-    pub fn system() -> Result<Lio, String> {
-        let mods = ["target_core_mod", "target_core_file", "target_core_iblock", "iscsi_target_mod"];
-        for m in mods {
-            let _ = Command::new("modprobe").arg(m).status();
+/// Serve `path` read-only as target `iqn` (replaces one with that IQN). `ram`: from a compressed copy in RAM, refused
+/// unless `reserve` bytes stay free next to it. Blocking (a RAM copy takes ~a minute for 12 GB).
+pub fn export(iqn: &str, path: &str, ram: bool, reserve: u64) -> Result<(), String> {
+    call_up(&Req::Export(Entry { iqn: iqn.into(), path: path.into(), ram, reserve, stamp: String::new() })).map(|_| ())
+}
+
+pub fn remove(iqn: &str) {
+    let _ = call(&Req::Remove { iqn: iqn.into() });
+}
+
+/// Every target with its logged-in session count. None = no daemon (so no client can be logged in either).
+pub fn list() -> Option<Vec<TargetInfo>> {
+    call(&Req::List).ok().map(|r| r.targets)
+}
+
+/// The daemon of this build is running: reused if so; started if none; one of another build is asked to quit once no
+/// client uses it (until then it keeps serving — upgrade_if_idle retries). Blocking.
+pub fn ensure_daemon() -> Result<String, String> {
+    match call(&Req::Version) {
+        Ok(r) if r.version == exe_id() => Ok("iSCSI daemon running".into()),
+        Ok(r) => match upgrade_if_idle() {
+            true => Ok("iSCSI daemon upgraded".into()),
+            false => Ok(format!("iSCSI daemon of an older build ({}) kept until its clients disconnect", r.version)),
+        },
+        Err(_) => start_daemon().map(|_| "iSCSI daemon started".into()),
+    }
+}
+
+/// An older build's daemon with no client logged in → replace it with this build's. True if replaced.
+pub fn upgrade_if_idle() -> bool {
+    let Ok(v) = call(&Req::Version) else { return false };
+    if v.version == exe_id() || list().is_none_or(|t| t.iter().any(|t| t.sessions > 0)) {
+        return false;
+    }
+    tracing::info!("iSCSI daemon {} idle → replaced by {}", v.version, exe_id());
+    let _ = call(&Req::Quit);
+    // Its port and socket are free once it is gone.
+    for _ in 0..50 {
+        if std::os::unix::net::UnixStream::connect(SOCK).is_err() {
+            break;
         }
-        let root = Path::new(CONFIGFS).join("target");
-        if !root.is_dir() {
-            let _ = Command::new("mount").args(["-t", "configfs", "configfs", CONFIGFS]).status();
-        }
-        if !root.join("core").is_dir() {
-            return Err(format!("{} missing — kernel without the LIO target ({})?", root.display(), mods.join(", ")));
-        }
-        Ok(Lio { root })
+        std::thread::sleep(std::time::Duration::from_millis(100));
     }
-
-    /// The live tree only if LIO is already up (no modprobe / mount): for checks and clean-ups — no LIO means no
-    /// target and no client. Cheap enough for a periodic pass.
-    pub fn existing() -> Option<Lio> {
-        let root = Path::new(CONFIGFS).join("target");
-        root.join("core").is_dir().then_some(Lio { root })
-    }
-
-    #[cfg(test)]
-    fn at(root: &Path) -> Lio {
-        Lio { root: root.to_path_buf() }
-    }
-
-    /// Create (or re-create) the backstore + target for one image.
-    pub fn export(&self, name: &str, backing: Backing, iqn: &str) -> Result<(), String> {
-        self.remove(name, iqn);
-        // 1. Backstore.
-        let (dev, control, udev) = match backing {
-            Backing::File { path, size } => {
-                (self.root.join("core/fileio_0").join(name), format!("fd_dev_name={path},fd_dev_size={size}"), path)
-            }
-            Backing::Block { dev } => {
-                (self.root.join("core/iblock_0").join(name), format!("udev_path={dev},readonly=1"), dev)
-            }
-        };
-        mkdir(&dev)?;
-        write(&dev.join("control"), &control)?;
-        write(&dev.join("udev_path"), udev)?;
-        write(&dev.join("enable"), "1")?;
-        // 2. Target: one TPG, LUN 0 → backstore, portal on every address.
-        let tpg = self.root.join("iscsi").join(iqn).join("tpgt_1");
-        let lun = tpg.join("lun/lun_0");
-        mkdir(&lun)?;
-        std::os::unix::fs::symlink(&dev, lun.join("golden")).map_err(|e| format!("link LUN 0 → {}: {e}", dev.display()))?;
-        mkdir(&tpg.join("np/0.0.0.0:3260"))?;
-        mkdir(&tpg.join("attrib"))?;
-        for (k, v) in [("authentication", "0"), ("generate_node_acls", "1"), ("cache_dynamic_acls", "1"), ("demo_mode_write_protect", "1")] {
-            write(&tpg.join("attrib").join(k), v)?;
-        }
-        write(&tpg.join("enable"), "1")
-    }
-
-    /// Target already configured (configfs survives an mgmt restart, not a reboot).
-    pub fn has_target(&self, iqn: &str) -> bool {
-        self.root.join("iscsi").join(iqn).join("tpgt_1").is_dir()
-    }
-
-    /// A client is logged in to this target right now: LIO lists the sessions of a TPG (dynamic ACLs, which
-    /// generate_node_acls gives every initiator) in tpgt_1/dynamic_sessions, one initiator name per line. No such
-    /// target → false; unreadable for another reason → true (never cut a client off blindly).
-    pub fn has_sessions(&self, iqn: &str) -> bool {
-        match std::fs::read(self.root.join("iscsi").join(iqn).join("tpgt_1/dynamic_sessions")) {
-            Ok(b) => b.iter().any(|c| !c.is_ascii_whitespace() && *c != 0),
-            Err(e) => e.kind() != std::io::ErrorKind::NotFound,
+    match start_daemon() {
+        Ok(()) => true,
+        Err(e) => {
+            tracing::error!("iSCSI daemon: {e}");
+            false
         }
     }
+}
 
-    /// Remove the target `iqn` and any backstore called `name` (any HBA — also ones targetcli made).
-    /// Missing objects are fine.
-    pub fn remove(&self, name: &str, iqn: &str) {
-        let t = self.root.join("iscsi").join(iqn);
+/// Copy of this binary the daemon runs from: <home>/run/iscsid-<id>. Older copies are deleted (a running one keeps
+/// its file open, Linux frees it when it exits).
+fn daemon_exe() -> Result<PathBuf, String> {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = crate::home().join("run");
+    std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    let file = dir.join(format!("iscsid-{}", exe_id()));
+    for e in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
+        if e.file_name().to_string_lossy().starts_with("iscsid-") && e.path() != file {
+            let _ = std::fs::remove_file(e.path());
+        }
+    }
+    if !file.exists() {
+        let tmp = file.with_extension("tmp");
+        std::fs::copy("/proc/self/exe", &tmp)
+            .and_then(|_| std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o700)))
+            .and_then(|_| std::fs::rename(&tmp, &file))
+            .map_err(|e| format!("copy the binary to {}: {e}", file.display()))?;
+    }
+    Ok(file)
+}
+
+fn start_daemon() -> Result<(), String> {
+    let exe = daemon_exe()?;
+    let state = crate::home().join("iscsid-targets.json");
+    let args = ["iscsid", "--state", &state.to_string_lossy()].map(String::from);
+    if Path::new("/run/systemd/system").is_dir() {
+        // Its own transient unit: outside bootrom-mgmt.service, whose stop/restart kills every process of its cgroup.
+        let _ = Command::new("systemctl").args(["reset-failed", "broom-iscsid"]).output();
+        let mut c = Command::new("systemd-run");
+        c.args(["--unit=broom-iscsid", "--collect", "-p", "Restart=on-failure", "-p", "RestartSec=2"]).arg(&exe).args(&args);
+        let o = c.output().map_err(|e| format!("systemd-run: {e}"))?;
+        if !o.status.success() {
+            return Err(format!("systemd-run broom-iscsid: {}", String::from_utf8_lossy(&o.stderr).trim()));
+        }
+    } else {
+        // No systemd: its own session, so it outlives this process; output to <home>/iscsid.log.
+        use std::os::unix::process::CommandExt;
+        let log = std::fs::OpenOptions::new().create(true).append(true).open(crate::home().join("iscsid.log")).map_err(|e| e.to_string())?;
+        let mut c = Command::new(&exe);
+        c.args(&args).stdin(std::process::Stdio::null()).stdout(log.try_clone().map_err(|e| e.to_string())?).stderr(log);
+        // SAFETY: setsid is async-signal-safe and touches no memory of the parent.
+        unsafe {
+            c.pre_exec(|| {
+                libc::setsid();
+                Ok(())
+            });
+        }
+        c.spawn().map_err(|e| format!("start {}: {e}", exe.display()))?;
+    }
+    for _ in 0..100 {
+        if call(&Req::Version).is_ok() {
+            return Ok(());
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    Err("iSCSI daemon did not come up in 10 s (journalctl -u broom-iscsid, or iscsid.log next to the binary)".into())
+}
+
+const CONFIGFS: &str = "/sys/kernel/config/target";
+
+/// Remove the LIO targets an older version made (IQNs starting with one of `prefixes`) and their backstores, so the
+/// kernel frees port 3260 for the daemon. Their clients log in again to the daemon (same IQN). True if any was there.
+pub fn clear_lio(prefixes: &[&str]) -> bool {
+    let root = Path::new(CONFIGFS);
+    let subdirs = |p: &Path| -> Vec<PathBuf> {
+        std::fs::read_dir(p).map(|rd| rd.flatten().map(|e| e.path()).filter(|p| p.is_dir() && !p.is_symlink()).collect()).unwrap_or_default()
+    };
+    let mut any = false;
+    for t in subdirs(&root.join("iscsi")) {
+        let iqn = t.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        if !prefixes.iter().any(|p| iqn.starts_with(p)) {
+            continue;
+        }
+        any = true;
         for tpg in subdirs(&t).into_iter().filter(|p| p.file_name().is_some_and(|n| n.to_string_lossy().starts_with("tpgt_"))) {
             let _ = std::fs::write(tpg.join("enable"), "0");
             for lun in subdirs(&tpg.join("lun")) {
@@ -130,89 +179,20 @@ impl Lio {
                         let _ = std::fs::remove_file(e.path());
                     }
                 }
-                rmdir(&lun);
+                let _ = std::fs::remove_dir(&lun);
             }
             for np in subdirs(&tpg.join("np")) {
-                rmdir(&np);
+                let _ = std::fs::remove_dir(&np);
             }
-            rmdir(&tpg);
+            let _ = std::fs::remove_dir(&tpg);
         }
-        rmdir(&t);
-        for hba in subdirs(&self.root.join("core")) {
-            let d = hba.join(name);
-            if d.is_dir() {
-                rmdir(&d);
-            }
+        let _ = std::fs::remove_dir(&t);
+        // Its backstore was named after the IQN's last part (<name>.g<gen>, or <name> for the oldest targets).
+        let store = iqn.rsplit(':').next().unwrap_or_default().to_string();
+        for hba in subdirs(&root.join("core")) {
+            let _ = std::fs::remove_dir(hba.join(&store));
         }
+        tracing::info!("removed kernel LIO target {iqn} (now served by the iSCSI daemon)");
     }
-
-    /// IQNs of every configured iSCSI target (configfs dir names under iscsi/).
-    pub fn list_iqns(&self) -> Vec<String> {
-        subdirs(&self.root.join("iscsi"))
-            .into_iter()
-            .filter_map(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
-            .collect()
-    }
-}
-
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn export_tree_and_remove() {
-        let root = std::env::temp_dir().join("broom_lio_test");
-        let _ = std::fs::remove_dir_all(&root);
-        let lio = Lio::at(&root);
-        let iqn = "iqn.2026-01.local.broom-0000abcd:ubuntu";
-        lio.export("ubuntu", Backing::File { path: "/img/ubuntu/image.img", size: 4096 }, iqn).unwrap();
-        let rd = |p: &str| std::fs::read_to_string(root.join(p)).unwrap();
-        assert_eq!(rd("core/fileio_0/ubuntu/control"), "fd_dev_name=/img/ubuntu/image.img,fd_dev_size=4096");
-        assert_eq!(rd("core/fileio_0/ubuntu/enable"), "1");
-        let tpg = format!("iscsi/{iqn}/tpgt_1");
-        let link = root.join(format!("{tpg}/lun/lun_0/golden"));
-        assert_eq!(std::fs::read_link(&link).unwrap(), root.join("core/fileio_0/ubuntu"));
-        assert!(root.join(format!("{tpg}/np/0.0.0.0:3260")).is_dir());
-        assert_eq!(rd(&format!("{tpg}/attrib/demo_mode_write_protect")), "1");
-        assert_eq!(rd(&format!("{tpg}/attrib/generate_node_acls")), "1");
-        assert_eq!(rd(&format!("{tpg}/enable")), "1");
-        assert!(!lio.has_sessions(iqn) && !lio.has_sessions("iqn.none"), "no dynamic_sessions file / no target");
-        std::fs::write(root.join(format!("{tpg}/dynamic_sessions")), "").unwrap();
-        assert!(!lio.has_sessions(iqn), "empty list");
-        std::fs::write(root.join(format!("{tpg}/dynamic_sessions")), "iqn.1991-05.com.microsoft:pc01\n").unwrap();
-        assert!(lio.has_sessions(iqn));
-        let _ = std::fs::remove_file(root.join(format!("{tpg}/dynamic_sessions")));
-
-        // Re-export as zram: old fileio backstore + target replaced.
-        lio.export("ubuntu", Backing::Block { dev: "/dev/zram0" }, iqn).unwrap();
-        assert!(!root.join("core/fileio_0/ubuntu").exists());
-        assert_eq!(rd("core/iblock_0/ubuntu/control"), "udev_path=/dev/zram0,readonly=1");
-        assert_eq!(std::fs::read_link(&link).unwrap(), root.join("core/iblock_0/ubuntu"));
-
-        lio.remove("ubuntu", iqn);
-        assert!(!root.join(format!("iscsi/{iqn}")).exists());
-        assert!(!root.join("core/iblock_0/ubuntu").exists());
-        let _ = std::fs::remove_dir_all(&root);
-    }
-
-    /// Real kernel LIO (needs root + LIO modules): `cargo test -- --ignored lio_live`.
-    #[test]
-    #[ignore]
-    fn lio_live() {
-        let img = std::env::temp_dir().join("broom_lio_live.img");
-        std::fs::write(&img, vec![0u8; 1 << 20]).unwrap();
-        let lio = Lio::system().unwrap();
-        let iqn = "iqn.2026-01.local.broom-test:live";
-        lio.export("brtest", Backing::File { path: img.to_str().unwrap(), size: 1 << 20 }, iqn).unwrap();
-        let tpg = lio.root.join(format!("iscsi/{iqn}/tpgt_1"));
-        assert_eq!(std::fs::read_to_string(tpg.join("enable")).unwrap().trim(), "1");
-        assert_eq!(std::fs::read_to_string(tpg.join("attrib/demo_mode_write_protect")).unwrap().trim(), "1");
-        let listening = Command::new("ss").args(["-ltn", "sport = :3260"]).output().unwrap();
-        assert!(String::from_utf8_lossy(&listening.stdout).contains("3260"), "portal not listening");
-        lio.remove("brtest", iqn);
-        assert!(!lio.root.join(format!("iscsi/{iqn}")).exists());
-        assert!(!lio.root.join("core/fileio_0/brtest").exists());
-        let _ = std::fs::remove_file(img);
-    }
+    any
 }

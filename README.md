@@ -9,14 +9,15 @@ Everything is **one static binary** — no dnsmasq, tftpd, targetcli or extra se
 - **Web admin + boot files** over HTTP
 - **DHCP server** (hands out IPs + PXE boot info) — toggle on/off
 - **TFTP** (serves the embedded iPXE)
-- **iSCSI** targets straight through the kernel (LIO via configfs)
+- **iSCSI** target built in (read-only goldens, from disk or a compressed RAM copy) — its own process
+  (`broom-iscsid`), so restarting / upgrading the server never drops a client
 - **Image versions** — snapshot / rollback, deduplicated in 4 MB chunks (no ZFS)
 - **Linux goldens read in-process** — ext4 + LVM, no libguestfs
 
 VMDK/VHDX conversion, partition tables and archives are done in-process too (no qemu-img, sfdisk, cpio, tar,
 hivex), and the Windows client stage (kernel + initrd + Secure Boot shim) is built by CI and downloaded from the
-release on the first Windows publish — **the server needs no packages at all**, only a kernel with
-`loop`, `ntfs3` (Windows images), the LIO iSCSI target and `zram` (preflight warns about missing ones).
+release on the first Windows publish — **the server needs no packages and no kernel modules** (no LIO, zram,
+loop or ntfs3): the iSCSI target, the RAM cache and NTFS reading are all in the binary.
 Offline server: download `broom-stage.tar.gz` of the same release elsewhere and copy it next to the binary (e.g.
 `/opt/bootrom/broom-stage.tar.gz`); the next Windows publish unpacks it. A locally built binary has no pinned stage: see
 *Build* for making its bundle.
@@ -28,7 +29,9 @@ Offline server: download `broom-stage.tar.gz` of the same release elsewhere and 
    serves it.
 3. Clients PXE-boot the golden read-only; their writes land on the local SSD and reset each boot.
    - **Linux:** RO iSCSI root + `overlayroot` (writeback on the SSD, reset every boot).
-   - **Windows:** `golden.vhdx` cached on the SSD, a child VHDX that resets every boot.
+   - **Windows:** `golden.vhdx` cached on the SSD, a child VHDX that resets every boot. With the image's cache set
+     to RAM, the server keeps a compressed copy of `golden.vhdx` in memory and every download comes from it — a room
+     fetching a new golden at once never hammers the server's disk.
 
 ## Quick start (Debian/Ubuntu server, as root)
 
@@ -114,7 +117,7 @@ sent, in parallel 8 MB chunks with retry) — or a single `.vmdk` / `.img` / `.z
   ```bash
   curl -fsSL http://<server>/broom-prep | sudo bash
   ```
-  Power off → upload (OS = Linux, cache `disk` or `zram`).
+  Power off → upload (OS = Linux, cache `disk` or RAM).
 
 - **Windows 11 Pro** — set the guest password first (Settings → Guest user; the default is refused). Then on the
   Images page click **Windows prep command** and run it inside the VM in Audit Mode (PowerShell as Admin):
@@ -175,7 +178,7 @@ stderr. `RUST_LOG=debug` also logs every external command. Under systemd: `journ
 | `tftp/` | boot files | optional: rebuilt by **Publish** on each image (back it up to skip that) |
 | `work/` | scratch | no |
 
-Restore: stop the service, put the files back in the same layout, start it — iSCSI targets and zram copies are
+Restore: stop the service, put the files back in the same layout, start it — iSCSI targets and RAM copies are
 rebuilt at startup. `bootrom.db` holds license keys and the shared guest password: keep backups private.
 
 **Forgot the admin password:** stop the service,
@@ -195,7 +198,7 @@ changes it and signs out every other session. A few properties are inherent to d
 - **License keys** are handed to a machine over plain HTTP once, when its base is built — fine on a
   trusted, segmented LAN.
 - **Update `disk`-cache images off-hours.** A `disk` image serves one shared golden file and refuses to
-  publish or roll back while clients are connected (they would read changed bytes). Use `zram` cache to
+  publish or roll back while clients are connected (they would read changed bytes). Use the RAM (`zram`) cache to
   update live: each publish gets a fresh RAM copy + target, and the old one is kept until its clients drop.
 
 ## Build
@@ -204,7 +207,7 @@ changes it and signs out every other session. A few properties are inherent to d
 - **Linux / WSL:** `./build.sh`.
 
 Builds iPXE only when its patches or pinned commit changed (`--ipxe` forces it), then the release binary + unit
-tests (`--no-test` to skip; `--live` also runs the root-only LIO/zram/ping/LVM tests). Output:
+tests (`--no-test` to skip; `--live` also runs the root-only NTFS/ping/LVM tests). Output:
 `mgmt/dist/bootrom-mgmt`. Don't build with sudo.
 
 A local build has no pinned Windows stage bundle. To publish Windows images with it, make one on a machine with
@@ -239,6 +242,7 @@ broom/
 └── mgmt/                     # the app (Rust / axum, single binary, web UI embedded)
     ├── src/                  # boot menu, images + publish, overlay (Linux), winstage + vhdx (Windows),
     │   │                     # dhcp / tftp / iscsi, machines, monitor + WOL, setup / preflight, auth
+    │   ├── iscsid/           # the iSCSI target daemon (protocol, SCSI, compressed RAM copies)
     │   └── db/               # storage: `Db` trait + SQLite (swap in another driver by adding a file)
     ├── static/               # web admin (embedded in the binary): index.html + app.js, page fragments, login
     └── ipxe/                 # IPXE_COMMIT + patches/ → build.sh → snponly.efi embedded in the binary;

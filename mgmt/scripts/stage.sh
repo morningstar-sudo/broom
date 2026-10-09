@@ -271,7 +271,8 @@ if [ "$(cat $B/golden.sha256 2>/dev/null)" != "$HASH" ]; then
   mv $D/* $B/ && rmdir $D && sync && echo "$HASH" > $B/golden.sha256 && sync
 fi
 
-# 1b. The small boot files (EFI bundle, VHDX templates) are checked against the server's sha256 on EVERY boot: the
+# 1b. The small boot files (EFI bundle, VHDX templates, the broom-done / boot-order scripts the golden's stubs run) are
+# checked against the server's sha256 on EVERY boot: the
 # guest is a local admin and could swap them on BROOMWIN (e.g. a child template with its own data) to outlive the
 # reset. Wrong or missing → downloaded again.
 configure_networking
@@ -281,7 +282,7 @@ if wget -q -O /run/broom-files.sha256 http://$SRV/tftp/broom-win/$NAME/files.sha
   g=$(sed -n 's/^\([0-9a-f]*\)  golden$/\1/p' /run/broom-files.sha256)
   [ -z "$g" ] || [ "$g" = "$HASH" ] || restart "image $NAME changed on the server -> reboot to get the new version"
   while read -r h f; do
-    case "$f" in efi.tar.gz|child-template.vhdx|child-template.off|base-template.vhdx) ;; *) continue;; esac
+    case "$f" in efi.tar.gz|child-template.vhdx|child-template.off|base-template.vhdx|broom-done.ps1|broom-bootorder.ps1) ;; *) continue;; esac
     [ "$(sha256sum $B/$f 2>/dev/null | cut -c1-64)" = "$h" ] && continue
     log "$f differs from the server's -> downloading it again"
     if wget -q -O $B/$f.tmp http://$SRV/tftp/broom-win/$NAME/$f && [ "$(sha256sum $B/$f.tmp | cut -c1-64)" = "$h" ]; then

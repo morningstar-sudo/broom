@@ -70,12 +70,17 @@ diskpart /s "$env:TEMP\broom-esp.txt" | Out-Null
 Remove-Item $vd, "$env:TEMP\broom-esp.txt" -ErrorAction SilentlyContinue
 
 # 4. First logon on the client (when base is created): write base.ok to NTFS BROOMWIN + reboot → the stage commits base.
-#    (The server also overwrites this file at publish time → logic changes don't need prep again.)
+#    Both scripts here are fixed stubs: they run the current copy the stage puts in BROOMWIN broom\ (from the server)
+#    → logic changes don't need prep again.
 $done = @'
-__BROOM_DONE__
+__STUB_DONE__
+'@
+$order = @'
+__STUB_BOOTORDER__
 '@
 New-Item -ItemType Directory "$env:SystemRoot\Setup\Scripts" -Force | Out-Null
 Set-Content -Encoding ascii "$env:SystemRoot\Setup\Scripts\broom-done.ps1" $done
+Set-Content -Encoding ascii "$env:SystemRoot\Setup\Scripts\broom-bootorder.ps1" $order
 
 # 5. Unattend: skip OOBE, guest user (Administrators — FirstLogonCommands need write access) + autologon.
 $ui = (Get-UICulture).Name; $sl = (Get-WinSystemLocale).Name; $ul = (Get-Culture).Name

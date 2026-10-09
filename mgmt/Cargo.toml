@@ -12,6 +12,7 @@ path = "src/main.rs"
 axum = "0.8.9"
 tokio = { version = "1.53.1", features = ["full"] }
 tower-http = { version = "0.7.1", features = ["fs"] }
+tower = { version = "0.5", features = ["util"] }   # oneshot: a RAM-cached golden falls back to ServeFile (goldenram.rs)
 rusqlite = { version = "0.40.2", features = ["bundled"] }   # SQLite driver (db/sqlite.rs)
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
@@ -28,7 +29,14 @@ flate2 = { version = "1.1.10", default-features = false, features = ["zlib-rs"] 
 crc32fast = "1.5.2"   # GPT checksums (disk.rs)
 ureq = "3"   # HTTPS download of the Windows stage bundle (rustls + built-in CA roots, static-friendly)
 argon2 = { version = "0.5.3", features = ["std"] }   # admin password hashing (auth.rs)
+# Read the Windows golden's NTFS in process (ntfsread.rs; no loop + ntfs3 on the server). Pinned to upstream master:
+# the 0.4.0 release pulls binrw 0.11, which a future Rust rejects; master replaced it with zerocopy. Back to a
+# crates.io version once one after 0.4.0 is out.
+ntfs = { git = "https://github.com/ColinFinck/ntfs", rev = "47ae0168f6c607208b27c61ed89b4ffac9a3c99a" }
+zstd = "0.14.0"   # RAM cache mode of Linux goldens: 16 KB blocks compressed in the iSCSI daemon (iscsid/ramimg.rs)
+mimalloc = "0.1.52"   # global allocator: musl's malloc serializes threads (iSCSI daemon QD32 reads: 2× slower with it)
 
 [profile.release]
 strip = true
 lto = true
+codegen-units = 1

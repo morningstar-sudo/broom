@@ -1,5 +1,5 @@
 <section class="page active" id="page-system">
-  <div class="head"><h1>Settings</h1><p>admin password + guest user + boot menu + zram</p></div>
+  <div class="head"><h1>Settings</h1><p>admin password + guest user + boot menu + RAM cache</p></div>
   <div class="card">
     <h2>Admin password</h2>
     <div class="row">
@@ -27,9 +27,9 @@
       <button data-click="setTimeout_">Save</button> <span id="to_msg" class="msg"></span></div>
   </div>
   <div class="card">
-    <h2>zram — RAM reserved for the server</h2>
+    <h2>RAM cache — RAM reserved for the server</h2>
     <div class="row"><input id="zram_reserve" type="number" min="0" size="6"> MB
       <button data-click="setZramReserve">Save</button> <span id="zr_msg" class="msg"></span></div>
-    <p class="hint">Loading a golden into <b>zram</b> (compressed RAM cache) is refused if <code>img + reserve > available RAM</code> → avoids RAM overflow/OOM. Reserve = RAM kept for the OS + iSCSI serving. Not enough → the image falls back to <code>disk</code> by itself.</p>
+    <p class="hint">Loading a golden into the <b>RAM</b> cache (compressed copy: Linux = the iSCSI target serves it, Windows = golden.vhdx downloads come from it, the disk is never read) claims its RAM before loading: the golden's data (holes not counted) at its worst-case compressed size. Refused if that <code>+ reserve > available RAM</code> → never runs out halfway; what compression saves is given back once loaded. Reserve = RAM kept for the OS + serving. Not enough → the image falls back to <code>disk</code> by itself.</p>
   </div>
 </section>
