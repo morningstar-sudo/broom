@@ -367,16 +367,39 @@ impl Virtual {
     /// sha256 of the whole VHDX, lower-case hex (what the stage checks a download against). Reads the raw disk once.
     pub fn sha256(&self) -> Result<String, String> {
         use sha2::{Digest, Sha256};
-        let mut h = Sha256::new();
-        let mut buf = vec![0u8; 4 << 20];
-        let (mut off, len) = (0u64, self.len());
-        while off < len {
-            let n = ((len - off) as usize).min(buf.len());
-            self.read_at(off, &mut buf[..n])?;
-            h.update(&buf[..n]);
-            off += n as u64;
-        }
-        Ok(h.finalize().iter().map(|b| format!("{b:02x}")).collect())
+        // The disk is the limit (sha2 uses SHA-NI): one thread reads ahead while this one hashes, so the time is the
+        // read alone, not read + hash. Two 8 MB buffers go round between them.
+        const PIECE: usize = 8 << 20;
+        let len = self.len();
+        std::thread::scope(|s| {
+            let (full_tx, full_rx) = std::sync::mpsc::sync_channel::<Result<Vec<u8>, String>>(1);
+            let (free_tx, free_rx) = std::sync::mpsc::channel::<Vec<u8>>();
+            for _ in 0..2 {
+                free_tx.send(vec![0u8; PIECE]).unwrap();
+            }
+            s.spawn(move || {
+                let mut off = 0u64;
+                while off < len {
+                    let Ok(mut buf) = free_rx.recv() else { return }; // the hasher stopped
+                    let n = ((len - off) as usize).min(PIECE);
+                    buf.truncate(n);
+                    let r = self.read_at(off, &mut buf).map(|_| buf);
+                    let failed = r.is_err();
+                    if full_tx.send(r).is_err() || failed {
+                        return;
+                    }
+                    off += n as u64;
+                }
+            });
+            let mut h = Sha256::new();
+            for buf in full_rx {
+                let mut buf = buf?;
+                h.update(&buf);
+                buf.resize(PIECE, 0);
+                let _ = free_tx.send(buf);
+            }
+            Ok(h.finalize().iter().map(|b| format!("{b:02x}")).collect())
+        })
     }
 }
 
