@@ -7,7 +7,14 @@
 # what is missing, nothing once every drive is there. Errors -> %SystemRoot%\Temp\broom-games.log. ASCII only.
 param([string]$Srv)
 $ErrorActionPreference = 'Stop'
-try { $list = (Invoke-WebRequest -UseBasicParsing -TimeoutSec 5 -Uri "http://$Srv/api/games/for").Content } catch { exit }
+# The run at startup comes before the network is up (DHCP): wait for the server up to ~90 s instead of giving up
+# until the next run 5 minutes later.
+$list = $null
+$until = (Get-Date).AddSeconds(90)
+while ($null -eq $list -and (Get-Date) -lt $until) {
+  try { $list = (Invoke-WebRequest -UseBasicParsing -TimeoutSec 5 -Uri "http://$Srv/api/games/for").Content } catch { Start-Sleep 3 }
+}
+if ($null -eq $list) { exit }
 
 $log = "$env:SystemRoot\Temp\broom-games.log"
 function Log($m) { Add-Content -Encoding ascii $log ((Get-Date -Format s) + ' ' + $m) }
@@ -21,6 +28,14 @@ function DP([string[]]$lines) {
 function MountAt($part, $dir) {
   if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Force $dir | Out-Null }
   if (-not ($part.AccessPaths -contains "$dir\")) { $part | Add-PartitionAccessPath -AccessPath $dir }
+}
+# The games disk's own partition (it only holds games.vhdx) is reached through its folder: no drive letter for the
+# guest to see. Windows gives a new / newly online partition one by itself -> removed (works on the read-only disk:
+# letters live in Windows, not on the disk). $flag (the update machine, disk writable): the GPT "no default drive
+# letter" attribute too, kept on the disk, so no machine gives it one any more.
+function Hide($p, $flag) {
+  if ($flag -and -not $p.NoDefaultDriveLetter) { Set-Partition -DiskNumber $p.DiskNumber -PartitionNumber $p.PartitionNumber -NoDefaultDriveLetter $true }
+  if ($p.DriveLetter -match '[A-Z]') { Remove-PartitionAccessPath -DiskNumber $p.DiskNumber -PartitionNumber $p.PartitionNumber -AccessPath "$($p.DriveLetter):\" }
 }
 function BasicPart($n) { Get-Partition -DiskNumber $n -ErrorAction SilentlyContinue | Where-Object Type -eq 'Basic' | Select-Object -First 1 }
 # Grow a partition to all the space after it (the disk under it grew).
@@ -73,7 +88,8 @@ function GamesDisk($name, $iqn, $L, $upd) {
     if ($disk.PartitionStyle -eq 'RAW') { Log "$name - new disk: formatting"; NewNtfs $disk.Number 'BROOMGAMES' }
     $p = Grow (BasicPart $disk.Number)
     MountAt $p $store
-    $mb = [math]::Floor($p.Size / 1MB) - 1024   # 1 GB left for NTFS + the VHDX's own metadata
+    Hide $p $true
+    $mb =[math]::Floor($p.Size / 1MB) - 1024   # 1 GB left for NTFS + the VHDX's own metadata
     if (-not (Test-Path $vhd)) {
       DP "create vdisk file=`"$vhd`" maximum=$mb type=expandable"
     } elseif (-not (Get-DiskImage -ImagePath $vhd).Attached -and (Get-DiskImage -ImagePath $vhd).Size -lt ($mb - 1024) * 1MB) {
@@ -92,6 +108,7 @@ function GamesDisk($name, $iqn, $L, $upd) {
     $p = BasicPart $disk.Number
     if (-not $p) { throw 'the disk is empty: set it up from its update machine first' }
     MountAt $p $store
+    Hide $p $false
     if (-not (Test-Path $vhd)) { throw 'no games.vhdx on the disk yet: set it up from its update machine first' }
     MountAt (Get-Volume -FileSystemLabel BROOMWIN | Get-Partition) $ssd
     $ci = Get-DiskImage -ImagePath $child -ErrorAction SilentlyContinue
