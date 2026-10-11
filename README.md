@@ -1,3 +1,5 @@
+<p align="center"><img src="docs/images/broom.svg" alt="Broom logo" width="128"></p>
+
 # Broom — open-source diskless boot server for Windows 11 & Linux
 
 [![Release](https://img.shields.io/github/v/release/morningstar-sudo/broom)](https://github.com/morningstar-sudo/broom/releases/latest)
