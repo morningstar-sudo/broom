@@ -1,8 +1,8 @@
 title: Broom
 description: Open-source diskless boot server for Windows 11 & Linux — PXE/iSCSI network boot from one golden image, clean on every boot. For internet cafés, gaming centers and school labs.
 theme: jekyll-theme-cayman
-url: https://morningstar-sudo.github.io
-baseurl: /broom
+url: https://broom.hainth.edu.vn
+baseurl: ""
 lang: en
 plugins:
   - jekyll-seo-tag

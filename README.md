@@ -9,8 +9,8 @@ alternative to commercial diskless software, built for **internet cafés, gaming
 classrooms** (≈10–30 machines). Clients run **Windows 11 Pro** or **Linux**; the server is **one static Rust
 binary** with DHCP, TFTP, iSCSI target and web admin built in.
 
-**Guides:** [morningstar-sudo.github.io/broom](https://morningstar-sudo.github.io/broom/) — Windows 11 diskless,
-FACEIT on diskless PCs, Broom vs CCBoot, [hướng dẫn tiếng Việt](https://morningstar-sudo.github.io/broom/bootrom-quan-net.html).
+**Guides:** [broom.hainth.edu.vn](https://broom.hainth.edu.vn/) — Windows 11 diskless,
+FACEIT on diskless PCs, Broom vs CCBoot, [hướng dẫn tiếng Việt](https://broom.hainth.edu.vn/bootrom-quan-net.html).
 
 > **Tiếng Việt:** Broom là phần mềm **bootrom (boot không ổ cứng / diskless)** mã nguồn mở, miễn phí, dành cho
 > **quán net, phòng game, phòng máy trường học**. Một máy chủ Linux chạy đúng một file, các máy trạm boot qua mạng
