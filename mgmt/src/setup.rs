@@ -38,6 +38,22 @@ pub fn takeover(services: &[&str]) {
 
 const UNIT_PATH: &str = "/etc/systemd/system/bootrom-mgmt.service";
 
+/// SELinux (Rocky / RHEL / Alma): systemd may only run programs labelled as such. A binary under /root or /home (or
+/// moved from there) keeps a home label → systemd is refused to run it (the iSCSI daemon "did not come up", the
+/// service doesn't start). Label `path` bin_t, like a program in /usr/local/bin. No SELinux → nothing to do.
+pub fn selinux_exec_label(path: &std::path::Path) {
+    if !std::path::Path::new("/sys/fs/selinux/enforce").exists() {
+        return;
+    }
+    let ok = Command::new("chcon").args(["-t", "bin_t"]).arg(path).output().is_ok_and(|o| o.status.success());
+    if !ok {
+        tracing::warn!(
+            "SELinux: could not label {p} bin_t — systemd may refuse to run it: semanage fcontext -a -t bin_t '{p}' && restorecon '{p}'",
+            p = path.display()
+        );
+    }
+}
+
 /// systemd unit that runs this binary from its own directory. `args` (e.g. `--port 8080`) and the BOOTROM_* /
 /// RUST_LOG overrides of the installing shell are carried over.
 fn unit_text(exe: &str, home: &str, args: &[String], env: &[(String, String)]) -> String {
@@ -66,6 +82,7 @@ pub fn install_service(args: &[String]) -> ! {
         tracing::error!("write {UNIT_PATH}: {e}");
         std::process::exit(1);
     }
+    selinux_exec_label(std::path::Path::new(&exe));
     let ok = |a: &[&str]| Command::new("systemctl").args(a).status().is_ok_and(|s| s.success());
     if !(ok(&["daemon-reload"]) && ok(&["enable", "--now", "bootrom-mgmt"])) {
         tracing::error!("systemctl failed — see `systemctl status bootrom-mgmt`");

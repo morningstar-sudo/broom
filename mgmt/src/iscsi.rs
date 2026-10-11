@@ -133,7 +133,27 @@ fn daemon_exe() -> Result<PathBuf, String> {
             .and_then(|_| std::fs::rename(&tmp, &file))
             .map_err(|e| format!("copy the binary to {}: {e}", file.display()))?;
     }
+    crate::setup::selinux_exec_label(&file); // every time: a copy made before this fix has no label yet
     Ok(file)
+}
+
+/// The daemon's unit when it is not running normally (failed, or restarting after a crash: still loaded, so a new
+/// `systemd-run --unit=broom-iscsid` is refused) → stopped and cleared. A running one is left alone.
+fn clear_stuck_unit() {
+    let o = Command::new("systemctl").args(["show", "-p", "ActiveState", "--value", "broom-iscsid"]).output();
+    let state = o.map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string()).unwrap_or_default();
+    if matches!(state.as_str(), "activating" | "failed" | "deactivating") {
+        tracing::warn!("iSCSI daemon unit was {state} (crashing / not starting) → stopped before starting it again");
+        let _ = Command::new("systemctl").args(["stop", "broom-iscsid"]).output();
+    }
+    let _ = Command::new("systemctl").args(["reset-failed", "broom-iscsid"]).output();
+}
+
+/// The daemon's last log lines (why it didn't come up).
+fn daemon_log_tail() -> String {
+    let o = Command::new("journalctl").args(["-u", "broom-iscsid", "-n", "6", "--no-pager", "-o", "cat"]).output();
+    let s = o.map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string()).unwrap_or_default();
+    if s.is_empty() { String::new() } else { format!(" — last log lines: {}", s.replace('\n', " | ")) }
 }
 
 fn start_daemon() -> Result<(), String> {
@@ -142,7 +162,7 @@ fn start_daemon() -> Result<(), String> {
     let args = ["iscsid", "--state", &state.to_string_lossy()].map(String::from);
     if Path::new("/run/systemd/system").is_dir() {
         // Its own transient unit: outside bootrom-mgmt.service, whose stop/restart kills every process of its cgroup.
-        let _ = Command::new("systemctl").args(["reset-failed", "broom-iscsid"]).output();
+        clear_stuck_unit();
         let mut c = Command::new("systemd-run");
         c.args(["--unit=broom-iscsid", "--collect", "-p", "Restart=on-failure", "-p", "RestartSec=2"]).arg(&exe).args(&args);
         let o = c.output().map_err(|e| format!("systemd-run: {e}"))?;
@@ -170,7 +190,7 @@ fn start_daemon() -> Result<(), String> {
         }
         std::thread::sleep(std::time::Duration::from_millis(100));
     }
-    Err("iSCSI daemon did not come up in 10 s (journalctl -u broom-iscsid, or iscsid.log next to the binary)".into())
+    Err(format!("iSCSI daemon did not come up in 10 s (journalctl -u broom-iscsid, or iscsid.log next to the binary){}", daemon_log_tail()))
 }
 
 const CONFIGFS: &str = "/sys/kernel/config/target";

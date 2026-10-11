@@ -75,10 +75,26 @@ fn configs(st: &SharedState) -> Vec<Config> {
         .collect()
 }
 
+/// Why the games disks are not served (last sync), shown on the Images page; None = fine.
+static LAST_ERR: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
 /// Push the list to the iSCSI daemon (at start, on change, and every minute: an update machine's lease may move).
-/// Blocking.
+/// A new error is logged once as a warning (it repeats every minute until fixed). Blocking.
 pub fn sync(st: &SharedState) -> Result<(), String> {
-    crate::iscsi::games_set(configs(st))
+    let list = configs(st);
+    let r = if list.is_empty() && crate::iscsi::games_status().is_none() {
+        Ok(()) // nothing to serve, no daemon to tell
+    } else {
+        crate::iscsi::games_set(list)
+    };
+    let mut last = LAST_ERR.lock().unwrap();
+    match &r {
+        Err(e) if last.as_deref() != Some(e.as_str()) => tracing::warn!("games disks not served: {e}"),
+        Ok(()) if last.is_some() => tracing::info!("games disks served again"),
+        _ => {}
+    }
+    *last = r.as_ref().err().cloned();
+    r
 }
 
 async fn sync_now(st: SharedState) -> Result<(), ApiError> {
@@ -116,6 +132,7 @@ async fn status(State(st): State<SharedState>) -> Json<serde_json::Value> {
         }
     }
     Json(serde_json::json!({
+        "error": LAST_ERR.lock().unwrap().clone(),
         "disks": list,
         "machines": machines.iter().map(|m| serde_json::json!({"id": m.id, "name": who(m), "grp": m.grp})).collect::<Vec<_>>(),
         "groups": groups,

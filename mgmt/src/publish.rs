@@ -154,9 +154,7 @@ pub fn start_iscsi(st: &SharedState) {
         Err(e) => return tracing::error!("iSCSI targets not served: {e}"),
     }
     restore_targets(st);
-    if let Err(e) = crate::games::sync(st) {
-        tracing::error!("games disk not served: {e}");
-    }
+    let _ = crate::games::sync(st); // logs its own errors
 }
 
 /// zram devices an older version loaded goldens into (kernel RAM held until reset). Their LIO targets are gone.

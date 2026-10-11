@@ -405,9 +405,7 @@ async fn main() {
                 let st = st.clone();
                 let _ = tokio::task::spawn_blocking(move || {
                     iscsi::upgrade_if_idle();
-                    if let Err(e) = games::sync(&st) {
-                        tracing::debug!("games disk: {e}");
-                    }
+                    let _ = games::sync(&st); // logs its own errors
                     for img in st.db.images().unwrap_or_default().into_iter().filter(|i| i.os == "linux") {
                         let busy = st.jobs.lock().unwrap().get(&img.name).is_some_and(|s| s.starts_with('⏳'));
                         if !busy {

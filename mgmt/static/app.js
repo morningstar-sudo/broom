@@ -446,7 +446,8 @@ async function loadGames(){const g=await j('/api/games');const tb=document.query
       <td><select data-change="setGamesUpdate" data-args="${esc(JSON.stringify([d.name]))}">${opts(d.update)}</select>${d.update!=null&&!x.update_ip?' <span class="no" title="no fixed IP or lease known">no IP</span>':''}${s&&s.update_connected?' <span class="ok">● writable</span>':''}</td>
       <td class="mono">${s&&s.update_bytes?gbs(s.update_bytes)+` <button ${act('saveGamesUpdate',d.name)}>Save</button> <button class="ghost" ${act('discardGamesUpdate',d.name)}>Discard</button>`:'—'}</td>
       <td><button class="ghost" ${act('editGames',d.name)}>Edit</button> <button class="ghost" ${act('delGames',d.name)}>Delete</button></td></tr>`;}).join('')
-    ||'<tr><td colspan="9" class="hint">no games disk yet</td></tr>';}
+    ||'<tr><td colspan="9" class="hint">no games disk yet</td></tr>';
+  const m=document.getElementById('gm_msg');if(m&&g.error)m.textContent=' ✗ not served: '+g.error;}
 async function gamesCall(url,body,ask){if(ask&&!confirm(ask))return;const m=document.getElementById('gm_msg');
   try{const r=await j(url,mk(body));m.textContent=' ✓ '+(r.status||'saved');}catch(e){m.textContent=' ✗ '+e.message;}loadGames();}
 const saveGames=()=>gamesCall('/api/games/disk',{name:v('gm_name'),letter:v('gm_letter'),size_gb:+v('gm_size'),groups:[v('gm_groups')]});
