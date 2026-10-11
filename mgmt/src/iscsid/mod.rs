@@ -316,12 +316,17 @@ pub async fn run(args: &[String]) -> ! {
             tracing::warn!("iscsid: {MAX_CONNS} connections open, refusing {peer}");
             continue;
         };
-        // A client that died without closing (power cut) is noticed in ~1 min and its session freed.
+        // A client that died without closing (power cut, shutdown) is noticed in ~1 min and its session freed: keepalive
+        // when the line is idle; TCP_USER_TIMEOUT when replies it never acknowledged are still queued (it went off
+        // right after its last writes — keepalive doesn't probe then, and the kernel would retransmit for ~15 min,
+        // keeping e.g. the game update machine "connected" and its save refused).
         let ka = socket2::TcpKeepalive::new()
             .with_time(std::time::Duration::from_secs(30))
             .with_interval(std::time::Duration::from_secs(10))
             .with_retries(3);
-        let _ = socket2::SockRef::from(&s).set_tcp_keepalive(&ka);
+        let sock = socket2::SockRef::from(&s);
+        let _ = sock.set_tcp_keepalive(&ka);
+        let _ = sock.set_tcp_user_timeout(Some(std::time::Duration::from_secs(60)));
         let _ = s.set_nodelay(true);
         tokio::spawn(async move {
             conn::serve(s, peer.ip().to_canonical().to_string()).await;
