@@ -1,0 +1,83 @@
+name: Bug report
+description: Something doesn't work — the server, a client boot, publishing, the web page…
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting! **Security problem?** Don't post it here — use *Security → Report a vulnerability*.
+        Vietnamese or English is fine. **Redact** product keys, passwords and the setup token; never attach a golden
+        image or `bootrom.db`.
+  - type: input
+    id: version
+    attributes:
+      label: Broom version
+      description: The release you downloaded (e.g. `v0.5.5-deb9fbe`), or at least the version under "Broom" at the top left of the web page.
+      placeholder: v0.5.5-deb9fbe
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      multiple: true
+      options:
+        - Web page / API
+        - Publish / upload / versions
+        - Windows client boot (stage)
+        - Linux client boot (iSCSI)
+        - Games disks
+        - DHCP / TFTP / PXE / iPXE
+        - Drivers / license keys
+        - Install / build
+        - Other
+    validations:
+      required: true
+  - type: input
+    id: server
+    attributes:
+      label: Server OS
+      placeholder: Ubuntu 24.04 / Debian 12 / Rocky 9 — real machine or VM
+    validations:
+      required: true
+  - type: input
+    id: client
+    attributes:
+      label: Client machine and image
+      description: Hardware or VM (NIC, disk), and the image's OS. Leave empty if not client related.
+      placeholder: VMware VM, e1000e, NVMe 128 GB — Windows 11 Pro image
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you saw, and what you expected instead.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Publish image …
+        2. Boot a client …
+        3. …
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs / screenshots
+      description: |
+        Server: `journalctl -u bootrom-mgmt --since "1 hour ago"` (iSCSI: `journalctl -u broom-iscsid`).
+        Windows client: a photo of the stage screen or `broom\stage.log` from the BROOMWIN partition;
+        games disk / SSD watchdog: `C:\Windows\Temp\broom-games.log`. Paste text, or drag images in.
+      render: text
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checks
+      options:
+        - label: I'm on the latest release (or say below why I can't update).
+          required: true
+        - label: I removed keys, passwords and tokens from what I posted.
+          required: true

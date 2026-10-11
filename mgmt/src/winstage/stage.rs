@@ -16,7 +16,9 @@ fn write_exec(path: &str, body: &str) -> Result<(), String> {
 fn stage_hook() -> &'static str { crate::assets::text("scripts/stage-hook.sh") }
 
 /// Tools of the machine building the bundle that the hook copies into the stage (/broom/bin, ahead of busybox).
-const STAGE_TOOLS: &str = "sfdisk blkid mkfs.fat mkntfs ntfsfix efibootmgr wget sha256sum tar gzip od dd awk";
+/// tee: the golden is hashed while downloading through `tee` — the initramfs busybox's copies one byte per write()
+/// (built without block I/O): ~240 KB/s for a golden instead of the network's speed.
+const STAGE_TOOLS: &str = "sfdisk blkid mkfs.fat mkntfs ntfsfix efibootmgr wget sha256sum tee tar gzip od dd awk";
 
 /// Stage init-premount script — runs on the client, does NOT mount root; reboots into Windows when done.
 fn stage_script() -> &'static str { crate::assets::text("scripts/stage.sh") }
@@ -58,7 +60,7 @@ fn build_stage(kernel: Option<&str>, sd: &str) -> Result<String, String> {
     // at build time, not when a client gets stuck in a shell.
     let list = run("lsinitramfs", &[&tmp])?;
     // wget: busybox's (initramfs build) lacks --post-file / -T → the driver list needs GNU wget.
-    let missing: Vec<&str> = ["sfdisk", "mkfs.fat", "mkntfs", "ntfsfix", "efibootmgr", "awk", "wget"]
+    let missing: Vec<&str> = ["sfdisk", "mkfs.fat", "mkntfs", "ntfsfix", "efibootmgr", "awk", "wget", "tee"]
         .into_iter()
         .filter(|b| !list.lines().any(|l| l.ends_with(&format!("broom/bin/{b}"))))
         .collect();
