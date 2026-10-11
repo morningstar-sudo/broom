@@ -1,29 +1,64 @@
-# Broom — Diskless Boot System
+# Broom — open-source diskless boot server for Windows 11 & Linux
 
-Network-boot a room of PCs from **one shared golden image**. Every user write goes to the local
-SSD and is **wiped on every boot**, so every machine comes up clean. Built for small sites
-(≈10–30 machines, e.g. an internet café or a lab). Supports **Linux** and **Windows 11 Pro**.
+[![Release](https://img.shields.io/github/v/release/morningstar-sudo/broom)](https://github.com/morningstar-sudo/broom/releases/latest)
+[![License](https://img.shields.io/github/license/morningstar-sudo/broom)](LICENSE)
 
-Everything is **one static binary** — no dnsmasq, tftpd, targetcli or extra services to install:
+**Broom** network-boots a room of PCs (PXE + iSCSI) from **one shared golden image**. Every user write goes to
+the local SSD and is **wiped on every boot**, so every machine comes up clean. It is a free, open-source
+alternative to commercial diskless software, built for **internet cafés, gaming centers, school labs and
+classrooms** (≈10–30 machines). Clients run **Windows 11 Pro** or **Linux**; the server is **one static Rust
+binary** with DHCP, TFTP, iSCSI target and web admin built in.
 
-- **Web admin + boot files** over HTTP
-- **DHCP server** (hands out IPs + PXE boot info) — toggle on/off
-- **TFTP** (serves the embedded iPXE)
-- **iSCSI** target built in (read-only goldens, from disk or a compressed RAM copy) — its own process
-  (`broom-iscsid`), so restarting / upgrading the server never drops a client
-- **Image versions** — snapshot / rollback in no time: a version is a hard link to the golden file (no copy, no
-  ZFS)
-- **Linux goldens read in-process** — ext4 + LVM, no libguestfs
+> **Tiếng Việt:** Broom là phần mềm **bootrom (boot không ổ cứng / diskless)** mã nguồn mở, miễn phí, dành cho
+> **quán net, phòng game, phòng máy trường học**. Một máy chủ Linux chạy đúng một file, các máy trạm boot qua mạng
+> (PXE) từ một image Windows 11 Pro hoặc Linux dùng chung; mỗi lần khởi động lại máy trạm sạch như mới. Có ổ game
+> dùng chung, cập nhật game một lần cho cả phòng, snapshot / rollback image, chia nhóm máy. Chạy được **FACEIT
+> Anti-Cheat** (Secure Boot, TPM 2.0, HVCI).
 
-VMDK/VHDX conversion, partition tables and archives are done in-process too (no qemu-img, sfdisk, cpio, tar,
-hivex), and the Windows client stage (kernel + initrd + Secure Boot shim) is built by CI and downloaded from the
-release on the first Windows publish — **the server needs no packages and no kernel modules** (no LIO, zram,
-loop or ntfs3): the iSCSI target, the RAM cache and NTFS reading are all in the binary.
-A release binary also downloads its `broom-assets.zip` (web UI, iPXE, scripts — ~1 MB) from the same release on its
-first start, keeps it next to the binary and loads it into RAM at every start; without it the server does not start.
-Offline server: download `broom-assets.zip` and `broom-stage.tar.gz` of the same release elsewhere and copy them next
-to the binary (e.g. `/opt/bootrom/`); the stage is unpacked by the next Windows publish. A locally built binary has
-the assets embedded and no pinned stage: see *Build* for making its bundle.
+## Features
+
+- **Clean on every boot** — guests' writes land on the local SSD and are reset at the next boot; Windows boots
+  from a child VHDX, Linux from a read-only iSCSI root + overlay.
+- **One file to deploy** — no dnsmasq, tftpd, targetcli, qemu-img, libguestfs, LIO, zram or ntfs3: DHCP, TFTP,
+  iPXE, iSCSI target, compressed RAM cache, VMDK/VHDX conversion, ext4/LVM and NTFS reading are all in the binary.
+  Runs on any x86_64 Linux (static musl build).
+- **Build the golden in a VM** (e.g. VMware) and upload the VM folder from the browser; the server prepares the boot
+  files and publishes it.
+- **Local SSD cache** — each machine keeps its images on its SSD, so a room boots fast and the server's disk and
+  network stay quiet; new goldens can be preloaded in the background.
+- **Games disks** — shared, read-only game libraries per machine group; install or update a game once on one machine,
+  save, and every machine gets it at its next boot.
+- **Image versions** — snapshot / rollback instantly (hard links, no copy, no ZFS); export a version back to a
+  VMware VM to edit it.
+- **Machine groups** — per-group boot menus, images, games disks and drivers.
+- **Upgrade without kicking clients** — the iSCSI target runs as its own process (`broom-iscsid`).
+- **Secure Boot, TPM 2.0, VBS / HVCI** on the clients — **works with FACEIT Anti-Cheat**.
+- **Web admin** for images, machines (Wake-on-LAN, live status), DHCP and settings — behind a login.
+- **Free and open source** — Apache-2.0.
+
+## Screenshots
+
+**Windows 11 client booted from Broom** — C: is the shared golden, G: a games disk:
+
+![Windows 11 client network-booted by Broom, with a games disk mounted as G:](images/client-games-disk.png)
+
+**FACEIT Anti-Cheat on a Broom client** — Secure Boot, IOMMU, TPM 2.0, TPM attestation and HVCI all pass:
+
+![FACEIT Anti-Cheat running on a Broom diskless client, all recommended security features green](images/faceit-anticheat.png)
+
+**Web admin — DHCP settings:**
+
+![Broom web admin DHCP settings page](images/dhcp-settings.png)
+
+## Broom compared with
+
+| | Broom | Commercial diskless suites (e.g. CCBoot) | LTSP | FOG Project |
+|---|---|---|---|---|
+| Open source | yes (Apache-2.0) | no | yes | yes |
+| Server | any x86_64 Linux, one binary | Windows | Linux | Linux |
+| Windows clients | Windows 11 Pro | yes | no | yes |
+| Linux clients | yes | — | yes | yes |
+| Model | diskless, reset every boot | diskless | netboot thin/fat clients | imaging (clone onto the local disk) |
 
 ## How it works
 
@@ -38,17 +73,32 @@ the assets embedded and no pinned stage: see *Build* for making its bundle.
      to RAM, the server keeps a compressed copy of `golden.vhdx` in memory and every download comes from it — a room
      fetching a new golden at once never hammers the server's disk.
 
-## Quick start (Debian/Ubuntu server, as root)
+## Requirements
+
+- **Server:** x86_64 Linux (tested on Debian/Ubuntu and Rocky Linux 10), run as root; disk space for the goldens;
+  Gigabit LAN.
+- **Clients:** x86_64 UEFI PCs with network boot (PXE). Windows images need a local SSD; Linux images can also run
+  without one (writes kept in RAM).
+
+## Quick start (Linux server, as root)
 
 Deploy into a **fixed directory** (images and the database live next to the binary — don't run from `/tmp`).
 
 ```bash
 sudo mkdir -p /opt/bootrom && cd /opt/bootrom
-sudo cp <path>/bootrom-mgmt .
+sudo curl -fLO https://github.com/morningstar-sudo/broom/releases/latest/download/bootrom-mgmt
+sudo chmod +x bootrom-mgmt
 # First run with no network config: setup detects the network, then serves (nothing to install).
 # Any old dnsmasq / tftpd-hpa / targetcli restore service is stopped and disabled automatically.
 sudo ./bootrom-mgmt
 ```
+
+On its first start a release binary downloads its `broom-assets.zip` (web UI, iPXE, scripts — ~1 MB) from the same
+release, keeps it next to the binary and loads it into RAM at every start; without it the server does not start. The
+Windows client stage (kernel + initrd + Secure Boot shim, `broom-stage.tar.gz`) is fetched the same way on the first
+Windows publish. **Offline server:** download `broom-assets.zip` and `broom-stage.tar.gz` of the same release
+elsewhere and copy them next to the binary; the stage is unpacked by the next Windows publish. A locally built binary
+has the assets embedded and no pinned stage: see *Build* for making its bundle.
 
 Then open `http://<server-ip>/`:
 
@@ -103,7 +153,7 @@ Writes `/etc/systemd/system/bootrom-mgmt.service` (runs the binary from its own 
 keeps any `BOOTROM_*` / `RUST_LOG` set in your shell), then enables and starts it. Stop a foreground instance first —
 both want ports 67/69/80. To upgrade: `systemctl stop bootrom-mgmt`, replace the binary, `systemctl start bootrom-mgmt`.
 
-**Secure Boot (test):** tick **Secure Boot clients** on the Network page. Clients then get the official iPXE signed
+**Secure Boot:** tick **Secure Boot clients** on the Network page. Clients then get the official iPXE signed
 by the iPXE project (`mgmt/ipxe/signed/`, via its Microsoft-signed shim) instead of broom's own build, and the kernels
 boot through Ubuntu's Microsoft-signed shim: the Windows stage runs Ubuntu's Canonical-signed generic kernel from the
 stage bundle (whatever distro/kernel the server has), and Ubuntu goldens' own kernels pass the same shim. Goldens of
@@ -228,7 +278,7 @@ stderr. `RUST_LOG=debug` also logs every external command. Under systemd: `journ
 
 | What | Why | How |
 |---|---|---|
-| `bootrom.db` | config, admin password, machines + license keys, images list | `sqlite3 bootrom.db ".backup /backup/bootrom.db"` while running (`apt install sqlite3`), or stop the service and copy `bootrom.db*` (incl. `-wal`) |
+| `bootrom.db` | config, admin password, machines + license keys, images list | `sqlite3 bootrom.db ".backup /backup/bootrom.db"` while running (`apt install sqlite3` / `dnf install sqlite`), or stop the service and copy `bootrom.db*` (incl. `-wal`) |
 | `images/` | the goldens (`image.img`, sparse) | stop the service or pick a time with no publish running; `cp --sparse=always -a` / `rsync -S` |
 | `storage/` | image versions (hard links + manifests) | same as `images/` — copy both together, with `cp -a` / `rsync -H` (keeps the links) |
 | `tftp/` | boot files | optional: rebuilt by **Publish** on each image (back it up to skip that) |
@@ -308,6 +358,33 @@ broom/
     └── ipxe/                 # IPXE_COMMIT + patches/ → build.sh → snponly.efi embedded in the binary;
                               # signed/ = official Secure Boot iPXE (fetch-signed.sh)
 ```
+
+## FAQ
+
+**Can I run an internet café or school lab on Windows 11 without installing Windows on each PC?**
+Yes. Install Windows 11 Pro once in a VM, upload it to Broom, and every PC network-boots that image. Each boot starts
+from the same clean state; nothing a guest does survives a reboot.
+
+**Do the clients need a disk?**
+Windows images need a local SSD: the image is cached there and the session's writes go there, which keeps boots fast
+and the server load low. Linux images can run with no disk at all (golden over iSCSI, writes in RAM).
+
+**What does the server need?**
+Any x86_64 Linux machine, run as root. Broom is a single static binary — nothing else to install.
+
+**How many machines?**
+Broom is built for small sites, about 10–30 machines per server.
+
+**How are games handled?**
+Put game libraries on a games disk instead of the golden. Update them once from one machine; every machine gets the
+new version at its next boot, while machines already playing keep theirs.
+
+**Does it work with anti-cheat (FACEIT)?**
+Yes — FACEIT Anti-Cheat runs on Broom clients with Secure Boot, TPM 2.0 and HVCI on (Network page → Secure Boot
+clients). If an anti-cheat needs a first run on each machine, tick **Base mode** on the image (see *Adding a golden*).
+
+**Is it free?**
+Yes — Apache-2.0, free for commercial use (e.g. a paid internet café).
 
 ## License
 
