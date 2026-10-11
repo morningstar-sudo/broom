@@ -4,6 +4,10 @@ theme: jekyll-theme-cayman
 url: https://broom.hainth.edu.vn
 baseurl: ""
 lang: en
+defaults:
+  - scope: { path: "" }
+    values:
+      image: /images/faceit-anticheat.png
 plugins:
   - jekyll-seo-tag
   - jekyll-sitemap
