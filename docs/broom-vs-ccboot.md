@@ -1,0 +1,49 @@
+---
+title: Broom vs CCBoot — open-source alternative for diskless internet cafés
+description: How Broom, a free open-source diskless boot server, compares with CCBoot and other commercial diskless software for internet cafés and labs — and where Broom is still behind.
+---
+
+[← Broom](index.md)
+
+CCBoot and similar commercial products are the usual way to run an internet café without a hard disk in every PC.
+Broom does the same job — every PC boots one shared Windows image and is clean after each reboot — as free,
+open-source software with a different design. This page compares the two approaches honestly. Commercial products
+change between versions; check their own documentation for current details.
+
+## At a glance
+
+| | Broom | CCBoot / commercial diskless |
+|---|---|---|
+| License | Apache-2.0, free, source on GitHub | closed source, paid licence |
+| Server | any x86_64 Linux, one static binary | Windows |
+| Windows clients | Windows 11 Pro | several Windows versions |
+| Linux clients | yes (ext4 / LVM goldens) | — |
+| Where the client runs | from a VHDX cached on the PC's own SSD | depends on product and setup |
+| Reset | every boot | every boot |
+| Secure Boot / TPM / HVCI | yes — [works with FACEIT](faceit-diskless.md) | check the product |
+| Games | shared games disks, versioned, updated from one PC | product-specific game update tools |
+| Track record | young project | many years, many sites |
+
+## Where Broom is different
+
+- **Runs on the PC's SSD.** Each PC keeps the golden on its own SSD and boots Windows natively from it. The network
+  is only used when a new golden arrives, so the server does not have to serve every disk read of every PC. A room
+  can share one modest server.
+- **One file on Linux.** No Windows Server licence, no services to install — DHCP, TFTP, iPXE, iSCSI target and web
+  admin are all inside one binary.
+- **Signed boot chain.** With Secure Boot clients on, the whole network boot is signed, so Secure Boot, TPM 2.0 and
+  HVCI stay on — what modern anti-cheats require.
+- **Versions in a click.** Snapshots of the golden are hard links: instant and free until the golden changes. Games
+  disks get a new version on every save, and PCs already playing keep the old one until they reboot.
+- **Open.** You can read, audit, fork and fix the code; no licence keys or per-PC fees.
+
+## Where Broom is behind
+
+- **Young project** — fewer sites in production, no commercial support.
+- **Windows 11 Pro only** on the Windows side, and **UEFI** PCs only.
+- **Each PC needs an SSD** for Windows images (Linux images can run without one).
+- **Sized for small sites** — about 10–30 PCs per server.
+- **Web admin in English** only.
+
+If those fit your site, Broom gives you a diskless café without licence fees. Start with
+[Diskless boot Windows 11 with Broom](windows-11-diskless-boot.md).

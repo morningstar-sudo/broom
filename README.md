@@ -9,6 +9,9 @@ alternative to commercial diskless software, built for **internet cafés, gaming
 classrooms** (≈10–30 machines). Clients run **Windows 11 Pro** or **Linux**; the server is **one static Rust
 binary** with DHCP, TFTP, iSCSI target and web admin built in.
 
+**Guides:** [morningstar-sudo.github.io/broom](https://morningstar-sudo.github.io/broom/) — Windows 11 diskless,
+FACEIT on diskless PCs, Broom vs CCBoot, [hướng dẫn tiếng Việt](https://morningstar-sudo.github.io/broom/bootrom-quan-net.html).
+
 > **Tiếng Việt:** Broom là phần mềm **bootrom (boot không ổ cứng / diskless)** mã nguồn mở, miễn phí, dành cho
 > **quán net, phòng game, phòng máy trường học**. Một máy chủ Linux chạy đúng một file, các máy trạm boot qua mạng
 > (PXE) từ một image Windows 11 Pro hoặc Linux dùng chung; mỗi lần khởi động lại máy trạm sạch như mới. Có ổ game
@@ -40,15 +43,15 @@ binary** with DHCP, TFTP, iSCSI target and web admin built in.
 
 **Windows 11 client booted from Broom** — C: is the shared golden, G: a games disk:
 
-![Windows 11 client network-booted by Broom, with a games disk mounted as G:](images/client-games-disk.png)
+![Windows 11 client network-booted by Broom, with a games disk mounted as G:](docs/images/client-games-disk.png)
 
 **FACEIT Anti-Cheat on a Broom client** — Secure Boot, IOMMU, TPM 2.0, TPM attestation and HVCI all pass:
 
-![FACEIT Anti-Cheat running on a Broom diskless client, all recommended security features green](images/faceit-anticheat.png)
+![FACEIT Anti-Cheat running on a Broom diskless client, all recommended security features green](docs/images/faceit-anticheat.png)
 
 **Web admin — DHCP settings:**
 
-![Broom web admin DHCP settings page](images/dhcp-settings.png)
+![Broom web admin DHCP settings page](docs/images/dhcp-settings.png)
 
 ## Broom compared with
 
@@ -119,7 +122,8 @@ Then open `http://<server-ip>/`:
       UEFI PXE and iPXE never ask, so it rarely changes boot time.
 - Client/boot endpoints (`/boot*`, `/tftp`, license, driver and cache-list fetch) stay open — a PXE client can't log in.
 
-**Client machines:** UEFI, Secure Boot **off**, **PXE first** in the boot order (required for the reset-on-boot).
+**Client machines:** UEFI, Secure Boot off (or on — see **Secure Boot** below), **PXE first** in the boot order
+(required for the reset-on-boot).
 **Register them** (Machines page) before their first Windows boot: the stage partitions the SSD by itself only on a
 registered machine with exactly one internal disk. An unknown machine (or one with several disks) asks on its
 screen which disk to wipe — type its name, or press Enter to leave the disks alone. Linux images on such a machine

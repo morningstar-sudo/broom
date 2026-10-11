@@ -5,10 +5,13 @@
 # publishes a release with those files.
 name: build
 
+# Docs, Markdown and screenshots only → no build, no release.
 on:
   push:
     branches: [main]
+    paths-ignore: ['docs/**', '**.md']
   pull_request:
+    paths-ignore: ['docs/**', '**.md']
   workflow_dispatch:
 
 concurrency:
