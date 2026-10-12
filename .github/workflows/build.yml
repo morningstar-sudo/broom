@@ -1,7 +1,7 @@
 # Build iPXE (snponly.efi = upstream at mgmt/ipxe/IPXE_COMMIT + mgmt/ipxe/patches) + a debug mgmt binary (iPXE + web UI +
 # scripts embedded), run the unit tests, build the Windows stage bundle and the assets bundle (web UI, iPXE, scripts) with
 # it, then the release binary (static musl) pinned to both and without the assets inside; keep binary + bundles +
-# snponly.efi as artifacts. Every push to main also tags the commit with its push time (e.g. 2026.10.12-164312, UTC+7) and
+# snponly.efi as artifacts. Every push to main also tags the commit with its push time (UTC, e.g. 2026-09-19T17-05-25Z) and
 # publishes a release with those files.
 name: build
 
@@ -48,20 +48,19 @@ jobs:
         with:
           workspaces: mgmt -> target
 
-      # Release tag = the push time, Vietnam time (e.g. 2026.10.12-164312): the same on a re-run of that push, so a re-run
-      # updates its release instead of making another. Manual runs / pull requests (no release): the build time.
-      # The release title adds the Cargo.toml version: "v0.6.0 · 2026-10-12 16:43 (UTC+7)".
+      # Release tag = the push time, ISO 8601 in UTC with "-" for ":" (git refuses ":" in a tag), e.g. 2026-09-19T17-05-25Z:
+      # the same on a re-run of that push, so a re-run updates its release instead of making another. Manual runs / pull
+      # requests (no release): the build time. The release title is the same.
       - name: Release tag
         id: tag
         env:
           PUSHED_AT: ${{ github.event.repository.pushed_at }}
         run: |
-          v=$(sed -n 's/^version = "\(.*\)"/\1/p' mgmt/Cargo.toml | head -1)
           t=$(date +%s)
           if [ "$GITHUB_EVENT_NAME" = push ] && [ -n "$PUSHED_AT" ]; then t=$PUSHED_AT; fi
-          at(){ TZ=Asia/Ho_Chi_Minh date -d "@$t" "$1"; }
-          echo "name=$(at +%Y.%m.%d-%H%M%S)" >> "$GITHUB_OUTPUT"
-          echo "title=v$v · $(at '+%Y-%m-%d %H:%M') (UTC+7)" >> "$GITHUB_OUTPUT"
+          name=$(date -u -d "@$t" +%Y-%m-%dT%H-%M-%SZ)
+          echo "name=$name" >> "$GITHUB_OUTPUT"
+          echo "title=$name" >> "$GITHUB_OUTPUT"
 
       # --ipxe: always fetch + patch + build snponly.efi from source (it is not in git).
       # --dev: this binary only makes the bundles below → a debug build sharing cargo test's dependencies. The release

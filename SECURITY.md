@@ -2,7 +2,7 @@
 
 ## Supported versions
 
-Broom ships as rolling releases from `main` (tagged with the push time, e.g. `2026.10.12-164312`). Security fixes go into the **latest
+Broom ships as rolling releases from `main` (tagged with the push time in UTC, e.g. `2026-09-19T17-05-25Z`). Security fixes go into the **latest
 release** only; please update before reporting, and check whether the issue still happens there.
 
 | Version | Supported |
