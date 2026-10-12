@@ -17,8 +17,9 @@ fn stage_hook() -> &'static str { crate::assets::text("scripts/stage-hook.sh") }
 
 /// Tools of the machine building the bundle that the hook copies into the stage (/broom/bin, ahead of busybox).
 /// tee: the golden is hashed while downloading through `tee` — the initramfs busybox's copies one byte per write()
-/// (built without block I/O): ~240 KB/s for a golden instead of the network's speed.
-const STAGE_TOOLS: &str = "sfdisk blkid mkfs.fat mkntfs ntfsfix efibootmgr wget sha256sum tee tar gzip od dd awk";
+/// (built without block I/O): ~240 KB/s for a golden instead of the network's speed. dmesg: the kernel's log goes
+/// into stage.log (busybox-initramfs has none).
+const STAGE_TOOLS: &str = "sfdisk blkid mkfs.fat mkntfs ntfsfix efibootmgr wget sha256sum tee tar gzip od dd awk dmesg";
 
 /// Stage init-premount script — runs on the client, does NOT mount root; reboots into Windows when done.
 fn stage_script() -> &'static str { crate::assets::text("scripts/stage.sh") }
@@ -60,7 +61,7 @@ fn build_stage(kernel: Option<&str>, sd: &str) -> Result<String, String> {
     // at build time, not when a client gets stuck in a shell.
     let list = run("lsinitramfs", &[&tmp])?;
     // wget: busybox's (initramfs build) lacks --post-file / -T → the driver list needs GNU wget.
-    let missing: Vec<&str> = ["sfdisk", "mkfs.fat", "mkntfs", "ntfsfix", "efibootmgr", "awk", "wget", "tee"]
+    let missing: Vec<&str> = ["sfdisk", "mkfs.fat", "mkntfs", "ntfsfix", "efibootmgr", "awk", "wget", "tee", "dmesg"]
         .into_iter()
         .filter(|b| !list.lines().any(|l| l.ends_with(&format!("broom/bin/{b}"))))
         .collect();
@@ -335,6 +336,28 @@ mod tests {
         assert_eq!(String::from_utf16(&u).unwrap(), want);
         let _ = std::fs::remove_file(base);
         let _ = std::fs::remove_file(child);
+    }
+
+    /// stage.log = the stage's lines and the kernel's in one timeline (timeline(), cut from stage_script()): sorted by
+    /// their seconds, kernel lines marked, text with its spaces kept.
+    #[test]
+    fn stage_log_timeline() {
+        let s = super::stage_script();
+        let f = &s[s.find("timeline(){").unwrap()..];
+        let f = &f[..f.find("\n}\n").unwrap() + 2];
+        let log = std::env::temp_dir().join("broom_t_stagelog");
+        std::fs::write(&log, "[4.12] stage of win started (devices ready)\n[10.63] drivers:  0 package(s)\n").unwrap();
+        let sh = format!(
+            "kmsg(){{ printf '[    0.000000] Linux version 6.8\\n[    4.506472] e1000e: NIC Link is Up\\n[  110.173946] nvme nvme0: timeout\\n'; }}\n{f}\ntimeline {}",
+            log.display()
+        );
+        let o = stage_sh().args(["-c", &sh]).output().unwrap();
+        assert_eq!(
+            String::from_utf8_lossy(&o.stdout),
+            "[0.00] kernel: Linux version 6.8\n[4.12] stage of win started (devices ready)\n[4.51] kernel: e1000e: NIC Link is Up\n\
+             [10.63] drivers:  0 package(s)\n[110.17] kernel: nvme nvme0: timeout\n"
+        );
+        std::fs::remove_file(&log).unwrap();
     }
 
     /// The benchmark (cut from stage_script()) runs between the disk choice and its use: it must leave the stage's

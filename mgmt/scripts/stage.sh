@@ -18,6 +18,13 @@ else log "WARNING: no GNU wget in the stage (publish again) -> drivers skipped";
 # GNU tee, as a function for the same reason: the golden is hashed while downloading through tee, and the busybox
 # applet (which ash runs before anything in PATH) copies one byte per write() → ~300 KB/s instead of the network's.
 tee(){ /broom/bin/tee "$@"; }
+# One timeline for stage.log: the stage's lines ($1, "[secs] text") and the kernel's (GNU dmesg, "[   secs] text",
+# marked "kernel:"), sorted by the seconds since power-on both carry.
+kmsg(){ /broom/bin/dmesg 2>/dev/null; }
+timeline(){
+  { sed 's/^\[\([0-9.]*\)\] /\1 /' "$1" 2>/dev/null; kmsg | sed 's/^\[ *\([0-9.]*\)\] /\1 kernel: /'; } \
+    | sort -s -n -k1,1 | awk '{ t = $1; sub(/^[^ ]+ /, ""); printf "[%.2f] %s\n", t, $0 }'
+}
 # Whole-file download showing ONLY a progress bar (file name, %, bytes, speed, ETA) — no URL / connecting / headers /
 # "saved" text. GNU wget: -q hides everything, --show-progress brings the bar back; bar:force because the initramfs
 # console is not always seen as a tty; noscroll keeps the name still. Busybox wget: already just its own bar.
@@ -183,6 +190,7 @@ echo "$NAME" > active.txt
 # Parked images the server no longer lets this machine keep (deleted / republished: "name hash" lines) → removed.
 # No answer → kept.
 configure_networking
+log "network up"
 if wget -q -O /run/broom-cache-list "http://$SRV/api/cache-list" 2>/dev/null; then
   for p in img.*; do
     [ -d "$p" ] || continue
@@ -595,9 +603,10 @@ else p="unknown (no BootCurrent) -> every network entry first"; fi
 log "boot order: PXE $p -> Broom Windows Boot$n"
 # The order for the BroomBootOrder task in Windows (numbers, no name matching there).
 echo "$want" > $B/bootorder.txt
-# Stage log on BROOMWIN (last 300 lines) — readable from Windows: mountvol + type broom\stage.log.
-{ echo "=== $(date '+%F %T') $MODE"; cat /run/broom-stage.log 2>/dev/null; } >> $B/stage.log
-tail -n 300 $B/stage.log > $B/stage.log.t && mv $B/stage.log.t $B/stage.log
+# Stage log on BROOMWIN: the stage's lines + the kernel's (drivers, network, disks) of each boot, the last 5000 lines
+# (a few boots) — readable from Windows: mountvol + type broom\stage.log.
+{ echo "=== $(date '+%F %T') $MODE"; timeline /run/broom-stage.log; } >> $B/stage.log
+tail -n 5000 $B/stage.log > $B/stage.log.t && mv $B/stage.log.t $B/stage.log
 sync; umount $W
 efibootmgr -q -n $n || die "efibootmgr BootNext"
 restart "-> Windows ($MODE)"

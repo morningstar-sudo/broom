@@ -169,11 +169,7 @@ pub fn publish(st: &SharedState, id: i64, name: &str, steps: &mut crate::publish
     }
     std::fs::write(format!("{out}/files.sha256"), sums).map_err(|e| format!("files.sha256: {e}"))?;
     std::fs::write(&sum_file, &hash).map_err(|e| format!("golden.sha256: {e}"))?;
-    let bs = format!(
-        "kernel http://${{broom-srv}}/tftp/broom-stage/vmlinuz initrd=stage.img ip=dhcp BOOTIF=01-${{mac:hexhyp}} broom.name={name} broom.hash={hash} broom.srv=${{broom-srv}} broom.host=${{broom-host}} broom.lic=${{broom-lic}} broom.reg=${{broom-reg}} broom.base=${{broom-base}} broom.strict=${{broom-strict}} broom.lxgb=${{broom-lxgb}} broom.wbgb=${{broom-wbgb}}\n\
-         initrd http://${{broom-srv}}/tftp/broom-stage/stage.img\n\
-         boot"
-    );
+    let bs = boot_script(name, &hash);
     let before = st.db.image(id)?;
     st.db.set_published(id, &bs, &hash)?;
     // A new golden → every machine booting it rebuilds its base, which needs the license key once more.
@@ -187,6 +183,19 @@ pub fn publish(st: &SharedState, id: i64, name: &str, steps: &mut crate::publish
 
 /// License keys already handed out ('sent') go back to 'armed' for the machines that boot `img` by default (their own
 /// image, or none set and `img` is the global default): their base is rebuilt on the next boot and fetches the key once.
+/// The image's iPXE boot script: the stage kernel + initrd, its broom.* parameters (the `${broom-*}` ones are set per
+/// boot by /boot/start). Network: the IP iPXE booted with, as a static setting (`ip=<ip>::<gw>:<mask>:::off`; the card
+/// = BOOTIF) — `ip=dhcp` would ask DHCP again and wait out its duplicate-address probe (~5 s of every boot). Safe: the
+/// stage lives ~10 s inside iPXE's fresh lease, then Windows asks DHCP itself. (A Linux image keeps `ip=dhcp`
+/// (publish.rs): it runs for hours on that network and needs a lease it renews.)
+fn boot_script(name: &str, hash: &str) -> String {
+    format!(
+        "kernel http://${{broom-srv}}/tftp/broom-stage/vmlinuz initrd=stage.img ip=${{ip}}::${{gateway}}:${{netmask}}:::off BOOTIF=01-${{mac:hexhyp}} broom.name={name} broom.hash={hash} broom.srv=${{broom-srv}} broom.host=${{broom-host}} broom.lic=${{broom-lic}} broom.reg=${{broom-reg}} broom.base=${{broom-base}} broom.strict=${{broom-strict}} broom.lxgb=${{broom-lxgb}} broom.wbgb=${{broom-wbgb}}\n\
+         initrd http://${{broom-srv}}/tftp/broom-stage/stage.img\n\
+         boot"
+    )
+}
+
 fn rearm_for_image(st: &SharedState, img: &crate::db::Image) {
     for m in st.db.machines().unwrap_or_default() {
         let boots_it = m.image_id == Some(img.id) || (m.image_id.is_none() && img.is_default);
@@ -342,6 +351,15 @@ pub(crate) fn punch_hole(path: &str, off: u64, len: u64) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
+    /// The stage reuses iPXE's address (static, card by BOOTIF): no second DHCP + duplicate-address probe.
+    #[test]
+    fn boot_script_reuses_ipxe_address() {
+        let s = super::boot_script("win11", "abc");
+        assert!(s.contains(" ip=${ip}::${gateway}:${netmask}:::off BOOTIF=01-${mac:hexhyp} "), "{s}");
+        assert!(!s.contains("ip=dhcp"));
+        assert!(s.contains("broom.name=win11 broom.hash=abc ") && s.ends_with("boot"));
+    }
+
     #[test]
     fn ntfs_parts_order() {
         use crate::disk::{Part, Table};
