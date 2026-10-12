@@ -342,7 +342,7 @@ async fn snapshots(State(st): State<SharedState>, Query(q): Query<HashMap<String
     let id: i64 = q.get("id").and_then(|s| s.parse().ok()).ok_or((StatusCode::BAD_REQUEST, "missing ?id=".to_string()))?;
     let img = st.db.image(id).map_err(ise)?.ok_or((StatusCode::NOT_FOUND, format!("image {id} not found")))?;
     let active = img.active_version.clone();
-    let versions = tokio::task::spawn_blocking(move || crate::versions::list_vs_current(&img.name))
+    let versions = tokio::task::spawn_blocking(move || crate::versions::list(&img.name))
         .await
         .map_err(|e| ise(e.to_string()))?;
     Ok(Json(serde_json::json!({"active": active, "versions": versions})))
@@ -498,7 +498,7 @@ async fn upload_done(State(st): State<SharedState>, Json(b): Json<UploadName>) -
 /// upload = Some(upload folder) when a new golden must be converted to raw image.img first.
 fn spawn_publish(st: &SharedState, name: String, upload: Option<std::path::PathBuf>) -> Result<(), ApiError> {
     spawn_job(st, name, "publish", move |st, name, steps| {
-        let first = upload.is_some() && crate::versions::list(name, None).is_empty();
+        let first = upload.is_some() && crate::versions::list(name).is_empty();
         if let Some(dir) = upload {
             // The convert replaces image.img, which a disk-cache target serves: with clients on it the publish below
             // would refuse — after the old golden is already gone. Refuse first (the upload stays for a retry).

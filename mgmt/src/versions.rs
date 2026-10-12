@@ -28,10 +28,6 @@ pub struct Manifest {
     /// Chunk version (older releases); empty in list() results.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub chunks: Vec<String>,
-    /// Bytes that differ (list(): from the active version; list_vs_current(): from image.img) — what a rollback
-    /// rewrites. None when that can't be told without reading whole files.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub diff: Option<u64>,
     /// The version's file, relative to the storage root.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub file: Option<String>,
@@ -84,50 +80,18 @@ fn manifests(root: &Path, name: &str) -> Vec<Manifest> {
     v
 }
 
-/// Versions of an image, newest first, each with `diff` vs the `active` version.
-pub fn list(name: &str, active: Option<&str>) -> Vec<Manifest> {
-    list_at(&storage(), name, active)
-}
-
-fn list_at(root: &Path, name: &str, active: Option<&str>) -> Vec<Manifest> {
-    let mut v = manifests(root, name);
-    let base = active.and_then(|a| v.iter().find(|m| m.version == a)).cloned();
-    for m in &mut v {
-        m.diff = base.as_ref().and_then(|b| diff_of(root, b, m));
-        m.chunks.clear();
-    }
-    v
-}
-
-/// Versions of an image, newest first, `diff` = 0 for the one that is image.img right now, unknown for the others
-/// (comparing would mean reading whole files).
-pub fn list_vs_current(name: &str) -> Vec<Manifest> {
-    let (root, img) = (storage(), image_path(name));
+/// Versions of an image, newest first (without their chunk lists).
+pub fn list(name: &str) -> Vec<Manifest> {
     let _ = std::fs::remove_file(crate::images_dir().join(name).join("current.chunks")); // cache of older releases
-    let mut v = manifests(&root, name);
+    list_at(&storage(), name)
+}
+
+fn list_at(root: &Path, name: &str) -> Vec<Manifest> {
+    let mut v = manifests(root, name);
     for m in &mut v {
-        m.diff = m.file.as_ref().and_then(|f| same_file(&root.join(f), &img).then_some(0));
         m.chunks.clear();
     }
     v
-}
-
-/// Bytes between two versions; None when it can't be told without reading whole files.
-fn diff_of(root: &Path, a: &Manifest, b: &Manifest) -> Option<u64> {
-    match (&a.file, &b.file) {
-        (Some(x), Some(y)) => same_file(&root.join(x), &root.join(y)).then_some(0),
-        (None, None) => {
-            // Two chunk versions: chunk positions that differ (a size change counts as differing chunks).
-            let size = a.size.max(b.size);
-            Some(
-                (0..a.chunks.len().max(b.chunks.len()))
-                    .filter(|&i| a.chunks.get(i) != b.chunks.get(i))
-                    .map(|i| a.chunk_size.min(size - i as u64 * a.chunk_size))
-                    .sum(),
-            )
-        }
-        _ => None,
-    }
 }
 
 /// Save image.img as a new version "v<N>": a hard link (instant, no copy). Refused when image.img already is a version
@@ -168,7 +132,6 @@ fn snapshot_at(root: &Path, img: &Path, name: &str, label: &str) -> Result<Manif
         size: meta.len(),
         chunk_size: CHUNK,
         chunks: Vec::new(),
-        diff: None,
         file: Some(rel),
     };
     write_durable(&dir.join(format!("{}.json", m.version)), &serde_json::to_vec(&m).unwrap()).map_err(e("store manifest"))?;
@@ -393,8 +356,8 @@ mod tests {
         std::fs::rename(&new, &img).unwrap();
         assert_eq!(hash_file(&v1_file), v1_hash, "v1 kept its bytes");
         let v2 = snapshot_at(&root, &img, "img", "").unwrap();
-        let ver = |active| list_at(&root, "img", active).into_iter().map(|m| (m.version, m.diff)).collect::<Vec<_>>();
-        assert_eq!(ver(Some("v2")), [("v2".to_string(), Some(0)), ("v1".to_string(), None)]);
+        let ver = list_at(&root, "img").into_iter().map(|m| m.version).collect::<Vec<_>>();
+        assert_eq!(ver, ["v2", "v1"], "newest first");
         // Rollback to v1 = hard link again: no space needed, same bytes, same file.
         assert_eq!(check_at(&root, "img", "v1").unwrap(), 0);
         rehydrate_at(&root, &new, "img", "v1").unwrap();

@@ -78,6 +78,24 @@ FACEIT on diskless PCs, Broom vs CCBoot, [hướng dẫn tiếng Việt](https:/
      to RAM, the server keeps a compressed copy of `golden.vhdx` in memory and every download comes from it — a room
      fetching a new golden at once never hammers the server's disk.
 
+## Performance
+
+What a Windows client loads on every boot, before Windows itself starts from its SSD:
+
+| Step | Size / time |
+|---|---|
+| iPXE (TFTP, the only file over TFTP) | ~0.3 MB |
+| Stage kernel + initrd (HTTP) | ~15 MB + ~38 MB |
+| Stage work: reset the session, sync scripts / drivers, set the boot order | about 1 s |
+
+- **One DHCP per boot phase:** iPXE asks DHCPv4 only (no IPv6 router discovery wait) and the stage reuses iPXE's
+  address instead of asking again.
+- **A new golden is downloaded once per machine** and checked (sha256) while it downloads — no second read of a
+  multi-GB file. Machines that already have it download nothing.
+- Boot time end to end depends on the hardware (firmware POST and PXE, network, SSD, the golden's own Windows start):
+  measure yours on the **Benchmark** page — server disk, live iSCSI throughput, and per machine its boot time (every
+  boot) and disk / network read speed (on request, at its next boot).
+
 ## Requirements
 
 - **Server:** x86_64 Linux (tested on Debian/Ubuntu and Rocky Linux 10), run as root; disk space for the goldens;
