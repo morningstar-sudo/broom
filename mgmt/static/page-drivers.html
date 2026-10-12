@@ -22,5 +22,8 @@
     <p class="hint">A machine gets a package when <b>one of its devices matches</b> a hardware ID, the package is assigned to <b>its group</b> (Machines page),
       or <b>All machines</b> is ticked. Changes apply on each machine's next boot: the stage downloads the packages and rebuilds its base once
       (Windows installs the drivers that match its devices). Windows images only.</p>
+    <p class="hint">Put the <b>graphics, chipset and network drivers</b> of every machine model here: they go into its base and load at
+      every boot. Windows Update does not install drivers on these machines (golden prep turns it off) — one it fetched during a session
+      would be gone at the next reset and installed again on every boot.</p>
   </div>
 </section>

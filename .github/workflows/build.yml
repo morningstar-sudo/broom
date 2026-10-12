@@ -75,6 +75,10 @@ jobs:
         id: stage
         run: |
           sudo apt-get install -y -qq linux-image-generic shim-signed initramfs-tools fdisk ntfs-3g dosfstools efibootmgr wget zstd mawk
+          # No CPU microcode in the stage's initrd (~14 MB less to download on every boot): the stage lives a few
+          # seconds, and microcode loaded there is gone at its reboot anyway — Windows loads its own.
+          echo 'IUCODE_TOOL_INITRAMFS=no' | sudo tee /etc/default/intel-microcode >/dev/null
+          echo 'AMD64UCODE_INITRAMFS=no' | sudo tee /etc/default/amd64-microcode >/dev/null
           kv=$(ls /lib/modules | grep -- '-generic$' | sort -V | tail -1)
           mkdir -p "$PWD/stage-out"
           sha=$(sudo mgmt/dist/bootrom-mgmt build-stage "$PWD/stage-out" --kernel "$kv" | tail -1)

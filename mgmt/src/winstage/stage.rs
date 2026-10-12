@@ -68,6 +68,19 @@ fn build_stage(kernel: Option<&str>, sd: &str) -> Result<String, String> {
     if !missing.is_empty() {
         return Err(format!("stage initrd is missing {} — install fdisk ntfs-3g dosfstools efibootmgr wget mawk on the machine that builds the bundle", missing.join(", ")));
     }
+    // The hook prunes what the stage never uses: refuse a build that lost NTFS, a common NIC / storage driver or the
+    // Realtek NIC firmware (a client would boot a stage that sees no network or no SSD).
+    let has_module = |m: &str| list.lines().any(|l| l.ends_with(&format!("/{m}.ko")) || l.contains(&format!("/{m}.ko.")));
+    let mut lost: Vec<&str> = ["ntfs3", "e1000e", "igc", "r8169", "tg3", "nvme", "ahci"].into_iter().filter(|m| !has_module(m)).collect();
+    if !list.lines().any(|l| l.contains("firmware/rtl_nic/")) {
+        lost.push("rtl_nic firmware");
+    }
+    if !lost.is_empty() {
+        return Err(format!("stage initrd lost {} — check the pruning in scripts/stage-hook.sh", lost.join(", ")));
+    }
+    // Size in the build log: the initrd is downloaded on every boot, a growth shows here first.
+    let size = std::fs::metadata(&tmp).map(|m| m.len()).unwrap_or(0);
+    eprintln!("stage.img: {:.1} MB (kernel {kv})", size as f64 / 1e6);
     std::fs::rename(&tmp, format!("{sd}/stage.img")).map_err(|e| e.to_string())?;
     std::fs::copy(format!("/boot/vmlinuz-{kv}"), format!("{sd}/vmlinuz"))
         .map_err(|e| format!("copy /boot/vmlinuz-{kv}: {e}"))?;

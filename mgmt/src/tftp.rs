@@ -83,9 +83,11 @@ fn load(name: &str, server: Ipv4Addr) -> Result<Cow<'static, [u8]>, String> {
     }
 }
 
-/// First script of every iPXE: configure the NIC by DHCP, then the server's boot menu.
+/// First script of every iPXE: configure the NIC by DHCP, then the server's boot menu. `ifconf -c dhcp`, not `dhcp`:
+/// that one runs every configurator, IPv6 router discovery too, which on a LAN without an IPv6 router waits out its
+/// backoff (~3.9 s) before the menu.
 fn autoexec(server: Ipv4Addr) -> String {
-    format!("#!ipxe\ndhcp || dhcp || shell\nchain http://{server}/boot.ipxe?mac=${{net0/mac}}&ip=${{net0/ip}} || shell\n")
+    format!("#!ipxe\nifconf -c dhcp || ifconf -c dhcp || shell\nchain http://{server}/boot.ipxe?mac=${{net0/mac}}&ip=${{net0/ip}} || shell\n")
 }
 
 async fn send_error(sock: &UdpSocket, to: SocketAddr, code: u16, msg: &str) {
@@ -249,7 +251,7 @@ mod tests {
         let ip = Ipv4Addr::new(10, 0, 0, 12);
         for name in ["autoexec.ipxe", "/autoexec.ipxe", "sb/autoexec.ipxe"] {
             let s = String::from_utf8(load(name, ip).unwrap().into_owned()).unwrap();
-            assert!(s.starts_with("#!ipxe\ndhcp"), "{name}");
+            assert!(s.starts_with("#!ipxe\nifconf -c dhcp ||"), "{name}: DHCPv4 only, no IPv6 router discovery wait");
             assert!(s.contains("chain http://10.0.0.12/boot.ipxe?mac=${net0/mac}&ip=${net0/ip}"), "{name}");
         }
     }

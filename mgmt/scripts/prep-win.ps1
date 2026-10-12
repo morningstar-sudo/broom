@@ -20,6 +20,13 @@ Disable-ComputerRestore -Drive "$env:SystemDrive\" -ErrorAction SilentlyContinue
 Disable-ScheduledTask -TaskPath '\Microsoft\Windows\Defrag\' -TaskName ScheduledDefrag -ErrorAction SilentlyContinue | Out-Null
 Set-Service WSearch -StartupType Disabled -ErrorAction SilentlyContinue
 reg add HKLM\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU /v NoAutoUpdate /t REG_DWORD /d 1 /f | Out-Null
+# Drivers only from the server's Drivers page: those go into base (built once per machine) and load at every boot.
+# One Windows Update fetches during a session lands in the reset child -> installed again every boot (a minute on the
+# basic display driver, then a screen flash). So no driver search on Windows Update, no device metadata download.
+reg add HKLM\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate /v ExcludeWUDriversInQualityUpdate /t REG_DWORD /d 1 /f | Out-Null
+reg add HKLM\SOFTWARE\Policies\Microsoft\Windows\DriverSearching /v SearchOrderConfig /t REG_DWORD /d 0 /f | Out-Null
+reg add HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\DriverSearching /v SearchOrderConfig /t REG_DWORD /d 0 /f | Out-Null
+reg add "HKLM\SOFTWARE\Policies\Microsoft\Windows\Device Metadata" /v PreventDeviceMetadataFromNetwork /t REG_DWORD /d 1 /f | Out-Null
 # Reserved storage (space kept for updates): a pending update holding it fails sysprep with 0x800F0975.
 dism.exe /Online /Set-ReservedStorageState /State:Disabled /Quiet | Out-Null
 $rm = 'HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\ReserveManager'
