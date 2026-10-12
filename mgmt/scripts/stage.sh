@@ -4,8 +4,9 @@ prereqs(){ echo "$PREREQ"; }
 case $1 in prereqs) prereqs; exit 0;; esac
 . /scripts/functions
 PATH=/broom/bin:$PATH
-# Log to screen + /run (copied to BROOMWIN\broom\stage.log at the end → readable from Windows).
-log(){ echo "broom: $*"; echo "$*" >> /run/broom-stage.log; }
+# Log to screen + /run (copied to BROOMWIN\broom\stage.log at the end → readable from Windows), the file with the
+# seconds since power-on: shows which step a slow boot spent its time in.
+log(){ echo "broom: $*"; echo "[$(cut -d' ' -f1 /proc/uptime)] $*" >> /run/broom-stage.log; }
 # panic = shell (initramfs); fix by hand then `exit` → the script CONTINUES from the failed step (on-site debug).
 die(){ panic "broom stage ERROR: $*"; }
 restart(){ log "$*"; sleep 2; reboot -f 2>/dev/null || echo b > /proc/sysrq-trigger; sleep 30; }
@@ -14,6 +15,9 @@ restart(){ log "$*"; sleep 2; reboot -f 2>/dev/null || echo b > /proc/sysrq-trig
 # must not hang the stage that long: 30 s, 3 tries (an -T given by the caller still wins).
 if [ -x /broom/bin/wget ]; then wget(){ /broom/bin/wget -T 30 -t 3 "$@"; }
 else log "WARNING: no GNU wget in the stage (publish again) -> drivers skipped"; fi
+# GNU tee, as a function for the same reason: the golden is hashed while downloading through tee, and the busybox
+# applet (which ash runs before anything in PATH) copies one byte per write() → ~300 KB/s instead of the network's.
+tee(){ /broom/bin/tee "$@"; }
 # Whole-file download showing ONLY a progress bar (file name, %, bytes, speed, ETA) — no URL / connecting / headers /
 # "saved" text. GNU wget: -q hides everything, --show-progress brings the bar back; bar:force because the initramfs
 # console is not always seen as a tty; noscroll keeps the name still. Busybox wget: already just its own bar.
@@ -30,6 +34,7 @@ done
 [ -n "$NAME" ] && [ -n "$HASH" ] && [ -n "$SRV" ] || die "missing broom.name/hash/srv on cmdline"
 for m in ntfs3 vfat nls_cp437 nls_iso8859_1 nls_utf8 efivarfs; do modprobe $m 2>/dev/null; done
 udevadm settle 2>/dev/null
+log "stage of $NAME started (devices ready)"
 
 # Local disk: internal only — not removable, not on USB (an external USB HDD/SSD often reports removable=0), size > 0.
 part(){ case "$1" in *[0-9]) echo "/dev/${1}p$2";; *) echo "/dev/$1$2";; esac; }
@@ -472,19 +477,25 @@ else
 fi
 # Benchmark page: the admin asked to measure this machine → 1 GB of the golden read straight from the SSD (iflag=direct:
 # the disk, not the page cache) + zeros downloaded from the server, both timed; the results go back to the server.
-# GNU dd by path (busybox runs its own applet first). NO $((...)) on these numbers → awk.
-up(){ cut -d' ' -f1 /proc/uptime; }
-mbs(){ awk -v b="$1" -v a="$2" -v z="$3" 'BEGIN { t = z - a; if (b > 0 && t > 0) printf "%.1f", b / t / 1e6 }'; }
-if [ -n "$MAC" ] && [ -f golden.vhdx ] \
-   && [ "$(wget -q -T 10 -O - "http://$SRV/api/bench/pending?mac=$MAC" 2>/dev/null | cut -d' ' -f1)" = run=1 ]; then
+# GNU dd by path (busybox runs its own applet first). NO $((...)) on these numbers → awk. A function with local
+# variables: this script's globals ($disk = the Broom SSD!) must not be touched.
+bench(){
+  local t0 t1 bytes rd dl
+  [ -n "$MAC" ] && [ -f golden.vhdx ] || return 0
+  [ "$(wget -q -T 10 -O - "http://$SRV/api/bench/pending?mac=$MAC" 2>/dev/null | cut -d' ' -f1)" = run=1 ] || return 0
   log "benchmark: measuring disk + network"
-  a=$(up); n=$(/broom/bin/dd if=golden.vhdx of=/dev/null bs=4M count=256 iflag=direct 2>&1 | awk '/ bytes / { print $1; exit }'); z=$(up)
-  disk=$(mbs "$n" "$a" "$z")
-  a=$(up); n=$(wget -q -t 1 -O - "http://$SRV/api/bench/blob?mac=$MAC" | wc -c); z=$(up)
-  net=$(mbs "$n" "$a" "$z")
-  log "benchmark: disk ${disk:-?} MB/s, network ${net:-?} MB/s"
-  wget -q -T 10 -O /dev/null --post-data= "http://$SRV/api/bench/report?mac=$MAC&disk=$disk&net=$net&src=ssd" || log "benchmark: report not sent"
-fi
+  t0=$(cut -d' ' -f1 /proc/uptime)
+  bytes=$(/broom/bin/dd if=golden.vhdx of=/dev/null bs=4M count=256 iflag=direct 2>&1 | awk '/ bytes / { print $1; exit }')
+  t1=$(cut -d' ' -f1 /proc/uptime)
+  rd=$(awk -v b="$bytes" -v a="$t0" -v z="$t1" 'BEGIN { if (b > 0 && z > a) printf "%.1f", b / (z - a) / 1e6 }')
+  t0=$(cut -d' ' -f1 /proc/uptime)
+  bytes=$(wget -q -t 1 -O - "http://$SRV/api/bench/blob?mac=$MAC" | wc -c)
+  t1=$(cut -d' ' -f1 /proc/uptime)
+  dl=$(awk -v b="$bytes" -v a="$t0" -v z="$t1" 'BEGIN { if (b > 0 && z > a) printf "%.1f", b / (z - a) / 1e6 }')
+  log "benchmark: disk ${rd:-?} MB/s, network ${dl:-?} MB/s"
+  wget -q -T 10 -O /dev/null --post-data= "http://$SRV/api/bench/report?mac=$MAC&disk=$rd&net=$dl&src=ssd" || log "benchmark: report not sent"
+}
+bench
 # Last session's writes: delete first → freed (and TRIMmed, discard mount) before the fresh child is written. Same for
 # its writes on the games disk (broom-games.ps1 makes that child again once Windows is up).
 # The child is rebuilt from the (checked) template every boot, with base's DataWriteGuid as its parent link — base is

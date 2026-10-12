@@ -25,7 +25,7 @@ pub fn routes() -> Router<SharedState> {
         .route("/api/bench", get(overview))
         .route("/api/bench/history", get(history))
         .route("/api/bench/server", post(run_server))
-        .route("/api/bench/iscsi", get(iscsi_live))
+        .route("/api/bench/iscsi/live", get(iscsi_live)) // SSE
         .route("/api/bench/request", post(request))
         // Clients (public, auth.rs): the Windows stage, Windows, Linux.
         .route("/api/bench/pending", get(pending))
@@ -183,22 +183,42 @@ async fn request(Json(b): Json<ReqBody>) -> Result<Json<serde_json::Value>, ApiE
     Ok(ok())
 }
 
-/// GET /api/bench/iscsi — read throughput of each target and each client over the last second.
-async fn iscsi_live(State(st): State<SharedState>) -> Result<Json<serde_json::Value>, ApiError> {
-    let (a, b) = tokio::task::spawn_blocking(|| {
-        let a = crate::iscsi::stats();
-        std::thread::sleep(Duration::from_secs(1));
-        (a, crate::iscsi::stats())
-    })
-    .await
-    .map_err(ise)?;
+/// One sample of the iSCSI daemon's counters (None = no daemon) and when it was taken.
+type Sample = (Option<(Vec<crate::iscsi::TargetInfo>, Option<Vec<crate::iscsid::PeerInfo>>)>, Instant);
+
+async fn sample() -> Sample {
+    (tokio::task::spawn_blocking(crate::iscsi::stats).await.ok().flatten(), Instant::now())
+}
+
+/// GET /api/bench/iscsi/live (SSE) — "iscsi" every second while the Benchmark page is open: read throughput of each
+/// target and each client since the previous sample. Sampling stops when the tab closes (the stream is dropped).
+async fn iscsi_live(
+    State(st): State<SharedState>,
+) -> axum::response::sse::Sse<impl futures_util::Stream<Item = Result<axum::response::sse::Event, std::convert::Infallible>>> {
+    use axum::response::sse::{Event, KeepAlive, Sse};
+    let s = futures_util::stream::unfold((st, None::<Sample>), |(st, prev)| async move {
+        let prev = match prev {
+            Some(p) => p,
+            None => sample().await,
+        };
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        let cur = sample().await;
+        let data = rates(&st, &prev, &cur).to_string();
+        Some((Ok(Event::default().event("iscsi").data(data)), (st, Some(cur))))
+    });
+    Sse::new(s).keep_alive(KeepAlive::default())
+}
+
+/// Throughput between two samples, as the page shows it.
+fn rates(st: &SharedState, (a, at): &Sample, (b, bt): &Sample) -> serde_json::Value {
     let (Some((t1, p1)), Some((t2, p2))) = (a, b) else {
-        return Ok(Json(serde_json::json!({"daemon": "none"})));
+        return serde_json::json!({"daemon": "none"});
     };
     let (Some(p1), Some(p2)) = (p1, p2) else {
-        return Ok(Json(serde_json::json!({"daemon": "old"})));
+        return serde_json::json!({"daemon": "old"});
     };
-    let mbps = |a: u64, b: u64| b.saturating_sub(a) as f64 / 1e6;
+    let secs = bt.duration_since(*at).as_secs_f64().max(1e-3);
+    let mbps = |a: u64, b: u64| b.saturating_sub(a) as f64 / 1e6 / secs;
     let targets: Vec<_> = t2
         .iter()
         .filter(|t| t.sessions > 0)
@@ -224,7 +244,7 @@ async fn iscsi_live(State(st): State<SharedState>) -> Result<Json<serde_json::Va
         .collect();
     peers.sort_by(|a, b| b.1.total_cmp(&a.1));
     let peers: Vec<_> = peers.into_iter().map(|(ip, r)| serde_json::json!({"ip": ip, "host": hosts.get(&ip), "mbps": r})).collect();
-    Ok(Json(serde_json::json!({"daemon": "ok", "targets": targets, "peers": peers})))
+    serde_json::json!({"daemon": "ok", "targets": targets, "peers": peers})
 }
 
 // ---------- clients (public) ----------

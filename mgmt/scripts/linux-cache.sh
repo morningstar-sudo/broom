@@ -42,6 +42,7 @@ rm -f $C/*.chunks $C/*.tmp
 # the server. Before the cache copy (a service: a background job would be killed when this script ends); the copy
 # waits a random 0–5 min anyway.
 bench(){
+  local t i dev src disk a n z net
   t=graphical.target; [ "$(systemctl get-default 2>/dev/null)" = graphical.target ] || t=multi-user.target
   i=0; until systemctl is-active -q $t; do i=$((i + 1)); [ $i -gt 900 ] && return; sleep 1; done
   wget -q -T 5 -O /dev/null --post-data= "http://$SRV/api/bench/booted"

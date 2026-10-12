@@ -337,6 +337,31 @@ mod tests {
         let _ = std::fs::remove_file(child);
     }
 
+    /// The benchmark (cut from stage_script()) runs between the disk choice and its use: it must leave the stage's
+    /// globals alone ($disk = the Broom SSD; once clobbered with a speed → "mkfs.fat /dev/1819.9p1") and report.
+    #[test]
+    fn stage_bench_keeps_globals() {
+        let s = super::stage_script();
+        let f = &s[s.find("bench(){").unwrap()..s.find("\nbench\n").unwrap()];
+        let dir = std::env::temp_dir().join("broom_t_bench");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("golden.vhdx"), [0u8; 4096]).unwrap();
+        let sh = format!(
+            r#"log(){{ echo "log: $*"; }}
+wget(){{ for a; do u=$a; done; case "$u" in *pending*) echo "run=1 size=1";; *blob*) head -c 1000000 /dev/zero;; *report*) echo "REPORT $u";; esac; }}
+{f}
+disk=nvme0n1; MAC=aa:bb:cc:dd:ee:01; SRV=srv; t0=keep; bytes=keep
+bench
+echo "disk=$disk t0=$t0 bytes=$bytes""#
+        );
+        let o = stage_sh().current_dir(&dir).args(["-c", &sh]).output().unwrap();
+        let out = String::from_utf8_lossy(&o.stdout);
+        assert!(out.contains("disk=nvme0n1 t0=keep bytes=keep"), "{out}");
+        assert!(out.contains("REPORT http://srv/api/bench/report?mac=aa:bb:cc:dd:ee:01&disk="), "{out}");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
     /// Stage disk choice (cut from stage_script(), fake /sys/block with GPT partition names): a registered machine with
     /// ONE internal disk is partitioned by itself; USB disks never count; anything else asks — Enter / an unknown name
     /// = reboot untouched. The Broom SSD is known by its partition names: Windows' layout is reused, one laid out by a

@@ -16,6 +16,7 @@ const loaders={machines:loadStatus,devices:loadDevices,groups:loadGroups,benchma
 const fragCache={};
 let curPage=null;
 async function showPage(p){
+  if(iscsiES&&p!=='benchmark'){iscsiES.close();iscsiES=null;}
   document.querySelectorAll('nav a').forEach(x=>x.classList.toggle('active',x.dataset.page===p));
   if(fragCache[p]===undefined){
     try{const r=await fetch('/ui/'+p);
@@ -532,7 +533,7 @@ function setServer(up){const d=document.getElementById('srvdot');
 
 // ---- benchmark (bench.rs) ----
 const BENCH_KINDS={srv_seq:['Server sequential','MB/s'],srv_rand:['Server random 4K','IOPS'],disk:['Disk read','MB/s'],net:['Network','MB/s'],boot:['Boot','s']};
-let benchData=null,iscsiBusy=false;
+let benchData=null,iscsiES=null;
 const bName=mac=>{if(!mac)return 'server';const m=benchData&&benchData.machines.find(x=>x.mac===mac);return (m&&m.hostname)||mac;};
 const bVal=r=>r?`${r.value.toLocaleString()} ${BENCH_KINDS[r.kind]?BENCH_KINDS[r.kind][1]:''}`:'—';
 // Value + a bar against the best machine (higher = better: disk, network).
@@ -569,21 +570,26 @@ async function loadBenchHist(){
     <td>${esc(BENCH_KINDS[r.kind]?BENCH_KINDS[r.kind][0]:r.kind)}</td><td><b>${esc(bVal(r))}</b></td><td class="mono">${esc(r.detail)}</td></tr>`).join('')
     ||'<tr><td colspan=5 class="mono">no results yet</td></tr>';
 }
-async function loadIscsi(){
-  const el=document.getElementById('b_iscsi');if(!el||iscsiBusy)return;
-  iscsiBusy=true;
-  try{const d=await j('/api/bench/iscsi');
-    if(d.daemon==='none'){el.textContent='iSCSI daemon not running';return;}
-    if(d.daemon==='old'){el.textContent='the running iSCSI daemon is an older build without counters — it is replaced by itself once no client is connected';return;}
-    if(!d.targets.length&&!d.peers.length){el.textContent='no client connected';return;}
-    const mb=x=>x.toFixed(1)+' MB/s';
-    el.innerHTML=`<div class="row" style="align-items:flex-start;gap:28px">
-      <table style="width:auto"><thead><tr><th>Target</th><th>Sessions</th><th>Read</th></tr></thead><tbody>${d.targets.map(t=>
-        `<tr><td>${esc(t.iqn.split(':').pop())}${t.ram?' <span class="pill">RAM</span>':''}</td><td>${t.sessions}</td><td>${mb(t.mbps)}</td></tr>`).join('')}</tbody></table>
-      <table style="width:auto"><thead><tr><th>Client</th><th>Read</th></tr></thead><tbody>${d.peers.map(p=>
-        `<tr><td>${esc(p.host||p.ip)} <span class="mono">${esc(p.ip)}</span></td><td>${mb(p.mbps)}</td></tr>`).join('')||'<tr><td colspan=2 class="mono">idle</td></tr>'}</tbody></table></div>`;
-  }catch(e){el.textContent='✗ '+e.message;}
-  finally{iscsiBusy=false;}
+// iSCSI now: pushed every second over SSE while the Benchmark page is open (showPage closes it on leaving).
+function loadIscsi(){
+  if(iscsiES)return;
+  iscsiES=new EventSource('/api/bench/iscsi/live');
+  iscsiES.addEventListener('iscsi',e=>showIscsi(JSON.parse(e.data)));
+  iscsiES.onerror=()=>{const el=document.getElementById('b_iscsi');
+    if(el)el.textContent=iscsiES&&iscsiES.readyState===EventSource.CLOSED?'disconnected — ↻ to reconnect':'reconnecting...';
+    if(iscsiES&&iscsiES.readyState===EventSource.CLOSED)iscsiES=null;};
+}
+function showIscsi(d){
+  const el=document.getElementById('b_iscsi');if(!el)return;
+  if(d.daemon==='none'){el.textContent='iSCSI daemon not running';return;}
+  if(d.daemon==='old'){el.textContent='the running iSCSI daemon is an older build without counters — it is replaced by itself once no client is connected';return;}
+  if(!d.targets.length&&!d.peers.length){el.textContent='no client connected';return;}
+  const mb=x=>x.toFixed(1)+' MB/s';
+  el.innerHTML=`<div class="row" style="align-items:flex-start;gap:28px">
+    <table style="width:auto"><thead><tr><th>Target</th><th>Sessions</th><th>Read</th></tr></thead><tbody>${d.targets.map(t=>
+      `<tr><td>${esc(t.iqn.split(':').pop())}${t.ram?' <span class="pill">RAM</span>':''}</td><td>${t.sessions}</td><td>${mb(t.mbps)}</td></tr>`).join('')}</tbody></table>
+    <table style="width:auto"><thead><tr><th>Client</th><th>Read</th></tr></thead><tbody>${d.peers.map(p=>
+      `<tr><td>${esc(p.host||p.ip)} <span class="mono">${esc(p.ip)}</span></td><td>${mb(p.mbps)}</td></tr>`).join('')||'<tr><td colspan=2 class="mono">idle</td></tr>'}</tbody></table></div>`;
 }
 const benchDone=()=>{if(curPage==='benchmark')loadBench();};
 async function benchServer(){const el=document.getElementById('bench_msg');
@@ -642,6 +648,5 @@ function startApp(){
   if(location.pathname!=='/'+pageFromPath())history.replaceState(null,'','/'+pageFromPath());
   showPage(pageFromPath());
   setInterval(()=>{if(curPage==='machines')loadStatus();},15000);
-  setInterval(()=>{if(curPage==='benchmark')loadIscsi();},5000);
 }
 startApp();
