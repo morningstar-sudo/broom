@@ -348,7 +348,7 @@ CI (`.github/workflows/build.yml`) runs `./build.sh --ipxe` on every push / PR, 
 pack-assets`), rebuilds the binary pinned to both (sha256 + URL appended to `mgmt/stage.pin` / `mgmt/assets.pin`,
 embedded in the binary; with a pin, `build.sh` leaves the assets out of it) and publishes `bootrom-mgmt`,
 `broom-stage.tar.gz`, `broom-assets.zip`, `snponly.efi` and `SHA256SUMS`; pushes to `main` are tagged
-`v<version>-<short-sha>` and released.
+with their push time (e.g. `2026.10.12-164312`, UTC+7; the release title adds the version) and released.
 
 ## Repository layout
 

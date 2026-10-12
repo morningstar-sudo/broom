@@ -617,7 +617,7 @@ function showRes(d){lastRes=d;
     ${row('CPU',c.pct,`${c.cores} cores${c.load!=null?`, load ${c.load.toFixed(2)} (1 min)`:''}`)}
     ${row('RAM',r.pct,`${gbs(r.used)} used of ${gbs(r.total)} (+ ${gbs(r.cache)} page cache, given back when needed)`)}
     ${row('Network',n.pct,`${n.iface||'?'}: out ${rate(n.tx)}, in ${rate(n.rx)}`+(n.link?`, link ${n.link>=1000?n.link/1000+' Gbit/s':n.link+' Mbit/s'}`:'')
-      +(n.virtual?` — virtual card (${n.virtual}): the host's real port speed is not visible, so no %`:''))}
+      +(n.virtual?` — virtual card (${n.virtual})`:''))}
     ${row('Disk busy',k.busy,k.dev?`${k.dev}: read ${rate(k.read)}, write ${rate(k.write)}`:'images on a filesystem without a block device')}
     ${row('Disk space',s.pct,s.total?`${gbs(s.used)} used of ${gbs(s.total)} (image storage)`:'image storage: unknown')}
   </tbody></table>`;}
