@@ -3,7 +3,8 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-{% seo %}
+<title>{{ page.title | default: site.title }}{% unless page.url == "/" %} | {{ site.title }}{% endunless %}</title>
+{% seo title=false %}
 <meta name="theme-color" content="#155799">
 <link rel="icon" href="{{ "/images/broom.svg" | relative_url }}" type="image/svg+xml">
 <link rel="apple-touch-icon" href="{{ "/images/broom.png" | relative_url }}">
@@ -33,14 +34,14 @@ footer{margin-top:3rem;padding-top:1.5rem;border-top:1px solid #eff0f1;font-size
 </style>
 {% if page.url == "/" %}
 <script type="application/ld+json">
-{"@context":"https://schema.org","@type":"SoftwareApplication","name":"Broom","description":{{ site.description | jsonify }},"url":"{{ site.url }}/","applicationCategory":"UtilitiesApplication","operatingSystem":"Linux","license":"https://www.apache.org/licenses/LICENSE-2.0","downloadUrl":"https://github.com/morningstar-sudo/broom/releases/latest","offers":{"@type":"Offer","price":"0","priceCurrency":"USD"}}
+{"@context":"https://schema.org","@type":"SoftwareApplication","name":"Broom","description":{{ site.description | jsonify }},"url":"{{ site.url }}/","image":"{{ site.url }}/images/broom.png","screenshot":["{{ site.url }}/images/client-games-disk.png","{{ site.url }}/images/faceit-anticheat.png"],"applicationCategory":"UtilitiesApplication","operatingSystem":"Linux (server); Windows 11, Linux (clients)","license":"https://www.apache.org/licenses/LICENSE-2.0","downloadUrl":"https://github.com/morningstar-sudo/broom/releases/latest","sameAs":["https://github.com/morningstar-sudo/broom"],"author":{"@type":"Person","name":"morningstar-sudo","url":"https://github.com/morningstar-sudo"},"offers":{"@type":"Offer","price":"0","priceCurrency":"USD"}}
 </script>
 {% endif %}
 </head>
 <body>
 <a class="skip" href="#content">Skip to the content.</a>
 <header>
-<h1>{% if page.title %}{{ page.title }}{% else %}{{ site.title }} — {{ site.tagline }}{% endif %}</h1>
+<h1>{{ page.title | default: site.title }}</h1>
 <p>{{ page.description | default: site.description }}</p>
 <a class="btn" href="https://github.com/morningstar-sudo/broom">View on GitHub</a>
 </header>

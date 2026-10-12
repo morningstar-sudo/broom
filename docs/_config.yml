@@ -1,5 +1,4 @@
 title: Broom
-tagline: open-source diskless boot server for Windows 11 & Linux
 description: Open-source diskless boot server for Windows 11 & Linux — PXE/iSCSI network boot from one golden image, clean on every boot. For internet cafés, gaming centers and school labs.
 url: https://broom.hainth.edu.vn
 baseurl: ""
@@ -9,7 +8,7 @@ defaults:
   - scope: { path: "" }
     values:
       layout: default
-      image: /images/faceit-anticheat.png
+      image: /images/og-broom.jpg
 plugins:
   - jekyll-seo-tag
   - jekyll-sitemap

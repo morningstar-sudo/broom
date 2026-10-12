@@ -1,4 +1,5 @@
 ---
+title: Broom — open-source diskless boot server for Windows 11 & Linux
 description: Network-boot a room of PCs (PXE + iSCSI) from one golden image, clean on every boot. One static binary. Free alternative to commercial diskless software for internet cafés, gaming centers and school labs.
 ---
 
