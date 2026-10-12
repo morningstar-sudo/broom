@@ -1,5 +1,4 @@
 ---
-title: Broom — open-source diskless boot server for Windows 11 & Linux
 description: Network-boot a room of PCs (PXE + iSCSI) from one golden image, clean on every boot. One static binary. Free alternative to commercial diskless software for internet cafés, gaming centers and school labs.
 ---
 
@@ -15,7 +14,7 @@ classrooms** of about 10–30 machines.
 [Source code & full manual](https://github.com/morningstar-sudo/broom) ·
 [Hướng dẫn tiếng Việt](bootrom-quan-net.md)
 
-![Windows 11 client network-booted by Broom, with a games disk mounted as G:](images/client-games-disk.png)
+![Windows 11 client network-booted by Broom, with a games disk mounted as G:](images/client-games-disk.webp){: width="1280" height="720"}
 
 ## Guides
 

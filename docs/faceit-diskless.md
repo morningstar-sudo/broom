@@ -9,7 +9,7 @@ FACEIT Anti-Cheat checks that the PC runs with **Secure Boot, TPM 2.0, IOMMU and
 diskless setups fail these checks: they boot without Secure Boot, or through a path that turns them off. Broom
 clients pass them:
 
-![FACEIT Anti-Cheat on a Broom client: Secure Boot, IOMMU, TPM 2.0, TPM attestation and HVCI all green](images/faceit-anticheat.png)
+![FACEIT Anti-Cheat on a Broom client: Secure Boot, IOMMU, TPM 2.0, TPM attestation and HVCI all green](images/faceit-anticheat.webp){: width="1280" height="720"}
 
 ## How Broom keeps them on
 

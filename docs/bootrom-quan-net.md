@@ -11,7 +11,7 @@ game, phòng máy trường học** khoảng 10–30 máy. Bạn cài Windows 11
 mọi máy trạm boot qua mạng từ image đó, và mỗi lần khởi động lại, máy trạm **sạch như mới** — khách cài gì, xoá gì
 cũng mất sau khi restart.
 
-![Máy trạm Windows 11 boot qua mạng bằng Broom, có ổ game G: dùng chung](images/client-games-disk.png)
+![Máy trạm Windows 11 boot qua mạng bằng Broom, có ổ game G: dùng chung](images/client-games-disk.webp){: width="1280" height="720"}
 
 ## Broom có gì
 

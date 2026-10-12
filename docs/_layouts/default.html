@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="{{ page.lang | default: site.lang }}">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+{% seo %}
+<meta name="theme-color" content="#155799">
+<link rel="icon" href="{{ "/images/broom.svg" | relative_url }}" type="image/svg+xml">
+<link rel="apple-touch-icon" href="{{ "/images/broom.png" | relative_url }}">
+<style>
+*{box-sizing:border-box}
+body{margin:0;font:16px/1.6 system-ui,-apple-system,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;color:#3a454b;background:#fff}
+a{color:#1e6bb8;text-underline-offset:.15em}
+.skip{position:absolute;left:-999px;top:0;padding:.5rem 1rem;background:#fff;color:#1e6bb8}
+.skip:focus{left:0}
+header{padding:3rem 1rem;text-align:center;color:#fff;background:#155799;background-image:linear-gradient(120deg,#155799,#0f7a46)}
+header h1{margin:0 auto .5rem;max-width:56rem;font-size:2rem;line-height:1.25}
+header p{margin:0 auto 1.5rem;max-width:48rem;font-size:1.15rem;opacity:.95}
+.btn{display:inline-block;text-decoration:none;padding:.6rem 1.2rem;color:#fff;border:1px solid rgba(255,255,255,.5);border-radius:.3rem;background:rgba(255,255,255,.12)}
+.btn:hover{text-decoration:none;background:rgba(255,255,255,.25)}
+main{max-width:64rem;margin:0 auto;padding:2rem 1rem;word-wrap:break-word}
+main h2,main h3,main h4{margin:2rem 0 1rem;color:#0f7a46;line-height:1.3}
+img{max-width:100%;height:auto}
+code{padding:2px 4px;font:.9rem Consolas,"Liberation Mono",Menlo,monospace;color:#24292f;background:#f3f6fa;border-radius:.3rem}
+pre{padding:.8rem;overflow:auto;background:#f3f6fa;border:1px solid #dce6f0;border-radius:.3rem}
+pre code{padding:0;background:none}
+table{display:block;width:100%;overflow:auto;border-collapse:collapse}
+th,td{padding:.5rem 1rem;border:1px solid #e9ebec;text-align:left}
+th{font-weight:700}
+blockquote{margin:0;padding:0 1rem;color:#5b6870;border-left:.3rem solid #dce6f0}
+footer{margin-top:3rem;padding-top:1.5rem;border-top:1px solid #eff0f1;font-size:.9rem;color:#5b6870}
+@media (min-width:64em){header{padding:5rem 6rem}header h1{font-size:3rem}header p{font-size:1.25rem}}
+</style>
+{% if page.url == "/" %}
+<script type="application/ld+json">
+{"@context":"https://schema.org","@type":"SoftwareApplication","name":"Broom","description":{{ site.description | jsonify }},"url":"{{ site.url }}/","applicationCategory":"UtilitiesApplication","operatingSystem":"Linux","license":"https://www.apache.org/licenses/LICENSE-2.0","downloadUrl":"https://github.com/morningstar-sudo/broom/releases/latest","offers":{"@type":"Offer","price":"0","priceCurrency":"USD"}}
+</script>
+{% endif %}
+</head>
+<body>
+<a class="skip" href="#content">Skip to the content.</a>
+<header>
+<h1>{% if page.title %}{{ page.title }}{% else %}{{ site.title }} — {{ site.tagline }}{% endif %}</h1>
+<p>{{ page.description | default: site.description }}</p>
+<a class="btn" href="https://github.com/morningstar-sudo/broom">View on GitHub</a>
+</header>
+<main id="content">
+{{ content }}
+<footer><a href="https://github.com/morningstar-sudo/broom">Broom</a> is maintained by <a href="https://github.com/morningstar-sudo">morningstar-sudo</a> · Apache-2.0</footer>
+</main>
+</body>
+</html>
