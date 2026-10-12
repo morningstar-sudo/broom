@@ -113,3 +113,6 @@ progress{width:160px;height:8px;vertical-align:middle}
   .brand{padding:6px 10px;flex:1} nav{flex-direction:row;flex-wrap:wrap;flex:none}
   .sysbar{border-top:0;width:100%} main{padding:18px} #alertbar{margin:12px 18px 0}
 }
+/* Icons: symbols of /icons.svg (ic() in app.js), sized + coloured like the text around them. */
+.ic{width:1.05em;height:1.05em;vertical-align:-.17em;fill:none;stroke:currentColor;stroke-width:2.2;stroke-linecap:round;stroke-linejoin:round}
+.ic.ok{color:var(--on)} .ic.err{color:var(--off)} .ic.wait,.ic.warn{color:var(--amber)}

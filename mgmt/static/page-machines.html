@@ -1,6 +1,6 @@
 <section class="page active" id="page-machines">
   <div class="head"><h1>Machines</h1><p>quick view: on/off, wake, register — edit, bulk + CSV on the Devices page</p>
-    <span class="sp"></span><button data-click="loadStatus">↻ Refresh</button></div>
+    <span class="sp"></span><button data-click="loadStatus"><svg class="ic" aria-hidden="true"><use href="/icons.svg#refresh"/></svg> Refresh</button></div>
   <div class="card">
     <h2>Machine list</h2>
     <div class="row" style="margin-bottom:12px">
@@ -22,9 +22,9 @@
         </tr></thead>
       <tbody></tbody></table></div>
     <div class="row" style="margin-top:12px;justify-content:flex-end;align-items:center">
-      <button class="ghost" data-click="mPrev">‹ Prev</button>
+      <button class="ghost" data-click="mPrev"><svg class="ic" aria-hidden="true"><use href="/icons.svg#prev"/></svg> Prev</button>
       <span id="m_page" class="msg"></span>
-      <button class="ghost" data-click="mNext">Next ›</button>
+      <button class="ghost" data-click="mNext">Next <svg class="ic" aria-hidden="true"><use href="/icons.svg#next"/></svg></button>
     </div>
     <p class="hint">A <span class="pill new">new</span> machine = has a DHCP lease but is not registered. Register it with a hostname → reboot it to get the IP/name (full DHCP mode; takes effect at once, no Apply needed).
       Many new machines at once (PC01, PC02…), edit, group, image, license key, CSV: <a href="/devices" data-click="go" data-args='["devices"]'>Devices</a>.</p>

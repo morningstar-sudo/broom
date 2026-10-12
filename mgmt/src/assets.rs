@@ -20,6 +20,7 @@ assets!(
     "static/login.js",
     "static/app.js",
     "static/app.css",
+    "static/icons.svg",
     "static/page-machines.html",
     "static/page-images.html",
     "static/page-network.html",

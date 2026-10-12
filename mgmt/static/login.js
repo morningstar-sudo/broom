@@ -1,5 +1,7 @@
 let setup=false;
 const $=id=>document.getElementById(id);
+// Error under the form: the error icon (/icons.svg) + the text as a text node (never parsed as HTML).
+function fail(t){const m=$('msg');m.innerHTML='<svg class="ic" role="img" aria-label="error"><use href="/icons.svg#err"/></svg> ';m.append(t);$('go').disabled=false;}
 // First run (no admin password yet) → switch to "set a password" mode. Also skip the page if already signed in.
 (async()=>{
   try{
@@ -25,7 +27,7 @@ $('f').onsubmit=async e=>{
   let r;
   try{r=await fetch(setup?'/api/auth/setup':'/api/auth/login',
     {method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(setup?{password:pw,token:$('tok').value.trim()}:{password:pw})});}
-  catch(err){msg.textContent='✗ '+err.message;$('go').disabled=false;return;}
-  if(!r.ok){msg.textContent='✗ '+((await r.text())||('HTTP '+r.status));$('go').disabled=false;return;}
+  catch(err){fail(err.message);return;}
+  if(!r.ok){fail((await r.text())||('HTTP '+r.status));return;}
   location.replace('/');   // session cookie set → the app is now reachable
 };

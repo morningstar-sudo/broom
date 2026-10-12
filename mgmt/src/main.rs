@@ -169,6 +169,9 @@ async fn app_js() -> impl axum::response::IntoResponse {
 async fn app_css() -> impl axum::response::IntoResponse {
     ([(axum::http::header::CONTENT_TYPE, "text/css; charset=utf-8")], assets::text("static/app.css"))
 }
+async fn icons() -> impl axum::response::IntoResponse {
+    ([(axum::http::header::CONTENT_TYPE, "image/svg+xml")], assets::text("static/icons.svg"))
+}
 async fn login_page() -> Html<&'static str> {
     Html(assets::text("static/login.html"))
 }
@@ -446,6 +449,7 @@ async fn main() {
         .route("/", get(index)) // web admin shell (embedded in the binary)
         .route("/app.js", get(app_js))
         .route("/app.css", get(app_css))
+        .route("/icons.svg", get(icons)) // public: the login page uses it too
         // One URL per page (F5 / bookmarks keep the page); same shell, JS picks the page from the path.
         .route("/machines", get(index))
         .route("/images", get(index))
