@@ -1,0 +1,43 @@
+<section class="page active" id="page-benchmark">
+  <div class="head"><h1>Benchmark</h1><p>server disk, iSCSI, client disk / network, boot time</p>
+    <span class="sp"></span><button data-click="loadBench">↻</button></div>
+  <div class="card">
+    <h2>Server disk</h2>
+    <div class="row">
+      <span class="mono">sequential</span><b id="b_seq">—</b>
+      <span class="mono" style="margin-left:14px">random 4K</span><b id="b_rand">—</b>
+      <span style="flex:1"></span>
+      <button class="primary" data-click="benchServer">Run</button>
+    </div>
+    <div id="bench_msg" class="msg" style="margin-top:8px"></div>
+    <p class="hint">Reads the biggest image straight from the disk (~20 s, page cache left alone). Clients booting meanwhile
+      get slower — run it when the room is quiet.</p>
+  </div>
+  <div class="card">
+    <h2>iSCSI now</h2>
+    <div id="b_iscsi" class="msg">—</div>
+    <p class="hint">What clients read from the server over the last second (Linux images, games disks). Refreshed every 5 s on this page.</p>
+  </div>
+  <div class="card">
+    <h2>Clients</h2>
+    <div class="row" style="margin-bottom:12px">
+      <button class="primary" data-click="benchRequest">Measure at next boot</button>
+      <button class="ghost" data-click="benchCancel">Cancel</button>
+      <span id="bq_msg" class="msg"></span>
+    </div>
+    <div class="scroll"><table id="b_clients">
+      <thead><tr><th><input type="checkbox" data-change="bSelAll" title="all"></th><th>Machine</th><th>Boot</th><th>Disk read</th><th>Network</th><th>Measured</th></tr></thead>
+      <tbody></tbody></table></div>
+    <p class="hint"><b>Boot</b> = menu choice → desktop, on every boot (server clock; <i>stage</i> = the Windows stage's part).
+      <b>Disk</b> and <b>network</b> are measured on request, at the machine's next boot (wake or restart it): disk = reading
+      its own SSD (Windows) or its boot disk (Linux), network = 256 MB from the server. Many machines at once = the whole
+      room booting together.</p>
+  </div>
+  <div class="card">
+    <h2>History</h2>
+    <div class="row" style="margin-bottom:10px"><select id="b_hmac" data-change="loadBenchHist"></select></div>
+    <div class="scroll"><table id="b_hist">
+      <thead><tr><th>Time</th><th>Machine</th><th>Test</th><th>Result</th><th>Detail</th></tr></thead>
+      <tbody></tbody></table></div>
+  </div>
+</section>

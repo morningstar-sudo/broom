@@ -4,7 +4,7 @@
 // logout. The reader parses PDUs and spawns a task per command; one writer task numbers and sends every reply.
 // Writes (only the game update machine may): the data is asked for with R2T, one write's data at a time.
 use std::collections::{HashMap, VecDeque};
-use std::sync::atomic::{AtomicU16, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU16, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock, Mutex};
 use std::time::Duration;
 
@@ -20,6 +20,25 @@ pub struct Disk {
     pub lun: Arc<Lun>,
     pub layers: Arc<[Arc<Overlay>]>,
     pub ov: Option<Arc<Overlay>>,
+    /// Bytes read, counted for the client's IP (shared by its sessions).
+    pub rx: Arc<AtomicU64>,
+}
+
+/// Bytes read per client IP since the daemon started. Only logged-in sessions add an entry; idle ones are dropped once
+/// there are many (each a few bytes; a room is far below the bound).
+static PEERS: LazyLock<Mutex<HashMap<String, Arc<AtomicU64>>>> = LazyLock::new(Default::default);
+const PEERS_MAX: usize = 1024;
+
+fn peer_counter(ip: &str) -> Arc<AtomicU64> {
+    let mut p = PEERS.lock().unwrap();
+    if p.len() >= PEERS_MAX && !p.contains_key(ip) {
+        p.retain(|_, c| Arc::strong_count(c) > 1); // no session holds it
+    }
+    p.entry(ip.to_string()).or_default().clone()
+}
+
+pub fn peers() -> Vec<super::PeerInfo> {
+    PEERS.lock().unwrap().iter().map(|(ip, c)| super::PeerInfo { ip: ip.clone(), read_bytes: c.load(Ordering::Relaxed) }).collect()
 }
 
 impl Disk {
@@ -247,7 +266,7 @@ async fn login(r: &mut (impl AsyncRead + Unpin), tx: &mpsc::Sender<Out>, exp: &A
         if done {
             let isid: [u8; 6] = p.bhs[8..14].try_into().unwrap();
             let (layers, ov) = games.as_ref().map_or((Arc::from([]), None), |v| (Arc::from(v.layers.clone()), v.ov.clone()));
-            let disk = lun.map(|lun| Disk { lun, layers, ov });
+            let disk = lun.map(|lun| Disk { lun, layers, ov, rx: peer_counter(peer) });
             return Ok(Some(Login { disk, games, their_mrdsl, burst, key: (name, isid) }));
         }
     }
@@ -541,7 +560,11 @@ pub async fn command(bhs: &[u8; 48], disk: Disk, mrdsl: usize, data: Vec<u8>) ->
                 }
             };
             match r {
-                Ok(Ok(buf)) => scsi::Cmd::Data(buf),
+                Ok(Ok(buf)) => {
+                    lun.read_bytes.fetch_add(len as u64, Ordering::Relaxed);
+                    disk.rx.fetch_add(len as u64, Ordering::Relaxed);
+                    scsi::Cmd::Data(buf)
+                }
                 Ok(Err(e)) => {
                     tracing::warn!("iscsid: read {} @{off}+{len}: {e}", lun.iqn);
                     scsi::Cmd::Check(0x03, 0x11, 0x00) // medium error, unrecovered read error

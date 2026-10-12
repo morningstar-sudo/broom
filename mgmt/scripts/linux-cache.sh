@@ -37,6 +37,25 @@ fi
 # Unfinished copies (no .sha256) + leftovers of older versions (*.chunks: delta manifests).
 for f in $C/*.img; do [ -f "${f%.img}.sha256" ] || rm -f "$f"; done
 rm -f $C/*.chunks $C/*.tmp
+# Benchmark page: boot time (reported once the desktop target is up; the server times it from the menu choice) and,
+# when the admin asked, the boot disk's read speed (iflag=direct: the disk, not the page cache) + zeros downloaded from
+# the server. Before the cache copy (a service: a background job would be killed when this script ends); the copy
+# waits a random 0–5 min anyway.
+bench(){
+  t=graphical.target; [ "$(systemctl get-default 2>/dev/null)" = graphical.target ] || t=multi-user.target
+  i=0; until systemctl is-active -q $t; do i=$((i + 1)); [ $i -gt 900 ] && return; sleep 1; done
+  wget -q -T 5 -O /dev/null --post-data= "http://$SRV/api/bench/booted"
+  [ "$(wget -q -T 10 -O - "http://$SRV/api/bench/pending" 2>/dev/null | cut -d' ' -f1)" = run=1 ] || return
+  if [ "$MODE" = hit ]; then dev=$C/$NAME.img; src=ssd; else dev=$GOLDEN; src=iscsi; fi
+  # dd: "N bytes (...) copied, S s, ..." -> MB/s.
+  disk=$(dd if="$dev" of=/dev/null bs=4M count=256 iflag=direct 2>&1 \
+    | awk '/ bytes / { for (i = 2; i <= NF; i++) if ($i == "s,") s = $(i - 1); if (s > 0) printf "%.1f", $1 / s / 1e6 }')
+  a=$(date +%s.%N); n=$(wget -q -O - "http://$SRV/api/bench/blob" | wc -c); z=$(date +%s.%N)
+  net=$(awk -v b="$n" -v a="$a" -v z="$z" 'BEGIN { if (b > 0 && z > a) printf "%.1f", b / (z - a) / 1e6 }')
+  log "benchmark: disk ($src) ${disk:-?} MB/s, network ${net:-?} MB/s"
+  wget -q -T 10 -O /dev/null --post-data= "http://$SRV/api/bench/report?disk=$disk&net=$net&src=$src"
+}
+[ -n "$SRV" ] && command -v wget >/dev/null && bench
 [ "$MODE" = miss ] && [ -b "$GOLDEN" ] && [ -n "$HASH" ] && [ -n "$SIZE" ] || exit 0
 # Spread over 0–5 minutes so all clients don't pull the golden at once after Publish; still congested →
 # limit bandwidth on the server side.

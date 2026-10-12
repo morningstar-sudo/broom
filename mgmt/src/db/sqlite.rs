@@ -4,7 +4,7 @@
 use rusqlite::{params, Connection, OptionalExtension, Row};
 use std::sync::{Mutex, MutexGuard};
 
-use super::{Db, DbResult, Driver, Image, Lease, Machine, NewImage};
+use super::{BenchRow, Db, DbResult, Driver, Image, Lease, Machine, NewImage};
 
 /// Newline-separated list column → items (empty lines dropped).
 fn lines(s: &str) -> Vec<String> {
@@ -77,6 +77,17 @@ const SCHEMA: &str = r#"
         expires  INTEGER NOT NULL,
         source   TEXT NOT NULL
     );
+
+    -- Benchmark results (bench.rs). mac NULL = the server.
+    CREATE TABLE IF NOT EXISTS bench(
+        id     INTEGER PRIMARY KEY,
+        at     INTEGER NOT NULL,
+        mac    TEXT,
+        kind   TEXT NOT NULL,
+        value  REAL NOT NULL,
+        detail TEXT NOT NULL DEFAULT ''
+    );
+    CREATE INDEX IF NOT EXISTS bench_mac ON bench(mac, kind, at);
 
     CREATE TABLE IF NOT EXISTS config(
         key   TEXT PRIMARY KEY,
@@ -559,6 +570,47 @@ impl Db for Sqlite {
     fn prune_leases(&self, cutoff: i64) -> DbResult<usize> {
         self.c().execute("DELETE FROM leases WHERE expires < ?1", [cutoff]).map_err(e)
     }
+
+    fn add_bench(&self, r: &BenchRow) -> DbResult<()> {
+        self.c()
+            .execute("INSERT INTO bench(at,mac,kind,value,detail) VALUES(?1,?2,?3,?4,?5)", params![r.at, r.mac, r.kind, r.value, r.detail])
+            .map(|_| ())
+            .map_err(e)
+    }
+
+    fn bench_rows(&self, mac: Option<&str>, limit: usize) -> DbResult<Vec<BenchRow>> {
+        let c = self.c();
+        let mut s = c
+            .prepare("SELECT at,mac,kind,value,detail FROM bench WHERE ?1 IS NULL OR mac=?1 ORDER BY at DESC, id DESC LIMIT ?2")
+            .map_err(e)?;
+        let rows = s.query_map(params![mac, limit as i64], bench_row).map_err(e)?;
+        rows.collect::<Result<_, _>>().map_err(e)
+    }
+
+    fn bench_latest(&self) -> DbResult<Vec<BenchRow>> {
+        let c = self.c();
+        let mut s = c
+            .prepare(
+                "SELECT at,mac,kind,value,detail FROM bench b WHERE id = (SELECT id FROM bench WHERE mac IS b.mac AND kind=b.kind
+                 ORDER BY at DESC, id DESC LIMIT 1)",
+            )
+            .map_err(e)?;
+        let rows = s.query_map([], bench_row).map_err(e)?;
+        rows.collect::<Result<_, _>>().map_err(e)
+    }
+
+    fn prune_bench(&self, cutoff: i64, keep: usize) -> DbResult<usize> {
+        let c = self.c();
+        let old = c.execute("DELETE FROM bench WHERE at < ?1", [cutoff]).map_err(e)?;
+        let over = c
+            .execute("DELETE FROM bench WHERE id NOT IN (SELECT id FROM bench ORDER BY at DESC, id DESC LIMIT ?1)", [keep as i64])
+            .map_err(e)?;
+        Ok(old + over)
+    }
+}
+
+fn bench_row(r: &Row) -> rusqlite::Result<BenchRow> {
+    Ok(BenchRow { at: r.get(0)?, mac: r.get(1)?, kind: r.get(2)?, value: r.get(3)?, detail: r.get(4)? })
 }
 
 #[cfg(test)]
@@ -761,5 +813,34 @@ mod tests {
         db.set_config("k", "v1").unwrap();
         db.set_config("k", "v2").unwrap();
         assert_eq!((db.get_config("k", ""), db.get_config("missing", "d")), ("v2".into(), "d".into()));
+    }
+
+    #[test]
+    fn bench_rows_latest_prune() {
+        let db = Sqlite::open(":memory:").unwrap();
+        let row = |at: i64, mac: Option<&str>, kind: &str, value: f64| BenchRow {
+            at,
+            mac: mac.map(String::from),
+            kind: kind.into(),
+            value,
+            detail: String::new(),
+        };
+        for r in [
+            row(1, None, "srv_seq", 100.0),
+            row(2, None, "srv_seq", 200.0),
+            row(3, Some("m1"), "boot", 40.0),
+            row(4, Some("m1"), "boot", 30.0),
+            row(5, Some("m2"), "net", 110.0),
+        ] {
+            db.add_bench(&r).unwrap();
+        }
+        assert_eq!(db.bench_rows(None, 10).unwrap().len(), 5);
+        assert_eq!(db.bench_rows(Some("m1"), 10).unwrap(), vec![row(4, Some("m1"), "boot", 30.0), row(3, Some("m1"), "boot", 40.0)]);
+        let mut latest = db.bench_latest().unwrap();
+        latest.sort_by_key(|r| r.at);
+        assert_eq!(latest, vec![row(2, None, "srv_seq", 200.0), row(4, Some("m1"), "boot", 30.0), row(5, Some("m2"), "net", 110.0)]);
+        // Older than the cutoff (at 1) + over the cap (keep the newest 2: at 5, 4).
+        assert_eq!(db.prune_bench(2, 2).unwrap(), 3);
+        assert_eq!(db.bench_rows(None, 10).unwrap().iter().map(|r| r.at).collect::<Vec<_>>(), vec![5, 4]);
     }
 }

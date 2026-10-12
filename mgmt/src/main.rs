@@ -5,6 +5,7 @@ mod api;
 mod archive;
 mod assets;
 mod auth;
+mod bench;
 mod boot;
 mod db;
 mod devices;
@@ -199,7 +200,7 @@ async fn events(
 // Per-tab fragments — loaded on demand via /ui/<page> (the web only fetches the tab being viewed).
 async fn ui_page(axum::extract::Path(p): axum::extract::Path<String>) -> Html<&'static str> {
     Html(match p.as_str() {
-        "machines" | "images" | "network" | "system" | "drivers" | "devices" | "groups" => assets::text(&format!("static/page-{p}.html")),
+        "machines" | "images" | "network" | "system" | "drivers" | "devices" | "groups" | "benchmark" => assets::text(&format!("static/page-{p}.html")),
         _ => "",
     })
 }
@@ -391,6 +392,7 @@ async fn main() {
                     Err(e) => warn!("lease prune: {e}"),
                     _ => {}
                 }
+                bench::prune(&st);
             }
         });
         // Superseded iSCSI generations (+ their RAM copies) go as soon as their last client logs out — a busy lab never
@@ -431,6 +433,7 @@ async fn main() {
         .route("/drivers", get(index))
         .route("/devices", get(index))
         .route("/groups", get(index))
+        .route("/benchmark", get(index))
         .route("/ui/{page}", get(ui_page)) // fragment tab on-demand
         .route("/api/events", get(events)) // SSE: server liveness (sidebar dot) + image job status
         .route("/boot.ipxe", get(boot::render)) // iPXE menu
@@ -444,6 +447,7 @@ async fn main() {
         .merge(settings::routes()) // boot menu, zram, DHCP, guest user
         .merge(devices::routes()) // Devices page: edit / bulk / CSV / detail
         .merge(monitor::routes()) // online status, Wake-on-LAN
+        .merge(bench::routes()) // Benchmark page + client measurements
         .merge(auth::routes()) // admin login
         // Serve boot assets over HTTP (kernel/initrd much faster than TFTP).
         // /tftp/... -> <home>/tftp/... (e.g. http://SERVER/tftp/broom-stage/vmlinuz); a Windows golden set to RAM

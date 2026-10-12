@@ -64,13 +64,13 @@ impl Arena {
     }
 
     fn get(&self, off: usize, len: usize) -> &[u8] {
-        assert!(off + len <= self.len);
+        assert!(off.checked_add(len).is_some_and(|e| e <= self.len));
         // SAFETY: inside the mapping (checked), which lives as long as self.
         unsafe { std::slice::from_raw_parts(self.ptr.add(off), len) }
     }
 
     fn put(&mut self, off: usize, data: &[u8]) {
-        assert!(off + data.len() <= self.len);
+        assert!(off.checked_add(data.len()).is_some_and(|e| e <= self.len));
         // SAFETY: inside the mapping (checked); &mut self = no reader yet.
         unsafe { std::ptr::copy_nonoverlapping(data.as_ptr(), self.ptr.add(off), data.len()) };
     }
@@ -108,6 +108,7 @@ fn data_blocks(f: &std::fs::File, size: u64) -> u64 {
         if data < 0 {
             break; // ENXIO: no data after pos
         }
+        // SAFETY: as above.
         let hole = unsafe { libc::lseek(fd, data, libc::SEEK_HOLE) };
         let end = if hole < 0 { size } else { (hole as u64).min(size) };
         let (first, last) = (data as u64 / b, end.div_ceil(b));

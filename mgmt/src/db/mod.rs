@@ -90,6 +90,18 @@ pub struct Lease {
     pub source: String,
 }
 
+/// One benchmark result (bench.rs). mac None = measured on the server.
+#[derive(serde::Serialize, Clone, Debug, PartialEq)]
+pub struct BenchRow {
+    /// Unix seconds.
+    pub at: i64,
+    pub mac: Option<String>,
+    /// srv_seq (MB/s) | srv_rand (4K IOPS) | disk (MB/s) | net (MB/s) | boot (seconds).
+    pub kind: String,
+    pub value: f64,
+    pub detail: String,
+}
+
 /// Everything the app stores. Implementations must be usable from many threads (axum handlers,
 /// DHCP listeners, blocking publish jobs).
 pub trait Db: Send + Sync {
@@ -158,6 +170,15 @@ pub trait Db: Send + Sync {
     /// Delete leases whose expiry is before `cutoff` (unix s). Returns how many were removed. Keeps the table from
     /// growing without bound when many MACs are seen (a DHCP flood).
     fn prune_leases(&self, cutoff: i64) -> DbResult<usize>;
+
+    // --- benchmark results ---
+    fn add_bench(&self, row: &BenchRow) -> DbResult<()>;
+    /// Newest first, at most `limit`; `mac` Some = that machine only.
+    fn bench_rows(&self, mac: Option<&str>, limit: usize) -> DbResult<Vec<BenchRow>>;
+    /// The newest row of each (mac, kind).
+    fn bench_latest(&self) -> DbResult<Vec<BenchRow>>;
+    /// Drop rows older than `cutoff` (unix s), then all but the newest `keep`. Returns how many were removed.
+    fn prune_bench(&self, cutoff: i64, keep: usize) -> DbResult<usize>;
 }
 
 /// Open the database named by `url`: a plain path or `sqlite://path` → SQLite.

@@ -26,6 +26,7 @@ assets!(
     "static/page-drivers.html",
     "static/page-devices.html",
     "static/page-groups.html",
+    "static/page-benchmark.html",
     "ipxe/snponly.efi",
     "ipxe/signed/snponly-shim.efi",
     "ipxe/signed/snponly.efi",

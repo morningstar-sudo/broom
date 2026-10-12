@@ -59,6 +59,11 @@ pub fn list() -> Option<Vec<TargetInfo>> {
     call(&Req::List).ok().map(|r| r.targets)
 }
 
+/// Targets + bytes read per client IP (benchmark page). None = no daemon; peers None = a daemon of an older build.
+pub fn stats() -> Option<(Vec<TargetInfo>, Option<Vec<crate::iscsid::PeerInfo>>)> {
+    call(&Req::List).ok().map(|r| (r.targets, r.peers))
+}
+
 /// Serve exactly these games disks.
 pub fn games_set(disks: Vec<crate::iscsid::games::Config>) -> Result<(), String> {
     call_up(&Req::GamesSet { disks }).map(|_| ())

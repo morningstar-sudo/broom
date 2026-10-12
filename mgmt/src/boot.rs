@@ -137,6 +137,9 @@ pub async fn start(
     script(match (img, boot) {
         (Some(i), Some(bs)) => {
             info!("client {who} started - mac {mac} - ip {ip} - hostname {h} - image {name} ({})", i.os);
+            if !mac.is_empty() {
+                crate::bench::boot_started(&mac, &name);
+            }
             // Per-boot switches the Windows stage reads from its cmdline (broom.base= / broom.strict=), and the Broom
             // SSD layout both OSes use (broom.lxgb= Linux share, broom.wbgb= writeback inside it). The Linux share:
             // the Linux goldens this machine may boot.

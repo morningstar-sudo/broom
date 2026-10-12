@@ -196,6 +196,10 @@ fn is_public(method: &axum::http::Method, path: &str) -> bool {
         "/api/games/for",
         "/api/ssd-low",
         "/api/client-config",
+        "/api/bench/pending",
+        "/api/bench/blob",
+        "/api/bench/report",
+        "/api/bench/booted",
         "/broom-prep",
         "/broom-prep-win",
     ];

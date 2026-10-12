@@ -470,6 +470,21 @@ if [ -n "$MAC" ] && wget -q -T 10 -O /run/broom-drv.txt --post-file=/run/broom-h
 else
   log "drivers: server did not answer -> keeping the current ones"
 fi
+# Benchmark page: the admin asked to measure this machine → 1 GB of the golden read straight from the SSD (iflag=direct:
+# the disk, not the page cache) + zeros downloaded from the server, both timed; the results go back to the server.
+# GNU dd by path (busybox runs its own applet first). NO $((...)) on these numbers → awk.
+up(){ cut -d' ' -f1 /proc/uptime; }
+mbs(){ awk -v b="$1" -v a="$2" -v z="$3" 'BEGIN { t = z - a; if (b > 0 && t > 0) printf "%.1f", b / t / 1e6 }'; }
+if [ -n "$MAC" ] && [ -f golden.vhdx ] \
+   && [ "$(wget -q -T 10 -O - "http://$SRV/api/bench/pending?mac=$MAC" 2>/dev/null | cut -d' ' -f1)" = run=1 ]; then
+  log "benchmark: measuring disk + network"
+  a=$(up); n=$(/broom/bin/dd if=golden.vhdx of=/dev/null bs=4M count=256 iflag=direct 2>&1 | awk '/ bytes / { print $1; exit }'); z=$(up)
+  disk=$(mbs "$n" "$a" "$z")
+  a=$(up); n=$(wget -q -t 1 -O - "http://$SRV/api/bench/blob?mac=$MAC" | wc -c); z=$(up)
+  net=$(mbs "$n" "$a" "$z")
+  log "benchmark: disk ${disk:-?} MB/s, network ${net:-?} MB/s"
+  wget -q -T 10 -O /dev/null --post-data= "http://$SRV/api/bench/report?mac=$MAC&disk=$disk&net=$net&src=ssd" || log "benchmark: report not sent"
+fi
 # Last session's writes: delete first → freed (and TRIMmed, discard mount) before the fresh child is written. Same for
 # its writes on the games disk (broom-games.ps1 makes that child again once Windows is up).
 # The child is rebuilt from the (checked) template every boot, with base's DataWriteGuid as its parent link — base is

@@ -12,7 +12,7 @@ pub(crate) mod ramimg; // also the Windows goldens' RAM copies (goldenram.rs)
 mod scsi;
 
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, LazyLock, Mutex};
 
 use serde::{Deserialize, Serialize};
@@ -60,6 +60,16 @@ pub struct TargetInfo {
     pub iqn: String,
     pub sessions: usize,
     pub ram: bool,
+    /// Bytes read by clients since the target was built. None = a daemon of a build without the counter.
+    #[serde(default)]
+    pub read_bytes: Option<u64>,
+}
+
+/// Bytes read by one client IP since the daemon started (every session of it, games disks included).
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct PeerInfo {
+    pub ip: String,
+    pub read_bytes: u64,
 }
 
 #[derive(Serialize, Deserialize, Default, Debug)]
@@ -74,6 +84,9 @@ pub struct Resp {
     pub games: Vec<games::Info>,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub msg: String,
+    /// With List. None = a daemon of a build without the counters.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peers: Option<Vec<PeerInfo>>,
 }
 
 pub struct Lun {
@@ -81,6 +94,8 @@ pub struct Lun {
     pub size: u64,
     data: Data,
     pub sessions: AtomicUsize,
+    /// Bytes read by clients (benchmark page: live throughput).
+    pub read_bytes: AtomicU64,
 }
 
 enum Data {
@@ -100,7 +115,7 @@ impl Lun {
             let size = f.metadata().map_err(|err| format!("{}: {err}", e.path))?.len();
             (Data::File(f), size)
         };
-        Ok(Lun { iqn: e.iqn.clone(), size, data, sessions: AtomicUsize::new(0) })
+        Ok(Lun { iqn: e.iqn.clone(), size, data, sessions: AtomicUsize::new(0), read_bytes: AtomicU64::new(0) })
     }
 
     /// Blocking read (disk I/O, or unpacking many RAM blocks): run it off the async threads.
@@ -182,11 +197,16 @@ fn list() -> Vec<TargetInfo> {
         .lock()
         .unwrap()
         .values()
-        .map(|(e, l)| TargetInfo { iqn: e.iqn.clone(), sessions: l.sessions.load(Ordering::Relaxed), ram: e.ram })
+        .map(|(e, l)| TargetInfo {
+            iqn: e.iqn.clone(),
+            sessions: l.sessions.load(Ordering::Relaxed),
+            ram: e.ram,
+            read_bytes: Some(l.read_bytes.load(Ordering::Relaxed)),
+        })
         .collect();
     let loaded: HashSet<String> = v.iter().map(|t| t.iqn.clone()).collect();
     for iqn in LOADING.lock().unwrap().iter().filter(|i| !loaded.contains(*i)) {
-        v.push(TargetInfo { iqn: iqn.clone(), sessions: 0, ram: true });
+        v.push(TargetInfo { iqn: iqn.clone(), sessions: 0, ram: true, read_bytes: Some(0) });
     }
     v
 }
@@ -205,7 +225,10 @@ async fn handle(req: Req) -> Resp {
                 save();
             }
         }
-        Req::List => r.targets = list(),
+        Req::List => {
+            r.targets = list();
+            r.peers = Some(conn::peers());
+        }
         Req::Version => r.version = crate::iscsi::exe_id(),
         Req::Quit => {}
         // Blocking: set may finish a merge cut off earlier; save links files.

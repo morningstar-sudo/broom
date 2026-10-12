@@ -304,7 +304,8 @@ async fn for_machine(State(st): State<SharedState>, Query(q): Query<ForQuery>, b
     // /boot/start; it grants nothing /boot/start doesn't (both are open to any client). It never re-arms a key:
     // that is decided on the server (rearm_changed), never by what a client sends.
     st.saw_pxe(&mac, None);
-    let who = m.and_then(|m| m.hostname).unwrap_or_else(|| mac.clone());
+    crate::bench::stage_reached(&mac);
+    let who =m.and_then(|m| m.hostname).unwrap_or_else(|| mac.clone());
     tracing::info!(
         "client {who} drivers: {}",
         if got.is_empty() { "none".to_string() } else { got.iter().map(|d| d.name.as_str()).collect::<Vec<_>>().join(", ") }

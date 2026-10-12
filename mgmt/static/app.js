@@ -12,7 +12,7 @@ for(const ev of ['click','change','input'])document.addEventListener(ev,e=>{
 });
 
 // ---- tabs: load HTML fragments on demand (/ui/<page>) + only load data for the tab being viewed ----
-const loaders={machines:loadStatus,devices:loadDevices,groups:loadGroups,images:()=>{loadImages();loadGames();},drivers:loadDrivers,network:loadDhcp,system:loadCafe};
+const loaders={machines:loadStatus,devices:loadDevices,groups:loadGroups,benchmark:loadBench,images:()=>{loadImages();loadGames();},drivers:loadDrivers,network:loadDhcp,system:loadCafe};
 const fragCache={};
 let curPage=null;
 async function showPage(p){
@@ -288,7 +288,7 @@ async function setDefault(id){await j('/api/images/default',mk({id}));loadImages
 const jobWatch={};
 function showJob(name,s){const w=jobWatch[name];if(!w||!s)return;
   // The page may have been rebuilt since the watch started (tab switch): then the Images page's status line.
-  const el=w.el.isConnected?w.el:document.getElementById('img_status');
+  const el=w.el.isConnected?w.el:document.getElementById(name.startsWith('bench:')?'bench_msg':'img_status');
   if(el)el.textContent=' '+(el===w.el?'':name+': ')+s;
   if(s.startsWith('✓')||s.startsWith('✗')){delete jobWatch[name];
     if(curPage==='images')loadImages().then(()=>{   // an open Versions panel of this image follows too (new v1, rollback…)
@@ -530,6 +530,72 @@ let lastPing=0;
 function setServer(up){const d=document.getElementById('srvdot');
   d.classList.toggle('up',up);d.classList.toggle('down',!up);d.title=up?'server online':'server offline';}
 
+// ---- benchmark (bench.rs) ----
+const BENCH_KINDS={srv_seq:['Server sequential','MB/s'],srv_rand:['Server random 4K','IOPS'],disk:['Disk read','MB/s'],net:['Network','MB/s'],boot:['Boot','s']};
+let benchData=null,iscsiBusy=false;
+const bName=mac=>{if(!mac)return 'server';const m=benchData&&benchData.machines.find(x=>x.mac===mac);return (m&&m.hostname)||mac;};
+const bVal=r=>r?`${r.value.toLocaleString()} ${BENCH_KINDS[r.kind]?BENCH_KINDS[r.kind][1]:''}`:'—';
+// Value + a bar against the best machine (higher = better: disk, network).
+const bBar=(r,max)=>r?`${esc(bVal(r))}<span style="display:inline-block;height:6px;width:${Math.round(70*r.value/max)}px;background:var(--accent);border-radius:3px;margin-left:8px;vertical-align:middle"></span>`:'—';
+const bTime=t=>new Date(t*1000).toLocaleString();
+async function loadBench(){
+  const d=benchData=await j('/api/bench');
+  const seq=document.getElementById('b_seq');if(!seq)return;
+  const last=(mac,k)=>d.latest.find(r=>r.mac===mac&&r.kind===k);
+  seq.textContent=bVal(last(null,'srv_seq'));document.getElementById('b_rand').textContent=bVal(last(null,'srv_rand'));
+  if(d.job&&d.job.startsWith('⏳')&&!jobWatch['bench:server'])watchJob('bench:server',document.getElementById('bench_msg'),benchDone);
+  const max=k=>Math.max(1,...d.latest.filter(r=>r.mac&&r.kind===k).map(r=>r.value));
+  // Registered machines + any other MAC with results.
+  const macs=[...new Set([...d.machines.map(m=>m.mac),...d.latest.filter(r=>r.mac).map(r=>r.mac)])];
+  const checked=new Set([...document.querySelectorAll('.b_sel:checked')].map(x=>x.value));
+  document.querySelector('#b_clients tbody').innerHTML=macs.map(mac=>{
+    const boot=last(mac,'boot'),disk=last(mac,'disk'),net=last(mac,'net');
+    const at=Math.max(0,...[boot,disk,net].filter(Boolean).map(r=>r.at));
+    const stage=boot&&/stage (\d+)s/.exec(boot.detail);
+    return `<tr><td><input type="checkbox" class="b_sel" value="${esc(mac)}"${checked.has(mac)?' checked':''}></td>
+      <td><b>${esc(bName(mac))}</b> <span class="mono">${esc(mac)}</span>${d.pending.includes(mac)?' <span class="pill new" title="measured at its next boot">waiting</span>':''}</td>
+      <td title="${esc(boot?boot.detail:'')}">${esc(bVal(boot))}${stage?` <span class="mono">(stage ${esc(stage[1])} s)</span>`:''}</td>
+      <td title="${esc(disk?disk.detail:'')}">${bBar(disk,max('disk'))}</td><td>${bBar(net,max('net'))}</td>
+      <td class="mono">${at?esc(bTime(at)):'—'}</td></tr>`;}).join('')||'<tr><td colspan=6 class="mono">no machines yet</td></tr>';
+  const sel=document.getElementById('b_hmac'),cur=sel.value;
+  sel.innerHTML='<option value="">all</option><option value="server">server</option>'+macs.map(m=>`<option value="${esc(m)}">${esc(bName(m))}</option>`).join('');
+  sel.value=cur;
+  loadBenchHist();loadIscsi();
+}
+async function loadBenchHist(){
+  const sel=document.getElementById('b_hmac');if(!sel)return;
+  const rows=await j('/api/bench/history?mac='+encodeURIComponent(sel.value));
+  document.querySelector('#b_hist tbody').innerHTML=rows.map(r=>`<tr><td class="mono">${esc(bTime(r.at))}</td><td>${esc(bName(r.mac))}</td>
+    <td>${esc(BENCH_KINDS[r.kind]?BENCH_KINDS[r.kind][0]:r.kind)}</td><td><b>${esc(bVal(r))}</b></td><td class="mono">${esc(r.detail)}</td></tr>`).join('')
+    ||'<tr><td colspan=5 class="mono">no results yet</td></tr>';
+}
+async function loadIscsi(){
+  const el=document.getElementById('b_iscsi');if(!el||iscsiBusy)return;
+  iscsiBusy=true;
+  try{const d=await j('/api/bench/iscsi');
+    if(d.daemon==='none'){el.textContent='iSCSI daemon not running';return;}
+    if(d.daemon==='old'){el.textContent='the running iSCSI daemon is an older build without counters — it is replaced by itself once no client is connected';return;}
+    if(!d.targets.length&&!d.peers.length){el.textContent='no client connected';return;}
+    const mb=x=>x.toFixed(1)+' MB/s';
+    el.innerHTML=`<div class="row" style="align-items:flex-start;gap:28px">
+      <table style="width:auto"><thead><tr><th>Target</th><th>Sessions</th><th>Read</th></tr></thead><tbody>${d.targets.map(t=>
+        `<tr><td>${esc(t.iqn.split(':').pop())}${t.ram?' <span class="pill">RAM</span>':''}</td><td>${t.sessions}</td><td>${mb(t.mbps)}</td></tr>`).join('')}</tbody></table>
+      <table style="width:auto"><thead><tr><th>Client</th><th>Read</th></tr></thead><tbody>${d.peers.map(p=>
+        `<tr><td>${esc(p.host||p.ip)} <span class="mono">${esc(p.ip)}</span></td><td>${mb(p.mbps)}</td></tr>`).join('')||'<tr><td colspan=2 class="mono">idle</td></tr>'}</tbody></table></div>`;
+  }catch(e){el.textContent='✗ '+e.message;}
+  finally{iscsiBusy=false;}
+}
+const benchDone=()=>{if(curPage==='benchmark')loadBench();};
+async function benchServer(){const el=document.getElementById('bench_msg');
+  try{await j('/api/bench/server',{method:'POST'});watchJob('bench:server',el,benchDone);}catch(e){el.textContent=' ✗ '+e.message;}}
+async function benchAsk(cancel){const m=document.getElementById('bq_msg');
+  const macs=[...document.querySelectorAll('.b_sel:checked')].map(x=>x.value);
+  if(!macs.length){toast('Tick the machines first',true);return;}
+  try{await j('/api/bench/request',mk({macs,cancel}));m.textContent=cancel?' ✓ cancelled':` ✓ ${macs.length} machine(s) measured at their next boot`;}
+  catch(e){m.textContent=' ✗ '+e.message;}
+  loadBench();}
+function bSelAll(el){document.querySelectorAll('.b_sel').forEach(x=>x.checked=el.checked);}
+
 // ---- helpers ----
 function v(id){return document.getElementById(id).value.trim()}
 function mk(body){return {method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body)}}
@@ -559,6 +625,7 @@ const ACTIONS={
   loadGames,saveGames,setGamesUpdate,saveGamesUpdate,discardGamesUpdate,editGames,delGames,
   loadDrivers,uploadDriver,saveDrvTargets,delDriver,
   loadGroups,editGroup,closeGroup,saveGroup,createGroup,renameGroup,deleteGroup,
+  loadBench,loadBenchHist,benchServer,benchRequest:()=>benchAsk(false),benchCancel:()=>benchAsk(true),bSelAll,
   applyDhcp,savePw,saveCafe,setTimeout_,setZramReserve,setSsd,logout,
 };
 
@@ -575,5 +642,6 @@ function startApp(){
   if(location.pathname!=='/'+pageFromPath())history.replaceState(null,'','/'+pageFromPath());
   showPage(pageFromPath());
   setInterval(()=>{if(curPage==='machines')loadStatus();},15000);
+  setInterval(()=>{if(curPage==='benchmark')loadIscsi();},5000);
 }
 startApp();

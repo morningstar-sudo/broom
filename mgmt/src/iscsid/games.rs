@@ -10,7 +10,7 @@
 // while clients of the newest gen read: merging only writes blocks a layer covers, and they read those from the layer.
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::{AtomicU64, AtomicUsize};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -111,7 +111,7 @@ fn cfg_file() -> Option<PathBuf> {
 fn open_lun(cfg: &Config) -> Result<Arc<Lun>, String> {
     let f = std::fs::File::open(&cfg.path).map_err(|e| format!("{}: {e}", cfg.path))?;
     let size = f.metadata().map_err(|e| e.to_string())?.len();
-    Ok(Arc::new(Lun { iqn: cfg.iqn.clone(), size, data: super::Data::File(f), sessions: AtomicUsize::new(0) }))
+    Ok(Arc::new(Lun { iqn: cfg.iqn.clone(), size, data: super::Data::File(f), sessions: AtomicUsize::new(0), read_bytes: AtomicU64::new(0) }))
 }
 
 /// Blocking read of gen view `layers` (oldest first) over games.img.

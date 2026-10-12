@@ -15,6 +15,15 @@ try {
 function Report($free) {
   try { Invoke-WebRequest -UseBasicParsing -TimeoutSec 5 -Method Post -Uri "http://$Srv/api/ssd-low?free=$free" | Out-Null } catch { }
 }
+# Boot time (Benchmark page): the desktop is up once explorer runs (guest logged on) -> tell the server, which times it
+# from the menu choice on its own clock. Checked every second for up to 15 minutes, then the watchdog goes on.
+for ($i = 0; $i -lt 900; $i++) {
+  if (Get-Process explorer -ErrorAction SilentlyContinue) {
+    try { Invoke-WebRequest -UseBasicParsing -TimeoutSec 5 -Method Post -Uri "http://$Srv/api/bench/booted" | Out-Null } catch { }
+    break
+  }
+  Start-Sleep 1
+}
 $warned = [datetime]::MinValue
 $reported = $false
 while ($true) {
