@@ -70,6 +70,9 @@ pub struct TargetInfo {
 pub struct PeerInfo {
     pub ip: String,
     pub read_bytes: u64,
+    /// A session of it is logged in now.
+    #[serde(default)]
+    pub connected: bool,
 }
 
 #[derive(Serialize, Deserialize, Default, Debug)]
@@ -228,6 +231,7 @@ async fn handle(req: Req) -> Resp {
         Req::List => {
             r.targets = list();
             r.peers = Some(conn::peers());
+            r.games = games::info(); // the benchmark page's throughput (list() is the goldens only: publish/gc use it)
         }
         Req::Version => r.version = crate::iscsi::exe_id(),
         Req::Quit => {}

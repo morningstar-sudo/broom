@@ -184,7 +184,7 @@ async fn request(Json(b): Json<ReqBody>) -> Result<Json<serde_json::Value>, ApiE
 }
 
 /// One sample of the iSCSI daemon's counters (None = no daemon) and when it was taken.
-type Sample = (Option<(Vec<crate::iscsi::TargetInfo>, Option<Vec<crate::iscsid::PeerInfo>>)>, Instant);
+type Sample = (Option<crate::iscsi::Stats>, Instant);
 
 async fn sample() -> Sample {
     (tokio::task::spawn_blocking(crate::iscsi::stats).await.ok().flatten(), Instant::now())
@@ -211,22 +211,29 @@ async fn iscsi_live(
 
 /// Throughput between two samples, as the page shows it.
 fn rates(st: &SharedState, (a, at): &Sample, (b, bt): &Sample) -> serde_json::Value {
-    let (Some((t1, p1)), Some((t2, p2))) = (a, b) else {
+    let (Some(a), Some(b)) = (a, b) else {
         return serde_json::json!({"daemon": "none"});
     };
-    let (Some(p1), Some(p2)) = (p1, p2) else {
+    let (Some(p1), Some(p2)) = (&a.peers, &b.peers) else {
         return serde_json::json!({"daemon": "old"});
     };
     let secs = bt.duration_since(*at).as_secs_f64().max(1e-3);
     let mbps = |a: u64, b: u64| b.saturating_sub(a) as f64 / 1e6 / secs;
-    let targets: Vec<_> = t2
+    // Golden targets (iqn …:<image>.<gen>) and games disks, those with a client logged in.
+    let mut targets: Vec<_> = b
+        .targets
         .iter()
         .filter(|t| t.sessions > 0)
         .map(|t| {
-            let before = t1.iter().find(|x| x.iqn == t.iqn).and_then(|x| x.read_bytes).unwrap_or(0);
-            serde_json::json!({"iqn": t.iqn, "sessions": t.sessions, "ram": t.ram, "mbps": mbps(before, t.read_bytes.unwrap_or(0))})
+            let before = a.targets.iter().find(|x| x.iqn == t.iqn).and_then(|x| x.read_bytes).unwrap_or(0);
+            let name = t.iqn.rsplit(':').next().unwrap_or(&t.iqn);
+            serde_json::json!({"name": name, "sessions": t.sessions, "ram": t.ram, "mbps": mbps(before, t.read_bytes.unwrap_or(0))})
         })
         .collect();
+    targets.extend(b.games.iter().filter(|g| g.sessions > 0).map(|g| {
+        let before = a.games.iter().find(|x| x.name == g.name).map_or(0, |x| x.read_bytes);
+        serde_json::json!({"name": format!("games disk {}", g.name), "sessions": g.sessions, "ram": false, "mbps": mbps(before, g.read_bytes)})
+    }));
     let hosts: HashMap<String, String> = st
         .db
         .machines()
@@ -234,16 +241,17 @@ fn rates(st: &SharedState, (a, at): &Sample, (b, bt): &Sample) -> serde_json::Va
         .into_iter()
         .filter_map(|m| Some((m.ip.clone()?, crate::machines::who(&m))))
         .collect();
+    // Clients logged in (reading or idle this second) + any that read and logged out within it.
     let mut peers: Vec<_> = p2
         .iter()
         .map(|p| {
             let before = p1.iter().find(|x| x.ip == p.ip).map_or(0, |x| x.read_bytes);
-            (p.ip.clone(), mbps(before, p.read_bytes))
+            (p.ip.clone(), mbps(before, p.read_bytes), p.connected)
         })
-        .filter(|(_, r)| *r > 0.0)
+        .filter(|(_, r, on)| *on || *r > 0.0)
         .collect();
-    peers.sort_by(|a, b| b.1.total_cmp(&a.1));
-    let peers: Vec<_> = peers.into_iter().map(|(ip, r)| serde_json::json!({"ip": ip, "host": hosts.get(&ip), "mbps": r})).collect();
+    peers.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    let peers: Vec<_> = peers.into_iter().map(|(ip, r, _)| serde_json::json!({"ip": ip, "host": hosts.get(&ip), "mbps": r})).collect();
     serde_json::json!({"daemon": "ok", "targets": targets, "peers": peers})
 }
 

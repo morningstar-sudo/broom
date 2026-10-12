@@ -38,7 +38,13 @@ fn peer_counter(ip: &str) -> Arc<AtomicU64> {
 }
 
 pub fn peers() -> Vec<super::PeerInfo> {
-    PEERS.lock().unwrap().iter().map(|(ip, c)| super::PeerInfo { ip: ip.clone(), read_bytes: c.load(Ordering::Relaxed) }).collect()
+    // A session holds a clone of its IP's counter: more than the map's own = logged in.
+    PEERS
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|(ip, c)| super::PeerInfo { ip: ip.clone(), read_bytes: c.load(Ordering::Relaxed), connected: Arc::strong_count(c) > 1 })
+        .collect()
 }
 
 impl Disk {
@@ -650,6 +656,18 @@ pub async fn command(bhs: &[u8; 48], disk: Disk, mrdsl: usize, data: Vec<u8>) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A client IP is "connected" while a session holds its counter; its bytes stay counted after it logs out.
+    #[test]
+    fn peer_connected_while_held() {
+        let ip = "192.0.2.77";
+        let c = peer_counter(ip);
+        c.fetch_add(5, Ordering::Relaxed);
+        let get = || peers().into_iter().find(|p| p.ip == ip).unwrap();
+        assert!(get().connected && get().read_bytes == 5);
+        drop(c);
+        assert!(!get().connected && get().read_bytes == 5);
+    }
 
     #[test]
     fn login_keys_answered() {

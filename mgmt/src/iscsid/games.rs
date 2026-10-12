@@ -51,6 +51,9 @@ pub struct Info {
     pub update_bytes: u64,
     pub update_connected: bool,
     pub merging: bool,
+    /// Bytes read by clients since the disk was set up (benchmark page). 0 from a daemon of a build without it.
+    #[serde(default)]
+    pub read_bytes: u64,
 }
 
 /// What a session of one gen reads: games.img under `layers` (oldest first); `ov` = its writes (the update machine).
@@ -422,6 +425,7 @@ pub fn info() -> Vec<Info> {
                 },
                 update_connected: s.update_users > 0,
                 merging: s.merging.is_some(),
+                read_bytes: s.lun.read_bytes.load(std::sync::atomic::Ordering::Relaxed),
             })
             .collect()
     })

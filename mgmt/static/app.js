@@ -587,9 +587,9 @@ function showIscsi(d){
   const mb=x=>x.toFixed(1)+' MB/s';
   el.innerHTML=`<div class="row" style="align-items:flex-start;gap:28px">
     <table style="width:auto"><thead><tr><th>Target</th><th>Sessions</th><th>Read</th></tr></thead><tbody>${d.targets.map(t=>
-      `<tr><td>${esc(t.iqn.split(':').pop())}${t.ram?' <span class="pill">RAM</span>':''}</td><td>${t.sessions}</td><td>${mb(t.mbps)}</td></tr>`).join('')}</tbody></table>
+      `<tr><td>${esc(t.name)}${t.ram?' <span class="pill">RAM</span>':''}</td><td>${t.sessions}</td><td>${mb(t.mbps)}</td></tr>`).join('')}</tbody></table>
     <table style="width:auto"><thead><tr><th>Client</th><th>Read</th></tr></thead><tbody>${d.peers.map(p=>
-      `<tr><td>${esc(p.host||p.ip)} <span class="mono">${esc(p.ip)}</span></td><td>${mb(p.mbps)}</td></tr>`).join('')||'<tr><td colspan=2 class="mono">idle</td></tr>'}</tbody></table></div>`;
+      `<tr><td>${esc(p.host||p.ip)} <span class="mono">${esc(p.ip)}</span></td><td>${p.mbps>0?mb(p.mbps):'<span class="mono">idle</span>'}</td></tr>`).join('')||'<tr><td colspan=2 class="mono">none</td></tr>'}</tbody></table></div>`;
 }
 const benchDone=()=>{if(curPage==='benchmark')loadBench();};
 async function benchServer(){const el=document.getElementById('bench_msg');
