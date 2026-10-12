@@ -15,7 +15,10 @@ use crate::iscsid::{Entry, Req, Resp, SOCK};
 pub fn exe_id() -> String {
     static ID: OnceLock<String> = OnceLock::new();
     ID.get_or_init(|| {
-        std::fs::read("/proc/self/exe").map_or_else(|_| env!("CARGO_PKG_VERSION").to_string(), |b| blake3::hash(&b).to_hex()[..16].to_string())
+        std::fs::read("/proc/self/exe").map_or_else(
+            |_| env!("CARGO_PKG_VERSION").to_string(),
+            |b| blake3::hash(&b).to_hex()[..16].to_string(),
+        )
     })
     .clone()
 }
@@ -23,12 +26,16 @@ pub fn exe_id() -> String {
 /// One request to the daemon. Err = not running / unreachable, or its error.
 fn call(req: &Req) -> Result<Resp, String> {
     use std::io::{BufRead, Write};
-    let mut s = std::os::unix::net::UnixStream::connect(SOCK).map_err(|e| format!("iSCSI daemon not running ({SOCK}: {e})"))?;
+    let mut s = std::os::unix::net::UnixStream::connect(SOCK)
+        .map_err(|e| format!("iSCSI daemon not running ({SOCK}: {e})"))?;
     let mut line = serde_json::to_vec(req).unwrap();
     line.push(b'\n');
-    s.write_all(&line).map_err(|e| format!("iSCSI daemon: {e}"))?;
+    s.write_all(&line)
+        .map_err(|e| format!("iSCSI daemon: {e}"))?;
     let mut out = String::new();
-    std::io::BufReader::new(s).read_line(&mut out).map_err(|e| format!("iSCSI daemon: {e}"))?;
+    std::io::BufReader::new(s)
+        .read_line(&mut out)
+        .map_err(|e| format!("iSCSI daemon: {e}"))?;
     let r: Resp = serde_json::from_str(&out).map_err(|e| format!("iSCSI daemon answer: {e}"))?;
     match r.err {
         Some(e) => Err(e),
@@ -47,7 +54,14 @@ fn call_up(req: &Req) -> Result<Resp, String> {
 /// Serve `path` read-only as target `iqn` (replaces one with that IQN). `ram`: from a compressed copy in RAM, refused
 /// unless `reserve` bytes stay free next to it. Blocking (a RAM copy takes ~a minute for 12 GB).
 pub fn export(iqn: &str, path: &str, ram: bool, reserve: u64) -> Result<(), String> {
-    call_up(&Req::Export(Entry { iqn: iqn.into(), path: path.into(), ram, reserve, stamp: String::new() })).map(|_| ())
+    call_up(&Req::Export(Entry {
+        iqn: iqn.into(),
+        path: path.into(),
+        ram,
+        reserve,
+        stamp: String::new(),
+    }))
+    .map(|_| ())
 }
 
 pub fn remove(iqn: &str) {
@@ -68,7 +82,11 @@ pub struct Stats {
 }
 
 pub fn stats() -> Option<Stats> {
-    call(&Req::List).ok().map(|r| Stats { targets: r.targets, games: r.games, peers: r.peers })
+    call(&Req::List).ok().map(|r| Stats {
+        targets: r.targets,
+        games: r.games,
+        peers: r.peers,
+    })
 }
 
 /// Serve exactly these games disks.
@@ -96,7 +114,10 @@ pub fn ensure_daemon() -> Result<String, String> {
         Ok(r) if r.version == exe_id() => Ok("iSCSI daemon running".into()),
         Ok(r) => match upgrade_if_idle() {
             true => Ok("iSCSI daemon upgraded".into()),
-            false => Ok(format!("iSCSI daemon of an older build ({}) kept until its clients disconnect", r.version)),
+            false => Ok(format!(
+                "iSCSI daemon of an older build ({}) kept until its clients disconnect",
+                r.version
+            )),
         },
         Err(_) => start_daemon().map(|_| "iSCSI daemon started".into()),
     }
@@ -104,8 +125,13 @@ pub fn ensure_daemon() -> Result<String, String> {
 
 /// An older build's daemon with no client logged in → replace it with this build's. True if replaced.
 pub fn upgrade_if_idle() -> bool {
-    let Ok(v) = call(&Req::Version) else { return false };
-    if v.version == exe_id() || list().is_none_or(|t| t.iter().any(|t| t.sessions > 0)) || games_status().is_some_and(|g| g.iter().any(|d| d.sessions > 0)) {
+    let Ok(v) = call(&Req::Version) else {
+        return false;
+    };
+    if v.version == exe_id()
+        || list().is_none_or(|t| t.iter().any(|t| t.sessions > 0))
+        || games_status().is_some_and(|g| g.iter().any(|d| d.sessions > 0))
+    {
         return false;
     }
     tracing::info!("iSCSI daemon {} idle → replaced by {}", v.version, exe_id());
@@ -152,20 +178,38 @@ fn daemon_exe() -> Result<PathBuf, String> {
 /// The daemon's unit when it is not running normally (failed, or restarting after a crash: still loaded, so a new
 /// `systemd-run --unit=broom-iscsid` is refused) → stopped and cleared. A running one is left alone.
 fn clear_stuck_unit() {
-    let o = Command::new("systemctl").args(["show", "-p", "ActiveState", "--value", "broom-iscsid"]).output();
-    let state = o.map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string()).unwrap_or_default();
+    let o = Command::new("systemctl")
+        .args(["show", "-p", "ActiveState", "--value", "broom-iscsid"])
+        .output();
+    let state = o
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_default();
     if matches!(state.as_str(), "activating" | "failed" | "deactivating") {
-        tracing::warn!("iSCSI daemon unit was {state} (crashing / not starting) → stopped before starting it again");
-        let _ = Command::new("systemctl").args(["stop", "broom-iscsid"]).output();
+        tracing::warn!(
+            "iSCSI daemon unit was {state} (crashing / not starting) → stopped before starting it again"
+        );
+        let _ = Command::new("systemctl")
+            .args(["stop", "broom-iscsid"])
+            .output();
     }
-    let _ = Command::new("systemctl").args(["reset-failed", "broom-iscsid"]).output();
+    let _ = Command::new("systemctl")
+        .args(["reset-failed", "broom-iscsid"])
+        .output();
 }
 
 /// The daemon's last log lines (why it didn't come up).
 fn daemon_log_tail() -> String {
-    let o = Command::new("journalctl").args(["-u", "broom-iscsid", "-n", "6", "--no-pager", "-o", "cat"]).output();
-    let s = o.map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string()).unwrap_or_default();
-    if s.is_empty() { String::new() } else { format!(" — last log lines: {}", s.replace('\n', " | ")) }
+    let o = Command::new("journalctl")
+        .args(["-u", "broom-iscsid", "-n", "6", "--no-pager", "-o", "cat"])
+        .output();
+    let s = o
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_default();
+    if s.is_empty() {
+        String::new()
+    } else {
+        format!(" — last log lines: {}", s.replace('\n', " | "))
+    }
 }
 
 fn start_daemon() -> Result<(), String> {
@@ -176,17 +220,36 @@ fn start_daemon() -> Result<(), String> {
         // Its own transient unit: outside bootrom-mgmt.service, whose stop/restart kills every process of its cgroup.
         clear_stuck_unit();
         let mut c = Command::new("systemd-run");
-        c.args(["--unit=broom-iscsid", "--collect", "-p", "Restart=on-failure", "-p", "RestartSec=2"]).arg(&exe).args(&args);
+        c.args([
+            "--unit=broom-iscsid",
+            "--collect",
+            "-p",
+            "Restart=on-failure",
+            "-p",
+            "RestartSec=2",
+        ])
+        .arg(&exe)
+        .args(&args);
         let o = c.output().map_err(|e| format!("systemd-run: {e}"))?;
         if !o.status.success() {
-            return Err(format!("systemd-run broom-iscsid: {}", String::from_utf8_lossy(&o.stderr).trim()));
+            return Err(format!(
+                "systemd-run broom-iscsid: {}",
+                String::from_utf8_lossy(&o.stderr).trim()
+            ));
         }
     } else {
         // No systemd: its own session, so it outlives this process; output to <home>/iscsid.log.
         use std::os::unix::process::CommandExt;
-        let log = std::fs::OpenOptions::new().create(true).append(true).open(crate::home().join("iscsid.log")).map_err(|e| e.to_string())?;
+        let log = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(crate::home().join("iscsid.log"))
+            .map_err(|e| e.to_string())?;
         let mut c = Command::new(&exe);
-        c.args(&args).stdin(std::process::Stdio::null()).stdout(log.try_clone().map_err(|e| e.to_string())?).stderr(log);
+        c.args(&args)
+            .stdin(std::process::Stdio::null())
+            .stdout(log.try_clone().map_err(|e| e.to_string())?)
+            .stderr(log);
         // SAFETY: setsid is async-signal-safe and touches no memory of the parent.
         unsafe {
             c.pre_exec(|| {
@@ -194,7 +257,8 @@ fn start_daemon() -> Result<(), String> {
                 Ok(())
             });
         }
-        c.spawn().map_err(|e| format!("start {}: {e}", exe.display()))?;
+        c.spawn()
+            .map_err(|e| format!("start {}: {e}", exe.display()))?;
     }
     for _ in 0..100 {
         if call(&Req::Version).is_ok() {
@@ -202,7 +266,10 @@ fn start_daemon() -> Result<(), String> {
         }
         std::thread::sleep(std::time::Duration::from_millis(100));
     }
-    Err(format!("iSCSI daemon did not come up in 10 s (journalctl -u broom-iscsid, or iscsid.log next to the binary){}", daemon_log_tail()))
+    Err(format!(
+        "iSCSI daemon did not come up in 10 s (journalctl -u broom-iscsid, or iscsid.log next to the binary){}",
+        daemon_log_tail()
+    ))
 }
 
 const CONFIGFS: &str = "/sys/kernel/config/target";
@@ -212,16 +279,29 @@ const CONFIGFS: &str = "/sys/kernel/config/target";
 pub fn clear_lio(prefixes: &[&str]) -> bool {
     let root = Path::new(CONFIGFS);
     let subdirs = |p: &Path| -> Vec<PathBuf> {
-        std::fs::read_dir(p).map(|rd| rd.flatten().map(|e| e.path()).filter(|p| p.is_dir() && !p.is_symlink()).collect()).unwrap_or_default()
+        std::fs::read_dir(p)
+            .map(|rd| {
+                rd.flatten()
+                    .map(|e| e.path())
+                    .filter(|p| p.is_dir() && !p.is_symlink())
+                    .collect()
+            })
+            .unwrap_or_default()
     };
     let mut any = false;
     for t in subdirs(&root.join("iscsi")) {
-        let iqn = t.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let iqn = t
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
         if !prefixes.iter().any(|p| iqn.starts_with(p)) {
             continue;
         }
         any = true;
-        for tpg in subdirs(&t).into_iter().filter(|p| p.file_name().is_some_and(|n| n.to_string_lossy().starts_with("tpgt_"))) {
+        for tpg in subdirs(&t).into_iter().filter(|p| {
+            p.file_name()
+                .is_some_and(|n| n.to_string_lossy().starts_with("tpgt_"))
+        }) {
             let _ = std::fs::write(tpg.join("enable"), "0");
             for lun in subdirs(&tpg.join("lun")) {
                 for e in std::fs::read_dir(&lun).into_iter().flatten().flatten() {

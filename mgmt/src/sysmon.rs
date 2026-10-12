@@ -2,9 +2,10 @@
 // instead of fixed numbers, and a sampler every 2 s (CPU, RAM, the boot NIC, the image disk) whose numbers go to every
 // open web page over SSE ("res" on /api/events): a banner on every page while one stays above the threshold
 // (Settings, default 80%), the live numbers on the Benchmark page.
+use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::{LazyLock, Mutex};
+use std::sync::LazyLock;
 use std::time::{Duration, Instant};
 
 use crate::SharedState;
@@ -29,7 +30,10 @@ pub fn ram_share(pct: u64, each: u64, min: usize) -> usize {
 }
 
 fn rlimit_nofile() -> Option<libc::rlimit> {
-    let mut r = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
+    let mut r = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
     // SAFETY: getrlimit only writes the struct it is given.
     (unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut r) } == 0).then_some(r)
 }
@@ -54,7 +58,8 @@ pub fn raise_fd_limit() {
 // ---------- sampler ----------
 
 /// Every open page gets the samples ("res" events); a page that just opened gets the last one at once.
-pub static RES: LazyLock<tokio::sync::broadcast::Sender<String>> = LazyLock::new(|| tokio::sync::broadcast::channel(4).0);
+pub static RES: LazyLock<tokio::sync::broadcast::Sender<String>> =
+    LazyLock::new(|| tokio::sync::broadcast::channel(4).0);
 pub static LATEST: LazyLock<Mutex<String>> = LazyLock::new(Default::default);
 
 const EVERY: Duration = Duration::from_secs(2);
@@ -64,8 +69,19 @@ const STREAK: u32 = 3;
 /// cpu line of /proc/stat → (total, idle + iowait) jiffies.
 fn cpu_times() -> (u64, u64) {
     let s = std::fs::read_to_string("/proc/stat").unwrap_or_default();
-    let v: Vec<u64> = s.lines().next().unwrap_or("").split_whitespace().skip(1).take(8).filter_map(|x| x.parse().ok()).collect();
-    (v.iter().sum(), v.get(3).copied().unwrap_or(0) + v.get(4).copied().unwrap_or(0))
+    let v: Vec<u64> = s
+        .lines()
+        .next()
+        .unwrap_or("")
+        .split_whitespace()
+        .skip(1)
+        .take(8)
+        .filter_map(|x| x.parse().ok())
+        .collect();
+    (
+        v.iter().sum(),
+        v.get(3).copied().unwrap_or(0) + v.get(4).copied().unwrap_or(0),
+    )
 }
 
 /// The NIC clients boot from: Network page's interface, else the one with the default route.
@@ -74,33 +90,59 @@ fn boot_iface(configured: &str) -> Option<String> {
         return Some(configured.to_string());
     }
     let r = std::fs::read_to_string("/proc/net/route").ok()?;
-    r.lines().skip(1).map(|l| l.split_whitespace().collect::<Vec<_>>()).find(|f| f.get(1) == Some(&"00000000")).map(|f| f[0].to_string())
+    r.lines()
+        .skip(1)
+        .map(|l| l.split_whitespace().collect::<Vec<_>>())
+        .find(|f| f.get(1) == Some(&"00000000"))
+        .map(|f| f[0].to_string())
 }
 
 /// (received, sent) bytes of `iface` (/proc/net/dev).
 fn net_bytes(iface: &str) -> Option<(u64, u64)> {
     let s = std::fs::read_to_string("/proc/net/dev").ok()?;
-    let rest = s.lines().find_map(|l| l.trim_start().strip_prefix(iface)?.strip_prefix(':'))?;
-    let f: Vec<u64> = rest.split_whitespace().filter_map(|x| x.parse().ok()).collect();
+    let rest = s
+        .lines()
+        .find_map(|l| l.trim_start().strip_prefix(iface)?.strip_prefix(':'))?;
+    let f: Vec<u64> = rest
+        .split_whitespace()
+        .filter_map(|x| x.parse().ok())
+        .collect();
     Some((*f.first()?, *f.get(8)?))
 }
 
 /// Link speed in Mbit/s; None when the NIC doesn't say.
 fn link_mbit(iface: &str) -> Option<u64> {
-    std::fs::read_to_string(format!("/sys/class/net/{iface}/speed")).ok()?.trim().parse::<i64>().ok().filter(|s| *s > 0).map(|s| s as u64)
+    std::fs::read_to_string(format!("/sys/class/net/{iface}/speed"))
+        .ok()?
+        .trim()
+        .parse::<i64>()
+        .ok()
+        .filter(|s| *s > 0)
+        .map(|s| s as u64)
 }
 
 /// The hypervisor this server runs under (DMI), None on bare metal.
 fn hypervisor() -> Option<&'static str> {
     static H: LazyLock<Option<&'static str>> = LazyLock::new(|| {
-        let r = |f: &str| std::fs::read_to_string(format!("/sys/class/dmi/id/{f}")).unwrap_or_default();
+        let r =
+            |f: &str| std::fs::read_to_string(format!("/sys/class/dmi/id/{f}")).unwrap_or_default();
         let (vendor, product) = (r("sys_vendor"), r("product_name"));
         let s = format!("{vendor} {product}");
-        [("VMware", "VMware"), ("QEMU", "QEMU/KVM"), ("KVM", "QEMU/KVM"), ("VirtualBox", "VirtualBox"), ("innotek", "VirtualBox"), ("Xen", "Xen")]
-            .into_iter()
-            .find(|(k, _)| s.contains(k))
-            .map(|(_, h)| h)
-            .or_else(|| (vendor.contains("Microsoft") && product.contains("Virtual Machine")).then_some("Hyper-V"))
+        [
+            ("VMware", "VMware"),
+            ("QEMU", "QEMU/KVM"),
+            ("KVM", "QEMU/KVM"),
+            ("VirtualBox", "VirtualBox"),
+            ("innotek", "VirtualBox"),
+            ("Xen", "Xen"),
+        ]
+        .into_iter()
+        .find(|(k, _)| s.contains(k))
+        .map(|(_, h)| h)
+        .or_else(|| {
+            (vendor.contains("Microsoft") && product.contains("Virtual Machine"))
+                .then_some("Hyper-V")
+        })
     });
     *H
 }
@@ -109,9 +151,17 @@ fn hypervisor() -> Option<&'static str> {
 /// invisible from inside. Paravirtual drivers always are; emulated real chips (e1000…) are inside a VM. A real card
 /// passed through to the VM keeps its own driver and its true speed.
 fn virtual_nic(iface: &str) -> Option<String> {
-    let drv = std::fs::read_link(format!("/sys/class/net/{iface}/device/driver")).ok()?.file_name()?.to_string_lossy().into_owned();
-    let paravirtual = ["vmxnet3", "virtio_net", "hv_netvsc", "vif", "xen_netfront"].contains(&drv.as_str());
-    let emulated = ["e1000", "e1000e", "8139cp", "8139too", "pcnet32", "ne2k-pci"].contains(&drv.as_str());
+    let drv = std::fs::read_link(format!("/sys/class/net/{iface}/device/driver"))
+        .ok()?
+        .file_name()?
+        .to_string_lossy()
+        .into_owned();
+    let paravirtual =
+        ["vmxnet3", "virtio_net", "hv_netvsc", "vif", "xen_netfront"].contains(&drv.as_str());
+    let emulated = [
+        "e1000", "e1000e", "8139cp", "8139too", "pcnet32", "ne2k-pci",
+    ]
+    .contains(&drv.as_str());
     // No DMI (WSL, some clouds) → the paravirtual driver names its hypervisor.
     let by_driver = match drv.as_str() {
         "vmxnet3" => "VMware",
@@ -119,7 +169,8 @@ fn virtual_nic(iface: &str) -> Option<String> {
         "hv_netvsc" => "Hyper-V",
         _ => "Xen",
     };
-    (paravirtual || (emulated && hypervisor().is_some())).then(|| format!("{} {drv}", hypervisor().unwrap_or(by_driver)))
+    (paravirtual || (emulated && hypervisor().is_some()))
+        .then(|| format!("{} {drv}", hypervisor().unwrap_or(by_driver)))
 }
 
 /// Counters of the block device holding a path, so far.
@@ -136,11 +187,24 @@ fn disk_stat(path: &Path) -> Option<DiskStat> {
     use std::os::unix::fs::MetadataExt;
     let d = std::fs::metadata(path).ok()?.dev();
     let sys = format!("/sys/dev/block/{}:{}", libc::major(d), libc::minor(d));
-    let name = std::fs::read_link(&sys).ok()?.file_name()?.to_string_lossy().into_owned();
+    let name = std::fs::read_link(&sys)
+        .ok()?
+        .file_name()?
+        .to_string_lossy()
+        .into_owned();
     // stat: reads, merges, sectors read, ms, writes, merges, sectors written, ms, in flight, io_ticks (ms busy), …
     // Sectors are 512 bytes whatever the disk's own sector size.
-    let f: Vec<u64> = std::fs::read_to_string(format!("{sys}/stat")).ok()?.split_whitespace().filter_map(|x| x.parse().ok()).collect();
-    Some(DiskStat { name, busy_ms: *f.get(9)?, read: f.get(2)? * 512, written: f.get(6)? * 512 })
+    let f: Vec<u64> = std::fs::read_to_string(format!("{sys}/stat"))
+        .ok()?
+        .split_whitespace()
+        .filter_map(|x| x.parse().ok())
+        .collect();
+    Some(DiskStat {
+        name,
+        busy_ms: *f.get(9)?,
+        read: f.get(2)? * 512,
+        written: f.get(6)? * 512,
+    })
 }
 
 /// (used, total) bytes of the filesystem holding `path`, counted like `df` (used + available = what can be used).
@@ -158,11 +222,19 @@ fn space(path: &Path) -> Option<(u64, u64)> {
 
 /// The resources at or above `limit` % for STREAK samples in a row ("CPU 92%"), in the order given. `streak` carries
 /// each one's count from sample to sample; None (not measurable) never alerts.
-fn alerts(vals: &[(&'static str, Option<f64>)], limit: f64, streak: &mut HashMap<&'static str, u32>) -> Vec<String> {
+fn alerts(
+    vals: &[(&'static str, Option<f64>)],
+    limit: f64,
+    streak: &mut HashMap<&'static str, u32>,
+) -> Vec<String> {
     let mut out = Vec::new();
     for (name, v) in vals {
         let n = streak.entry(name).or_default();
-        *n = if v.is_some_and(|v| v >= limit) { *n + 1 } else { 0 };
+        *n = if v.is_some_and(|v| v >= limit) {
+            *n + 1
+        } else {
+            0
+        };
         if *n >= STREAK {
             out.push(format!("{name} {:.0}%", v.unwrap_or(0.0)));
         }
@@ -172,25 +244,38 @@ fn alerts(vals: &[(&'static str, Option<f64>)], limit: f64, streak: &mut HashMap
 
 /// Sample forever (mgmt's lifetime): push each to the open pages, log when an alert starts / ends.
 pub async fn run(st: SharedState) {
-    let (mut cpu0, mut net0, mut io0, mut t0) = (cpu_times(), None::<(u64, u64)>, None::<DiskStat>, Instant::now());
+    let (mut cpu0, mut net0, mut io0, mut t0) = (
+        cpu_times(),
+        None::<(u64, u64)>,
+        None::<DiskStat>,
+        Instant::now(),
+    );
     let cores = std::thread::available_parallelism().map_or(1, |n| n.get());
     let mut streak = HashMap::new();
     let mut shown: Vec<String> = Vec::new();
     loop {
         tokio::time::sleep(EVERY).await;
         let iface = boot_iface(&st.db.get_config("dhcp_iface", ""));
-        let limit = st.db.get_config("alert_pct", "80").parse::<f64>().unwrap_or(80.0);
+        let limit = st
+            .db
+            .get_config("alert_pct", "80")
+            .parse::<f64>()
+            .unwrap_or(80.0);
         let images = crate::images_dir();
         let secs = t0.elapsed().as_secs_f64().max(1e-3);
         t0 = Instant::now();
 
         let cpu1 = cpu_times();
         let total = cpu1.0.saturating_sub(cpu0.0);
-        let cpu = (total > 0).then(|| 100.0 * (total - cpu1.1.saturating_sub(cpu0.1).min(total)) as f64 / total as f64);
+        let cpu = (total > 0).then(|| {
+            100.0 * (total - cpu1.1.saturating_sub(cpu0.1).min(total)) as f64 / total as f64
+        });
         cpu0 = cpu1;
 
         // 1-minute load average: runnable tasks, next to the core count.
-        let load = std::fs::read_to_string("/proc/loadavg").ok().and_then(|s| s.split_whitespace().next()?.parse::<f64>().ok());
+        let load = std::fs::read_to_string("/proc/loadavg")
+            .ok()
+            .and_then(|s| s.split_whitespace().next()?.parse::<f64>().ok());
 
         // Used = what programs hold (total − available, like `free`'s "used"); page cache counted apart: the kernel
         // gives it back whenever programs need it.
@@ -201,19 +286,28 @@ pub async fn run(st: SharedState) {
 
         let net1 = iface.as_deref().and_then(net_bytes);
         let (rx, tx) = match (net0, net1) {
-            (Some(a), Some(b)) => (b.0.saturating_sub(a.0) as f64 / secs, b.1.saturating_sub(a.1) as f64 / secs),
+            (Some(a), Some(b)) => (
+                b.0.saturating_sub(a.0) as f64 / secs,
+                b.1.saturating_sub(a.1) as f64 / secs,
+            ),
             _ => (0.0, 0.0),
         };
         net0 = net1;
         // A virtual NIC's speed is made up → no % (and no alert) rather than a % of a number that isn't the limit.
         let virt = iface.as_deref().and_then(virtual_nic);
-        let link = iface.as_deref().and_then(link_mbit).filter(|_| virt.is_none());
+        let link = iface
+            .as_deref()
+            .and_then(link_mbit)
+            .filter(|_| virt.is_none());
         let net_pct = link.map(|l| 100.0 * rx.max(tx) * 8.0 / (l as f64 * 1e6));
 
         let disk = disk_stat(&images);
         let (busy, rd, wr) = match (&io0, &disk) {
             (Some(a), Some(b)) => (
-                Some((100.0 * b.busy_ms.saturating_sub(a.busy_ms) as f64 / (secs * 1000.0)).min(100.0)),
+                Some(
+                    (100.0 * b.busy_ms.saturating_sub(a.busy_ms) as f64 / (secs * 1000.0))
+                        .min(100.0),
+                ),
                 b.read.saturating_sub(a.read) as f64 / secs,
                 b.written.saturating_sub(a.written) as f64 / secs,
             ),
@@ -224,13 +318,30 @@ pub async fn run(st: SharedState) {
         let sp = space(&images);
         let used = sp.map(|(u, t)| 100.0 * u as f64 / t.max(1) as f64);
 
-        let now = alerts(&[("CPU", cpu), ("RAM", ram), ("Network", net_pct), ("Disk busy", busy), ("Disk space", used)], limit, &mut streak);
-        let names = |v: &[String]| v.iter().map(|a| a.split(' ').next().unwrap_or("").to_string()).collect::<Vec<_>>();
+        let now = alerts(
+            &[
+                ("CPU", cpu),
+                ("RAM", ram),
+                ("Network", net_pct),
+                ("Disk busy", busy),
+                ("Disk space", used),
+            ],
+            limit,
+            &mut streak,
+        );
+        let names = |v: &[String]| {
+            v.iter()
+                .map(|a| a.split(' ').next().unwrap_or("").to_string())
+                .collect::<Vec<_>>()
+        };
         if names(&now) != names(&shown) {
             if now.is_empty() {
                 tracing::info!("server resources back under {limit:.0}%");
             } else {
-                tracing::warn!("server resources at their limit: {} (threshold {limit:.0}%) — clients boot / load slower", now.join(", "));
+                tracing::warn!(
+                    "server resources at their limit: {} (threshold {limit:.0}%) — clients boot / load slower",
+                    now.join(", ")
+                );
             }
         }
         shown = now;
@@ -244,7 +355,7 @@ pub async fn run(st: SharedState) {
             "limit": limit, "alerts": shown,
         })
         .to_string();
-        *LATEST.lock().unwrap() = data.clone();
+        *LATEST.lock() = data.clone();
         let _ = RES.send(data); // Err = no page open
     }
 }
@@ -256,8 +367,13 @@ mod tests {
     #[test]
     fn alert_after_a_streak_and_cleared_below() {
         let mut s = HashMap::new();
-        let at = |cpu: f64, s: &mut HashMap<_, _>| alerts(&[("CPU", Some(cpu)), ("Network", None)], 80.0, s);
-        assert!(at(95.0, &mut s).is_empty() && at(85.0, &mut s).is_empty(), "a short burst is not an alert");
+        let at = |cpu: f64, s: &mut HashMap<_, _>| {
+            alerts(&[("CPU", Some(cpu)), ("Network", None)], 80.0, s)
+        };
+        assert!(
+            at(95.0, &mut s).is_empty() && at(85.0, &mut s).is_empty(),
+            "a short burst is not an alert"
+        );
         assert_eq!(at(80.0, &mut s), vec!["CPU 80%"]);
         assert!(at(79.0, &mut s).is_empty(), "back under → cleared at once");
         assert!(at(99.0, &mut s).is_empty(), "the streak starts again");
@@ -270,7 +386,10 @@ mod tests {
         assert!(total >= idle && total > 0);
         assert!(net_bytes("lo").is_some(), "loopback is in /proc/net/dev");
         assert!(space(Path::new("/")).is_some_and(|(used, total)| total > 0 && used <= total));
-        assert!(disk_stat(Path::new("/")).is_none_or(|d| !d.name.is_empty()), "a block device, or none (overlay / tmpfs root)");
+        assert!(
+            disk_stat(Path::new("/")).is_none_or(|d| !d.name.is_empty()),
+            "a block device, or none (overlay / tmpfs root)"
+        );
         assert!(ram_share(10, 1 << 20, 7) >= 7);
     }
 }

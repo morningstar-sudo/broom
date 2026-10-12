@@ -26,7 +26,8 @@ impl Ext4Read for Region {
                 .find(|(ls, _, len)| pos >= *ls && pos < ls + len)
                 .ok_or_else(|| format!("read beyond the volume at {pos}"))?;
             let n = ((ls + len - pos) as usize).min(dst.len() - done);
-            self.f.read_exact_at(&mut dst[done..done + n], off + (pos - ls))?;
+            self.f
+                .read_exact_at(&mut dst[done..done + n], off + (pos - ls))?;
             done += n;
         }
         Ok(())
@@ -35,7 +36,9 @@ impl Ext4Read for Region {
 
 /// (start, size) in bytes of every partition; a disk without a partition table = one volume.
 fn partitions(raw: &str) -> Result<Vec<(u64, u64)>, String> {
-    let size = std::fs::metadata(raw).map_err(|e| format!("{raw}: {e}"))?.len();
+    let size = std::fs::metadata(raw)
+        .map_err(|e| format!("{raw}: {e}"))?
+        .len();
     // Unreadable / no table → treat the whole image as one volume.
     Ok(match crate::disk::read(raw) {
         Ok(Some(t)) => t.parts.iter().map(|p| (p.start, p.size)).collect(),
@@ -75,7 +78,11 @@ impl V {
     }
     fn sections(&self) -> Vec<(&str, &V)> {
         match self {
-            V::Sec(items) => items.iter().filter(|(_, v)| matches!(v, V::Sec(_))).map(|(n, v)| (n.as_str(), v)).collect(),
+            V::Sec(items) => items
+                .iter()
+                .filter(|(_, v)| matches!(v, V::Sec(_)))
+                .map(|(n, v)| (n.as_str(), v))
+                .collect(),
             _ => Vec::new(),
         }
     }
@@ -93,9 +100,7 @@ fn parse_meta(text: &str) -> V {
     let mut it = text.chars().peekable();
     while let Some(&c) = it.peek() {
         match c {
-            '#' => {
-                while it.next().is_some_and(|c| c != '\n') {}
-            }
+            '#' => while it.next().is_some_and(|c| c != '\n') {},
             '"' => {
                 it.next();
                 let mut s = String::new();
@@ -204,7 +209,9 @@ fn lvm_pv(f: &File, start: u64) -> Option<(String, String)> {
     let mut head = [0u8; 2048];
     f.read_exact_at(&mut head, start).ok()?;
     // Label in one of the first 4 sectors: "LABELONE" … type "LVM2 001" at +24, pv header at +offset_xl.
-    let s = (0..4).map(|n| n * 512).find(|&s| &head[s..s + 8] == b"LABELONE" && &head[s + 24..s + 32] == b"LVM2 001")?;
+    let s = (0..4)
+        .map(|n| n * 512)
+        .find(|&s| &head[s..s + 8] == b"LABELONE" && &head[s + 24..s + 32] == b"LVM2 001")?;
     // Every offset below comes from the uploaded golden → bounds-checked (None = not a usable PV, never a panic).
     let get = |b: &[u8], o: usize, n: usize| b.get(o..o.checked_add(n)?).map(<[u8]>::to_vec);
     let le64 = |b: &[u8], o: usize| get(b, o, 8).map(|x| u64::from_le_bytes(x.try_into().unwrap()));
@@ -236,41 +243,78 @@ fn lvm_pv(f: &File, start: u64) -> Option<(String, String)> {
     // Circular buffer: text may wrap back to just after the 512-byte header.
     let mut text = vec![0u8; size];
     let first = size.min((mda_size - off) as usize);
-    f.read_exact_at(&mut text[..first], mda.checked_add(off)?).ok()?;
+    f.read_exact_at(&mut text[..first], mda.checked_add(off)?)
+        .ok()?;
     if first < size {
         f.read_exact_at(&mut text[first..], mda + 512).ok()?;
     }
-    Some((uuid, String::from_utf8_lossy(&text).trim_end_matches('\0').to_string()))
+    Some((
+        uuid,
+        String::from_utf8_lossy(&text)
+            .trim_end_matches('\0')
+            .to_string(),
+    ))
 }
 
 /// Linear LVs of every VG found → Regions. pvs: (uuid without dashes, partition start).
-fn lvm_volumes(raw: &str, pvs: &[(String, u64)], meta: &str) -> Result<Vec<(String, Region)>, String> {
+fn lvm_volumes(
+    raw: &str,
+    pvs: &[(String, u64)],
+    meta: &str,
+) -> Result<Vec<(String, Region)>, String> {
     let root = parse_meta(meta);
     let mut out = Vec::new();
     for (vg_name, vg) in root.sections() {
         let ext = vg.num("extent_size").ok_or("LVM: no extent_size")? as u64 * 512;
         // pv name in this VG ("pv0") → raw byte offset of its first extent.
         let mut pv_at = Vec::new();
-        for (pv_name, pv) in vg.get("physical_volumes").map(V::sections).unwrap_or_default() {
+        for (pv_name, pv) in vg
+            .get("physical_volumes")
+            .map(V::sections)
+            .unwrap_or_default()
+        {
             let id = pv.str("id").unwrap_or("").replace('-', "");
             if let Some((_, start)) = pvs.iter().find(|(u, _)| *u == id) {
-                pv_at.push((pv_name, start + pv.num("pe_start").unwrap_or(0) as u64 * 512));
+                pv_at.push((
+                    pv_name,
+                    start + pv.num("pe_start").unwrap_or(0) as u64 * 512,
+                ));
             }
         }
-        for (lv_name, lv) in vg.get("logical_volumes").map(V::sections).unwrap_or_default() {
+        for (lv_name, lv) in vg
+            .get("logical_volumes")
+            .map(V::sections)
+            .unwrap_or_default()
+        {
             let mut segs = Vec::new();
             for (_, seg) in lv.sections() {
-                let (Some(se), Some(ec)) = (seg.num("start_extent"), seg.num("extent_count")) else { continue };
+                let (Some(se), Some(ec)) = (seg.num("start_extent"), seg.num("extent_count"))
+                else {
+                    continue;
+                };
                 let stripes = match seg.get("stripes") {
-                    Some(V::List(l)) if seg.str("type") == Some("striped") && seg.num("stripe_count") == Some(1) => l,
-                    _ => return Err(format!("LVM: {vg_name}/{lv_name} is not a linear LV (only linear is supported)")),
+                    Some(V::List(l))
+                        if seg.str("type") == Some("striped")
+                            && seg.num("stripe_count") == Some(1) =>
+                    {
+                        l
+                    }
+                    _ => {
+                        return Err(format!(
+                            "LVM: {vg_name}/{lv_name} is not a linear LV (only linear is supported)"
+                        ));
+                    }
                 };
                 let (Some(V::Str(pv)), Some(V::Num(pe))) = (stripes.first(), stripes.get(1)) else {
                     return Err(format!("LVM: bad stripes in {vg_name}/{lv_name}"));
                 };
-                let base = pv_at.iter().find(|(n, _)| n == pv).map(|(_, b)| *b).ok_or(format!(
-                    "LVM: {vg_name}/{lv_name} uses PV {pv} not found on this disk"
-                ))?;
+                let base = pv_at
+                    .iter()
+                    .find(|(n, _)| n == pv)
+                    .map(|(_, b)| *b)
+                    .ok_or(format!(
+                        "LVM: {vg_name}/{lv_name} uses PV {pv} not found on this disk"
+                    ))?;
                 segs.push((se as u64 * ext, base + *pe as u64 * ext, ec as u64 * ext));
             }
             segs.sort();
@@ -293,7 +337,13 @@ fn volumes(raw: &str) -> Result<Vec<(String, Region)>, String> {
                 pvs.push((uuid, start));
                 meta = Some(text); // every PV carries the whole VG metadata; the last copy is fine
             }
-            None => out.push((format!("partition {}", i + 1), Region { f: f.try_clone().map_err(|e| e.to_string())?, segs: vec![(0, start, size)] })),
+            None => out.push((
+                format!("partition {}", i + 1),
+                Region {
+                    f: f.try_clone().map_err(|e| e.to_string())?,
+                    segs: vec![(0, start, size)],
+                },
+            )),
         }
     }
     if let Some(m) = meta {
@@ -309,23 +359,39 @@ fn ver_key(v: &str) -> Vec<(u64, String)> {
     let mut digit = false;
     for c in v.chars() {
         if !cur.is_empty() && c.is_ascii_digit() != digit {
-            out.push(if digit { (cur.parse().unwrap_or(0), String::new()) } else { (0, cur.clone()) });
+            out.push(if digit {
+                (cur.parse().unwrap_or(0), String::new())
+            } else {
+                (0, cur.clone())
+            });
             cur.clear();
         }
         digit = c.is_ascii_digit();
         cur.push(c);
     }
     if !cur.is_empty() {
-        out.push(if digit { (cur.parse().unwrap_or(0), String::new()) } else { (0, cur) });
+        out.push(if digit {
+            (cur.parse().unwrap_or(0), String::new())
+        } else {
+            (0, cur)
+        });
     }
     out
 }
 
 /// Kernel versions ("6.8.0-45-generic") with a vmlinuz-<v> in `dir`.
 fn kernels_in(fs: &Ext4, dir: &str) -> Vec<String> {
-    let Ok(rd) = fs.read_dir(dir) else { return Vec::new() };
+    let Ok(rd) = fs.read_dir(dir) else {
+        return Vec::new();
+    };
     rd.flatten()
-        .filter_map(|e| e.file_name().as_str().ok()?.strip_prefix("vmlinuz-").map(str::to_string))
+        .filter_map(|e| {
+            e.file_name()
+                .as_str()
+                .ok()?
+                .strip_prefix("vmlinuz-")
+                .map(str::to_string)
+        })
         .collect()
 }
 
@@ -352,7 +418,10 @@ pub fn extract_boot(raw: &str, dst: &str) -> Result<Boot, String> {
         }
         for dir in ["/", "/boot"] {
             for v in kernels_in(&fs, dir) {
-                if best.as_ref().is_none_or(|(_, _, b)| ver_key(&v) > ver_key(b)) {
+                if best
+                    .as_ref()
+                    .is_none_or(|(_, _, b)| ver_key(&v) > ver_key(b))
+                {
                     best = Some((fs.clone(), dir.to_string(), v));
                 }
             }
@@ -362,18 +431,32 @@ pub fn extract_boot(raw: &str, dst: &str) -> Result<Boot, String> {
         "golden has no vmlinuz-* on any ext4 filesystem ({}) — kernel installed? (xfs/btrfs are not supported)",
         seen.join(", ")
     ))?;
-    let root_uuid = root_uuid.ok_or(format!("no root filesystem (/etc/fstab) found ({})", seen.join(", ")))?;
+    let root_uuid = root_uuid.ok_or(format!(
+        "no root filesystem (/etc/fstab) found ({})",
+        seen.join(", ")
+    ))?;
     std::fs::create_dir_all(dst).map_err(|e| e.to_string())?;
     let dir = dir.trim_end_matches('/');
-    for (src, name) in [(format!("{dir}/vmlinuz-{kver}"), "vmlinuz"), (format!("{dir}/initrd.img-{kver}"), "initrd.img")] {
+    for (src, name) in [
+        (format!("{dir}/vmlinuz-{kver}"), "vmlinuz"),
+        (format!("{dir}/initrd.img-{kver}"), "initrd.img"),
+    ] {
         // Read whole into RAM: a size from the (untrusted) golden's inode is checked first — a real kernel/initrd is
         // tens of MB, a crafted one could ask for any amount.
-        let len = fs.metadata(src.as_str()).map_err(|e| format!("stat {src} in the golden: {e}"))?.len();
+        let len = fs
+            .metadata(src.as_str())
+            .map_err(|e| format!("stat {src} in the golden: {e}"))?
+            .len();
         if len > 512 << 20 {
-            return Err(format!("{src} in the golden is {len} bytes — not a kernel/initrd (max 512 MiB)"));
+            return Err(format!(
+                "{src} in the golden is {len} bytes — not a kernel/initrd (max 512 MiB)"
+            ));
         }
-        let data = fs.read(src.as_str()).map_err(|e| format!("read {src} from the golden: {e}"))?;
-        std::fs::write(format!("{dst}/{name}"), data).map_err(|e| format!("write {dst}/{name}: {e}"))?;
+        let data = fs
+            .read(src.as_str())
+            .map_err(|e| format!("read {src} from the golden: {e}"))?;
+        std::fs::write(format!("{dst}/{name}"), data)
+            .map_err(|e| format!("write {dst}/{name}: {e}"))?;
     }
     Ok(Boot { kver, root_uuid })
 }
@@ -431,11 +514,23 @@ mod tests {
         let v = parse_meta(m);
         let vg = v.get("ubuntu-vg").unwrap();
         assert_eq!(vg.num("extent_size"), Some(8192));
-        let lv = vg.get("logical_volumes").unwrap().get("ubuntu-lv").unwrap().get("segment1").unwrap();
-        assert_eq!(lv.get("stripes"), Some(&V::List(vec![V::Str("pv0".into()), V::Num(5)])));
+        let lv = vg
+            .get("logical_volumes")
+            .unwrap()
+            .get("ubuntu-lv")
+            .unwrap()
+            .get("segment1")
+            .unwrap();
+        assert_eq!(
+            lv.get("stripes"),
+            Some(&V::List(vec![V::Str("pv0".into()), V::Num(5)]))
+        );
         // pv "AbCd" at raw offset 1 MiB → LV starts at 1 MiB + 2048*512 + 5*8192*512.
         let segs = lvm_volumes("/dev/null", &[("AbCd".into(), 1 << 20)], m).unwrap();
-        assert_eq!(segs[0].1.segs, vec![(0, (1 << 20) + 2048 * 512 + 5 * 8192 * 512, 10 * 8192 * 512)]);
+        assert_eq!(
+            segs[0].1.segs,
+            vec![(0, (1 << 20) + 2048 * 512 + 5 * 8192 * 512, 10 * 8192 * 512)]
+        );
     }
 
     /// Real ext4 in a GPT partition (mkfs.ext4 -d, no root needed): kernel + initrd + root UUID.
@@ -456,7 +551,13 @@ mod tests {
         }
         let fsimg = d.join("fs.img");
         let ok = Command::new("mkfs.ext4")
-            .args(["-q", "-F", "-U", "11111111-2222-3333-4444-555555555555", "-d"])
+            .args([
+                "-q",
+                "-F",
+                "-U",
+                "11111111-2222-3333-4444-555555555555",
+                "-d",
+            ])
             .arg(&root)
             .arg(&fsimg)
             .arg("16M")
@@ -471,11 +572,21 @@ mod tests {
         let disk = d.join("disk.img");
         let f = File::create(&disk).unwrap();
         f.set_len(20 << 20).unwrap();
-        let mut sf = Command::new("sfdisk").args(["-q", "--no-reread"]).arg(&disk).stdin(std::process::Stdio::piped()).spawn().unwrap();
+        let mut sf = Command::new("sfdisk")
+            .args(["-q", "--no-reread"])
+            .arg(&disk)
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
         use std::io::Write;
-        sf.stdin.take().unwrap().write_all(b"label: gpt\nstart=2048, size=32768, type=L\n").unwrap();
+        sf.stdin
+            .take()
+            .unwrap()
+            .write_all(b"label: gpt\nstart=2048, size=32768, type=L\n")
+            .unwrap();
         assert!(sf.wait().unwrap().success());
-        f.write_all_at(&std::fs::read(&fsimg).unwrap(), 1 << 20).unwrap();
+        f.write_all_at(&std::fs::read(&fsimg).unwrap(), 1 << 20)
+            .unwrap();
 
         let out = d.join("out");
         let b = extract_boot(disk.to_str().unwrap(), out.to_str().unwrap()).unwrap();
@@ -493,7 +604,11 @@ mod tests {
     fn lvm_live() {
         let sh = |c: &str| {
             let o = Command::new("sh").args(["-c", c]).output().unwrap();
-            assert!(o.status.success(), "{c}: {}", String::from_utf8_lossy(&o.stderr));
+            assert!(
+                o.status.success(),
+                "{c}: {}",
+                String::from_utf8_lossy(&o.stderr)
+            );
             String::from_utf8_lossy(&o.stdout).trim().to_string()
         };
         let d = std::env::temp_dir().join("broom_lvm_live");
@@ -509,18 +624,31 @@ mod tests {
         let disk = d.join("disk.img");
         let ds = disk.display();
         // Kernels live at the top of the /boot partition (as in the real layout: /boot/vmlinuz → /vmlinuz there).
-        sh(&format!("mv {0}/boot/boot/* {0}/boot/ 2>/dev/null; truncate -s 200M {ds}", d.display()));
-        sh(&format!("printf 'label: gpt\\nsize=64MiB, type=L\\ntype=E6D6D379-F507-44C2-A23C-238F2A3DF928\\n' | sfdisk -q {ds}"));
+        sh(&format!(
+            "mv {0}/boot/boot/* {0}/boot/ 2>/dev/null; truncate -s 200M {ds}",
+            d.display()
+        ));
+        sh(&format!(
+            "printf 'label: gpt\\nsize=64MiB, type=L\\ntype=E6D6D379-F507-44C2-A23C-238F2A3DF928\\n' | sfdisk -q {ds}"
+        ));
         let lo = sh(&format!("losetup -P --show -f {ds}"));
         let lvm = format!("--devices {lo}p2");
-        sh(&format!("pvcreate -q {lvm} {lo}p2 && vgcreate -q {lvm} brtest {lo}p2 && lvcreate -q {lvm} -L 64M -n root brtest"));
-        sh(&format!("mkfs.ext4 -q -U 99999999-8888-7777-6666-555555555555 -d {}/root /dev/brtest/root", d.display()));
+        sh(&format!(
+            "pvcreate -q {lvm} {lo}p2 && vgcreate -q {lvm} brtest {lo}p2 && lvcreate -q {lvm} -L 64M -n root brtest"
+        ));
+        sh(&format!(
+            "mkfs.ext4 -q -U 99999999-8888-7777-6666-555555555555 -d {}/root /dev/brtest/root",
+            d.display()
+        ));
         sh(&format!("mkfs.ext4 -q -d {}/boot {lo}p1", d.display()));
         sh(&format!("vgchange -q {lvm} -an brtest && losetup -d {lo}"));
 
         let out = d.join("out");
         let b = extract_boot(disk.to_str().unwrap(), out.to_str().unwrap()).unwrap();
-        assert_eq!((b.kver.as_str(), b.root_uuid.as_str()), ("6.8.0-45-generic", "99999999-8888-7777-6666-555555555555"));
+        assert_eq!(
+            (b.kver.as_str(), b.root_uuid.as_str()),
+            ("6.8.0-45-generic", "99999999-8888-7777-6666-555555555555")
+        );
         assert_eq!(std::fs::read(out.join("initrd.img")).unwrap(), b"INITRD");
         let _ = std::fs::remove_dir_all(&d);
     }

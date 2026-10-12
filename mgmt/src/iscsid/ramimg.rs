@@ -8,8 +8,9 @@
 // part compression saved is given back. So a load either is refused up front or finishes — RAM taken meanwhile by
 // another process can't make it fail halfway (a failed allocation would abort the whole process, and with it every
 // client it serves). Check + claim run under a lock shared by every broom process (mgmt + iSCSI daemon).
+use parking_lot::Mutex;
 use std::collections::{HashMap, VecDeque};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 pub(crate) const BLOCK: usize = 16 << 10;
 /// Blocks read from the file per worker job while loading (16 MB).
@@ -27,7 +28,8 @@ struct Arena {
     len: usize,
 }
 
-// SAFETY: written only by the loading thread before the image is shared; afterwards only read.
+// SAFETY: an owned buffer like a Vec: every write takes &mut self and reads borrow &self, so the usual borrow rules keep
+// them apart across threads too.
 unsafe impl Send for Arena {}
 unsafe impl Sync for Arena {}
 
@@ -40,17 +42,35 @@ impl Arena {
         let len = page_up(len.max(1));
         // SAFETY: a fresh private anonymous mapping, no existing memory involved.
         let ptr = unsafe {
-            libc::mmap(std::ptr::null_mut(), len, libc::PROT_READ | libc::PROT_WRITE, libc::MAP_PRIVATE | libc::MAP_ANONYMOUS | libc::MAP_POPULATE, -1, 0)
+            libc::mmap(
+                std::ptr::null_mut(),
+                len,
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_PRIVATE | libc::MAP_ANONYMOUS | libc::MAP_POPULATE,
+                -1,
+                0,
+            )
         };
         if ptr == libc::MAP_FAILED {
-            return Err(format!("reserve {:.1} GB of RAM: {}", len as f64 / 1e9, std::io::Error::last_os_error()));
+            return Err(format!(
+                "reserve {:.1} GB of RAM: {}",
+                len as f64 / 1e9,
+                std::io::Error::last_os_error()
+            ));
         }
         // Locked: never pushed to swap (a golden read from swap is slower than from its disk). Best effort.
         // SAFETY: the range was just mapped.
         if unsafe { libc::mlock(ptr, len) } != 0 {
-            tracing::warn!("RAM copy: mlock {:.1} GB: {} (may be swapped out under pressure)", len as f64 / 1e9, std::io::Error::last_os_error());
+            tracing::warn!(
+                "RAM copy: mlock {:.1} GB: {} (may be swapped out under pressure)",
+                len as f64 / 1e9,
+                std::io::Error::last_os_error()
+            );
         }
-        Ok(Arena { ptr: ptr.cast(), len })
+        Ok(Arena {
+            ptr: ptr.cast(),
+            len,
+        })
     }
 
     /// Give back everything past `used`.
@@ -110,7 +130,11 @@ fn data_blocks(f: &std::fs::File, size: u64) -> u64 {
         }
         // SAFETY: as above.
         let hole = unsafe { libc::lseek(fd, data, libc::SEEK_HOLE) };
-        let end = if hole < 0 { size } else { (hole as u64).min(size) };
+        let end = if hole < 0 {
+            size
+        } else {
+            (hole as u64).min(size)
+        };
         let (first, last) = (data as u64 / b, end.div_ceil(b));
         // Blocks [first, last), minus one already counted when this extent starts in the previous extent's last block.
         n += last - first - u64::from(pos > 0 && first < pos.div_ceil(b));
@@ -135,7 +159,10 @@ impl RamImage {
         let f = std::fs::File::open(path).map_err(|e| format!("{path}: {e}"))?;
         let size = f.metadata().map_err(|e| format!("{path}: {e}"))?.len();
         let blocks = data_blocks(&f, size);
-        Self::load_with(path, size, blocks, reserve, |off, buf| f.read_exact_at(buf, off).map_err(|e| format!("{path} @{off}: {e}")))
+        Self::load_with(path, size, blocks, reserve, |off, buf| {
+            f.read_exact_at(buf, off)
+                .map_err(|e| format!("{path} @{off}: {e}"))
+        })
     }
 
     /// Same from any source of `size` bytes, `blocks` of them (16 KB) possibly holding data.
@@ -151,7 +178,11 @@ impl RamImage {
 
         let mut arena = {
             use std::os::fd::AsRawFd;
-            let lock = std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(CLAIM_LOCK);
+            let lock = std::fs::OpenOptions::new()
+                .create(true)
+                .truncate(false)
+                .write(true)
+                .open(CLAIM_LOCK);
             // SAFETY: flock on a valid fd; released when `lock` is dropped at the end of this block.
             if let Ok(l) = &lock {
                 unsafe { libc::flock(l.as_raw_fd(), libc::LOCK_EX) };
@@ -182,7 +213,13 @@ impl RamImage {
                 read(off, &mut buf)?;
                 let mut z = zstd::bulk::Compressor::new(3).map_err(|e| format!("zstd: {e}"))?;
                 buf.chunks(BLOCK)
-                    .map(|b| if b.iter().all(|&x| x == 0) { Ok(Vec::new()) } else { z.compress(b).map_err(|e| format!("zstd: {e}")) })
+                    .map(|b| {
+                        if b.iter().all(|&x| x == 0) {
+                            Ok(Vec::new())
+                        } else {
+                            z.compress(b).map_err(|e| format!("zstd: {e}"))
+                        }
+                    })
                     .collect::<Result<Vec<_>, String>>()
             })?;
             for c in parts.into_iter().flatten() {
@@ -201,7 +238,12 @@ impl RamImage {
             used as f64 / 1e9,
             worst as f64 / 1e9
         );
-        Ok(RamImage { arena, index, size, cache: Mutex::new(Default::default()) })
+        Ok(RamImage {
+            arena,
+            index,
+            size,
+            cache: Mutex::new(Default::default()),
+        })
     }
 
     pub fn size(&self) -> u64 {
@@ -210,7 +252,10 @@ impl RamImage {
 
     /// Bytes at `off` (must lie inside the image).
     pub fn read_at(&self, mut off: u64, mut buf: &mut [u8]) -> Result<(), String> {
-        if off.checked_add(buf.len() as u64).is_none_or(|end| end > self.size) {
+        if off
+            .checked_add(buf.len() as u64)
+            .is_none_or(|end| end > self.size)
+        {
             return Err("read past the end of the image".into());
         }
         while !buf.is_empty() {
@@ -228,7 +273,7 @@ impl RamImage {
     }
 
     fn block(&self, i: usize) -> Result<Arc<[u8]>, String> {
-        if let Some(b) = self.cache.lock().unwrap().0.get(&(i as u32)) {
+        if let Some(b) = self.cache.lock().0.get(&(i as u32)) {
             return Ok(b.clone());
         }
         let (off, len) = self.index[i];
@@ -246,7 +291,7 @@ impl RamImage {
             })
             .map_err(|e| format!("zstd: {e}"))?
             .into();
-        let mut c = self.cache.lock().unwrap();
+        let mut c = self.cache.lock();
         if c.0.insert(i as u32, b.clone()).is_none() {
             c.1.push_back(i as u32);
             if c.1.len() > CACHE_BLOCKS {
@@ -276,9 +321,17 @@ mod tests {
         f.write_all_at(b"tail", size - 4).unwrap();
         let img = RamImage::load(p.to_str().unwrap(), 0).unwrap();
         assert_eq!(img.size(), size);
-        assert!(img.index[0].1 == 0 && img.index[1].1 > 0, "zero block not stored");
+        assert!(
+            img.index[0].1 == 0 && img.index[1].1 > 0,
+            "zero block not stored"
+        );
         let file = std::fs::read(&p).unwrap();
-        for (off, len) in [(0, 512), (BLOCK as u64 * 2 - 300, 50_000), (size - 1000, 1000), (0, size as usize)] {
+        for (off, len) in [
+            (0, 512),
+            (BLOCK as u64 * 2 - 300, 50_000),
+            (size - 1000, 1000),
+            (0, size as usize),
+        ] {
             let mut b = vec![1u8; len];
             img.read_at(off, &mut b).unwrap();
             assert_eq!(b, &file[off as usize..off as usize + len], "@{off}+{len}");
@@ -297,12 +350,19 @@ mod tests {
         f.write_all_at(&[1u8; 8192], 0).unwrap();
         f.write_all_at(&[2u8; 100], 512 << 20).unwrap();
         let blocks = data_blocks(&f, GB);
-        assert!((2..=4).contains(&blocks), "{blocks} blocks (fs block size may round extents up)");
+        assert!(
+            (2..=4).contains(&blocks),
+            "{blocks} blocks (fs block size may round extents up)"
+        );
         // Far more than any test box has: refused up front, nothing claimed.
         let e = RamImage::load(p.to_str().unwrap(), 1 << 60).err().unwrap();
         assert!(e.contains("not enough RAM"), "{e}");
         let img = RamImage::load(p.to_str().unwrap(), 0).unwrap();
-        assert!(img.arena.len <= 64 << 10, "tail given back: {} bytes kept", img.arena.len);
+        assert!(
+            img.arena.len <= 64 << 10,
+            "tail given back: {} bytes kept",
+            img.arena.len
+        );
         let mut b = [0u8; 4];
         img.read_at((512 << 20) + 98, &mut b).unwrap();
         assert_eq!(b, [2, 2, 0, 0]);
@@ -312,7 +372,9 @@ mod tests {
     #[test]
     fn cache_is_bounded() {
         let p = std::env::temp_dir().join("broom_test_ramimg_cache.img");
-        let data: Vec<u8> = (0..CACHE_BLOCKS + 10).flat_map(|i| [i as u8 | 1; BLOCK]).collect();
+        let data: Vec<u8> = (0..CACHE_BLOCKS + 10)
+            .flat_map(|i| [i as u8 | 1; BLOCK])
+            .collect();
         std::fs::write(&p, &data).unwrap();
         let img = RamImage::load(p.to_str().unwrap(), 0).unwrap();
         let mut b = [0u8; 1];
@@ -320,7 +382,7 @@ mod tests {
             img.read_at((i * BLOCK) as u64, &mut b).unwrap();
             assert_eq!(b[0], i as u8 | 1);
         }
-        let c = img.cache.lock().unwrap();
+        let c = img.cache.lock();
         assert_eq!((c.0.len(), c.1.len()), (CACHE_BLOCKS, CACHE_BLOCKS));
         let _ = std::fs::remove_file(p);
     }

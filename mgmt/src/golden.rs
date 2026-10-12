@@ -26,11 +26,17 @@ pub(crate) fn unzip(zip_path: &Path, dir: &Path) -> Result<(), String> {
         return Err(format!("zip has {} entries (max 200000)", z.len()));
     }
     let free = crate::publish::free_bytes(dir);
-    let budget = if free == 0 { MAX_GOLDEN } else { MAX_GOLDEN.min(free.saturating_sub(1 << 30)) };
+    let budget = if free == 0 {
+        MAX_GOLDEN
+    } else {
+        MAX_GOLDEN.min(free.saturating_sub(1 << 30))
+    };
     let mut written = 0u64;
     for i in 0..z.len() {
         let mut entry = z.by_index(i).map_err(|e| format!("zip entry {i}: {e}"))?;
-        let Some(rel) = entry.enclosed_name() else { continue };
+        let Some(rel) = entry.enclosed_name() else {
+            continue;
+        };
         let out = dir.join(rel);
         if entry.is_dir() {
             std::fs::create_dir_all(&out).map_err(|e| e.to_string())?;
@@ -65,19 +71,29 @@ fn vmdk_refs_safe(vmdk: &Path) -> Result<(), String> {
     let mut refs: Vec<&str> = Vec::new();
     for line in head.lines() {
         let t = line.trim_start();
-        if t.starts_with("RW") || t.starts_with("RDONLY") || t.starts_with("NOACCESS") {
-            if let Some(q) = t.split('"').nth(1) {
-                refs.push(q);
-            }
+        if (t.starts_with("RW") || t.starts_with("RDONLY") || t.starts_with("NOACCESS"))
+            && let Some(q) = t.split('"').nth(1)
+        {
+            refs.push(q);
         }
     }
-    if let Some(h) = head.split("parentFileNameHint=\"").nth(1).and_then(|s| s.split('"').next()) {
+    if let Some(h) = head
+        .split("parentFileNameHint=\"")
+        .nth(1)
+        .and_then(|s| s.split('"').next())
+    {
         refs.push(h);
     }
     for r in refs {
-        let bad = r.is_empty() || r.contains('/') || r.contains('\\') || r.contains("..") || r.starts_with(' ');
+        let bad = r.is_empty()
+            || r.contains('/')
+            || r.contains('\\')
+            || r.contains("..")
+            || r.starts_with(' ');
         if bad {
-            return Err(format!("VMDK references an unsafe path {r:?} — export the VM as a single monolithic vmdk"));
+            return Err(format!(
+                "VMDK references an unsafe path {r:?} — export the VM as a single monolithic vmdk"
+            ));
         }
     }
     Ok(())
@@ -92,8 +108,14 @@ pub fn prepare_golden(dir: &Path, dest: &Path) -> Result<(), String> {
     let _ = std::fs::remove_file(&tmp);
     // Flushed before the rename: after a power loss image.img is the whole new golden or still the old one.
     let out = golden_from(dir, &tmp)
-        .and_then(|()| std::fs::File::open(&tmp).and_then(|f| f.sync_all()).map_err(|e| format!("sync {}: {e}", tmp.display())))
-        .and_then(|()| std::fs::rename(&tmp, dest).map_err(|e| format!("rename {}: {e}", tmp.display())));
+        .and_then(|()| {
+            std::fs::File::open(&tmp)
+                .and_then(|f| f.sync_all())
+                .map_err(|e| format!("sync {}: {e}", tmp.display()))
+        })
+        .and_then(|()| {
+            std::fs::rename(&tmp, dest).map_err(|e| format!("rename {}: {e}", tmp.display()))
+        });
     if out.is_err() {
         let _ = std::fs::remove_file(&tmp);
     }
@@ -102,7 +124,9 @@ pub fn prepare_golden(dir: &Path, dest: &Path) -> Result<(), String> {
 }
 
 fn ext(p: &Path) -> String {
-    p.extension().map(|s| s.to_string_lossy().to_ascii_lowercase()).unwrap_or_default()
+    p.extension()
+        .map(|s| s.to_string_lossy().to_ascii_lowercase())
+        .unwrap_or_default()
 }
 
 fn golden_from(dir: &Path, dest: &Path) -> Result<(), String> {
@@ -122,14 +146,23 @@ fn golden_from(dir: &Path, dest: &Path) -> Result<(), String> {
     // the real OS is on nvme0:0).
     let vmx = files.iter().find(|p| ext(p) == "vmx");
     let chosen_vmdk = if let Some(vmx) = vmx {
-        let txt = std::fs::read_to_string(vmx).map_err(|e| format!("read {}: {e}", vmx.display()))?;
-        let disks: Vec<_> = vmx_disks(&txt).into_iter().map(|d| vmx.with_file_name(d)).filter(|p| p.exists()).collect();
+        let txt =
+            std::fs::read_to_string(vmx).map_err(|e| format!("read {}: {e}", vmx.display()))?;
+        let disks: Vec<_> = vmx_disks(&txt)
+            .into_iter()
+            .map(|d| vmx.with_file_name(d))
+            .filter(|p| p.exists())
+            .collect();
         match disks.len() {
             0 if vmdks.len() == 1 => Some(vmdks.remove(0)),
             0 => pick_vmdk(&vmdks), // .vmx named no on-disk vmdk (odd) → best-effort
             1 => Some(disks[0].clone()),
             _ => {
-                let names = disks.iter().filter_map(|p| p.file_name().map(|n| n.to_string_lossy().into_owned())).collect::<Vec<_>>().join(", ");
+                let names = disks
+                    .iter()
+                    .filter_map(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
+                    .collect::<Vec<_>>()
+                    .join(", ");
                 return Err(format!(
                     "the VM has {} disks ({names}). broom serves ONE OS disk — in the VM settings remove the extra disk(s), \
                      keep only the disk Ubuntu/Windows boots from, then upload again.",
@@ -150,10 +183,17 @@ fn golden_from(dir: &Path, dest: &Path) -> Result<(), String> {
         }
         let sz = crate::vmdk::virtual_size(&v).map_err(|e| format!("{}: {e}", v.display()))?;
         if sz > MAX_GOLDEN {
-            return Err(format!("golden virtual size {sz} bytes is above the {MAX_GOLDEN} limit"));
+            return Err(format!(
+                "golden virtual size {sz} bytes is above the {MAX_GOLDEN} limit"
+            ));
         }
         // The raw holds about the data stored in the vmdk files (zero grains stay holes).
-        let data: u64 = walk(dir).iter().filter(|p| ext(p) == "vmdk").filter_map(|p| std::fs::metadata(p).ok()).map(|m| m.len()).sum();
+        let data: u64 = walk(dir)
+            .iter()
+            .filter(|p| ext(p) == "vmdk")
+            .filter_map(|p| std::fs::metadata(p).ok())
+            .map(|m| m.len())
+            .sum();
         crate::publish::need_space(dest.parent().unwrap_or(dir), data, "converting the vmdk")?;
         tracing::info!("golden: converting {}", v.display());
         crate::vmdk::to_raw(&v, dest)
@@ -173,7 +213,9 @@ fn golden_from(dir: &Path, dest: &Path) -> Result<(), String> {
 fn vmdk_head(p: &Path) -> String {
     use std::io::Read;
     let mut buf = [0u8; 8192];
-    let n = std::fs::File::open(p).and_then(|mut f| f.read(&mut buf)).unwrap_or(0);
+    let n = std::fs::File::open(p)
+        .and_then(|mut f| f.read(&mut buf))
+        .unwrap_or(0);
     String::from_utf8_lossy(&buf[..n]).to_string()
 }
 
@@ -211,14 +253,27 @@ fn pick_vmdk(vmdks: &[std::path::PathBuf]) -> Option<std::path::PathBuf> {
         .iter()
         .filter_map(|p| {
             let h = vmdk_head(p);
-            let v = h.split("parentFileNameHint=\"").nth(1)?.split('"').next()?.to_string();
-            Some(v.rsplit(['\\', '/']).next().unwrap_or(&v).to_ascii_lowercase())
+            let v = h
+                .split("parentFileNameHint=\"")
+                .nth(1)?
+                .split('"')
+                .next()?
+                .to_string();
+            Some(
+                v.rsplit(['\\', '/'])
+                    .next()
+                    .unwrap_or(&v)
+                    .to_ascii_lowercase(),
+            )
         })
         .collect();
     let mut top: Vec<_> = desc
         .into_iter()
         .filter(|p| {
-            let n = p.file_name().map(|n| n.to_string_lossy().to_ascii_lowercase()).unwrap_or_default();
+            let n = p
+                .file_name()
+                .map(|n| n.to_string_lossy().to_ascii_lowercase())
+                .unwrap_or_default();
             !parents.contains(&n)
         })
         .cloned()
@@ -255,7 +310,8 @@ mod tests {
         std::fs::create_dir_all(&d).unwrap();
         let zp = d.join("vm.zip");
         let mut w = zip::ZipWriter::new(std::fs::File::create(&zp).unwrap());
-        let opt = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+        let opt = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Stored);
         w.start_file("VM/disk.vmdk", opt).unwrap();
         w.write_all(b"# Disk DescriptorFile").unwrap();
         w.start_file("../escape.txt", opt).unwrap();
@@ -263,7 +319,10 @@ mod tests {
         w.finish().unwrap();
         let out = d.join("out");
         super::unzip(&zp, &out).unwrap();
-        assert_eq!(std::fs::read(out.join("VM/disk.vmdk")).unwrap(), b"# Disk DescriptorFile");
+        assert_eq!(
+            std::fs::read(out.join("VM/disk.vmdk")).unwrap(),
+            b"# Disk DescriptorFile"
+        );
         assert!(!d.join("escape.txt").exists());
         let _ = std::fs::remove_dir_all(&d);
     }
@@ -284,7 +343,8 @@ mod tests {
 
         std::fs::create_dir_all(&up).unwrap();
         let mut w = zip::ZipWriter::new(std::fs::File::create(up.join("vm.zip")).unwrap());
-        w.start_file("VM/disk.raw", zip::write::SimpleFileOptions::default()).unwrap();
+        w.start_file("VM/disk.raw", zip::write::SimpleFileOptions::default())
+            .unwrap();
         w.write_all(b"ZIPPED").unwrap();
         w.finish().unwrap();
         super::prepare_golden(&up, &dest).unwrap();
@@ -293,7 +353,11 @@ mod tests {
 
         std::fs::create_dir_all(&up).unwrap();
         std::fs::write(up.join("notes.txt"), b"x").unwrap();
-        assert!(super::prepare_golden(&up, &dest).unwrap_err().contains("no .vmdk"));
+        assert!(
+            super::prepare_golden(&up, &dest)
+                .unwrap_err()
+                .contains("no .vmdk")
+        );
         assert_eq!(std::fs::read(&dest).unwrap(), b"ZIPPED"); // failed upload leaves the current golden alone
         assert!(!d.join("image.img.new").exists());
         let _ = std::fs::remove_dir_all(&d);
@@ -312,7 +376,10 @@ mod tests {
             std::fs::write(&p, body).unwrap();
             p
         };
-        let ok = write("good.vmdk", "# Disk DescriptorFile\ncreateType=\"twoGbMaxExtentSparse\"\nRW 4192256 SPARSE \"good-s001.vmdk\"\n");
+        let ok = write(
+            "good.vmdk",
+            "# Disk DescriptorFile\ncreateType=\"twoGbMaxExtentSparse\"\nRW 4192256 SPARSE \"good-s001.vmdk\"\n",
+        );
         assert!(super::vmdk_refs_safe(&ok).is_ok());
         // monolithic (binary magic, not a descriptor) → passes (no extent lines)
         let mono = write("mono.vmdk", "KDMV\x01\x00\x00\x00 binary sparse header");
@@ -346,8 +413,16 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         let w = |n: &str, parent: &str| {
-            let hint = if parent.is_empty() { String::new() } else { format!("parentFileNameHint=\"C:\\VMs\\win\\{parent}\"\n") };
-            std::fs::write(d.join(n), format!("# Disk DescriptorFile\ncreateType=\"twoGbMaxExtentSparse\"\n{hint}")).unwrap();
+            let hint = if parent.is_empty() {
+                String::new()
+            } else {
+                format!("parentFileNameHint=\"C:\\VMs\\win\\{parent}\"\n")
+            };
+            std::fs::write(
+                d.join(n),
+                format!("# Disk DescriptorFile\ncreateType=\"twoGbMaxExtentSparse\"\n{hint}"),
+            )
+            .unwrap();
             d.join(n)
         };
         let v = vec![
@@ -369,7 +444,11 @@ mod tests {
         let dir = std::env::temp_dir();
         // descriptor = text.
         let d = dir.join("broom_test_desc.vmdk");
-        std::fs::write(&d, "# Disk DescriptorFile\nversion=1\ncreateType=\"twoGbMaxExtentSparse\"\n").unwrap();
+        std::fs::write(
+            &d,
+            "# Disk DescriptorFile\nversion=1\ncreateType=\"twoGbMaxExtentSparse\"\n",
+        )
+        .unwrap();
         assert!(is_vmdk_descriptor(&d));
         // extent = binary (magic KDMV) → not a descriptor.
         let e = dir.join("broom_test_ext.vmdk");

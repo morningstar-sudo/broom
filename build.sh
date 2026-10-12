@@ -76,7 +76,7 @@ if [ "$live" = 1 ]; then
   # Built as the user (rustup), only the test binary runs as root. They mount a scratch NTFS image (ntfs-3g),
   # make a loop/LVM VG "brtest" → run on a build box / WSL, not a busy server.
   echo "== live tests (root: NTFS, ping, LVM)"
-  tbin=$(cargo test --no-run 2>&1 | sed -n 's/.*Executable .*(\(.*\)).*/\1/p' | head -1)
+  tbin=$(cargo test --bins --no-run 2>&1 | sed -n 's/.*Executable .*(\(.*\)).*/\1/p' | head -1)
   [ -n "$tbin" ] || { echo "live tests: test binary not found" >&2; exit 1; }
   sudo "$tbin" --ignored live
 fi

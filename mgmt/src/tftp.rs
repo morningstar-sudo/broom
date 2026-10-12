@@ -27,7 +27,9 @@ pub async fn serve(sock: UdpSocket, server: Ipv4Addr, iface: String) {
     let slots = std::sync::Arc::new(tokio::sync::Semaphore::new(max));
     let mut buf = [0u8; 1500];
     loop {
-        let Ok((n, peer)) = sock.recv_from(&mut buf).await else { continue };
+        let Ok((n, peer)) = sock.recv_from(&mut buf).await else {
+            continue;
+        };
         // Only RRQ starts a transfer; ignore stray packets on :69 before spawning a task + socket.
         if op(&buf[..n]) != RRQ {
             continue;
@@ -49,12 +51,18 @@ pub async fn serve(sock: UdpSocket, server: Ipv4Addr, iface: String) {
 }
 
 fn op(b: &[u8]) -> u16 {
-    if b.len() < 2 { 0 } else { u16::from_be_bytes([b[0], b[1]]) }
+    if b.len() < 2 {
+        0
+    } else {
+        u16::from_be_bytes([b[0], b[1]])
+    }
 }
 
 /// RRQ body "file\0mode\0[opt\0value\0]*" → (file, [(opt lowercase, value)]).
 fn parse_rrq(b: &[u8]) -> Option<(String, Vec<(String, String)>)> {
-    let mut f = b.split(|&c| c == 0).map(|s| String::from_utf8_lossy(s).into_owned());
+    let mut f = b
+        .split(|&c| c == 0)
+        .map(|s| String::from_utf8_lossy(s).into_owned());
     let name = f.next().filter(|n| !n.is_empty())?;
     f.next()?; // mode: octet/netascii — always served as binary
     let mut opts = Vec::new();
@@ -79,7 +87,9 @@ fn load(name: &str, server: Ipv4Addr) -> Result<Cow<'static, [u8]>, String> {
         "sb/snponly-shim.efi" => Ok(Cow::Borrowed(crate::boot::sb_shim_efi())),
         "sb/snponly.efi" => Ok(Cow::Borrowed(crate::boot::sb_ipxe_efi())),
         "autoexec.ipxe" | "sb/autoexec.ipxe" => Ok(Cow::Owned(autoexec(server).into_bytes())),
-        other => Err(format!("TFTP serves only the iPXE binaries (asked {other:?}); other files go over HTTP")),
+        other => Err(format!(
+            "TFTP serves only the iPXE binaries (asked {other:?}); other files go over HTTP"
+        )),
     }
 }
 
@@ -87,7 +97,9 @@ fn load(name: &str, server: Ipv4Addr) -> Result<Cow<'static, [u8]>, String> {
 /// that one runs every configurator, IPv6 router discovery too, which on a LAN without an IPv6 router waits out its
 /// backoff (~3.9 s) before the menu.
 fn autoexec(server: Ipv4Addr) -> String {
-    format!("#!ipxe\nifconf -c dhcp || ifconf -c dhcp || shell\nchain http://{server}/boot.ipxe?mac=${{net0/mac}}&ip=${{net0/ip}} || shell\n")
+    format!(
+        "#!ipxe\nifconf -c dhcp || ifconf -c dhcp || shell\nchain http://{server}/boot.ipxe?mac=${{net0/mac}}&ip=${{net0/ip}} || shell\n"
+    )
 }
 
 async fn send_error(sock: &UdpSocket, to: SocketAddr, code: u16, msg: &str) {
@@ -100,7 +112,13 @@ async fn send_error(sock: &UdpSocket, to: SocketAddr, code: u16, msg: &str) {
 
 /// Send `pkt` until the peer ACKs `block` (resend on timeout, RETRIES times).
 /// Ok(false) = the peer answered with an ERROR (e.g. UEFI aborts after reading tsize).
-async fn send_wait(sock: &UdpSocket, peer: SocketAddr, pkt: &[u8], block: u16, timeout: Duration) -> Result<bool, String> {
+async fn send_wait(
+    sock: &UdpSocket,
+    peer: SocketAddr,
+    pkt: &[u8],
+    block: u16,
+    timeout: Duration,
+) -> Result<bool, String> {
     let mut buf = [0u8; 1500];
     for _ in 0..RETRIES {
         sock.send_to(pkt, peer).await.map_err(|e| e.to_string())?;
@@ -109,9 +127,13 @@ async fn send_wait(sock: &UdpSocket, peer: SocketAddr, pkt: &[u8], block: u16, t
             match tokio::time::timeout_at(deadline, sock.recv_from(&mut buf)).await {
                 Err(_) => break, // timeout → resend
                 Ok(Err(e)) => return Err(e.to_string()),
-                Ok(Ok((_, from))) if from != peer => send_error(sock, from, 5, "unknown transfer ID").await,
+                Ok(Ok((_, from))) if from != peer => {
+                    send_error(sock, from, 5, "unknown transfer ID").await
+                }
                 Ok(Ok((n, _))) => match op(&buf[..n]) {
-                    ACK if n >= 4 && u16::from_be_bytes([buf[2], buf[3]]) == block => return Ok(true),
+                    ACK if n >= 4 && u16::from_be_bytes([buf[2], buf[3]]) == block => {
+                        return Ok(true);
+                    }
                     ERROR => return Ok(false),
                     _ => {} // duplicate/old ACK: ignore (no resend → no Sorcerer's Apprentice)
                 },
@@ -121,10 +143,16 @@ async fn send_wait(sock: &UdpSocket, peer: SocketAddr, pkt: &[u8], block: u16, t
     Err(format!("no ACK for block {block} after {RETRIES} tries"))
 }
 
-async fn transfer(req: &[u8], peer: SocketAddr, server: Ipv4Addr, iface: &str) -> Result<(), String> {
+async fn transfer(
+    req: &[u8],
+    peer: SocketAddr,
+    server: Ipv4Addr,
+    iface: &str,
+) -> Result<(), String> {
     let sock = match crate::dhcp::udp(SocketAddrV4::new(server, 0), iface, false) {
         Ok(s) => s,
-        Err(_) => crate::dhcp::udp(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 0), iface, false).map_err(|e| e.to_string())?,
+        Err(_) => crate::dhcp::udp(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 0), iface, false)
+            .map_err(|e| e.to_string())?,
     };
     // serve_inner only forwards RRQ (WRQ etc. are dropped there).
     let (name, opts) = parse_rrq(&req[2..]).ok_or("malformed RRQ")?;
@@ -183,7 +211,11 @@ async fn transfer(req: &[u8], peer: SocketAddr, server: Ipv4Addr, iface: &str) -
         off = end;
         block = block.wrapping_add(1);
     }
-    tracing::info!("client {} loaded {name} over TFTP ({} bytes)", peer.ip(), data.len());
+    tracing::info!(
+        "client {} loaded {name} over TFTP ({} bytes)",
+        peer.ip(),
+        data.len()
+    );
     Ok(())
 }
 
@@ -200,13 +232,19 @@ mod tests {
 
     async fn recv(c: &UdpSocket) -> (Vec<u8>, SocketAddr) {
         let mut b = [0u8; 1600];
-        let (n, from) = tokio::time::timeout(Duration::from_secs(5), c.recv_from(&mut b)).await.unwrap().unwrap();
+        let (n, from) = tokio::time::timeout(Duration::from_secs(5), c.recv_from(&mut b))
+            .await
+            .unwrap()
+            .unwrap();
         (b[..n].to_vec(), from)
     }
 
     fn rrq(name: &str, opts: &[(&str, &str)]) -> Vec<u8> {
         let mut p = vec![0, 1];
-        for s in [name, "octet"].into_iter().chain(opts.iter().flat_map(|(k, v)| [*k, *v])) {
+        for s in [name, "octet"]
+            .into_iter()
+            .chain(opts.iter().flat_map(|(k, v)| [*k, *v]))
+        {
             p.extend(s.as_bytes());
             p.push(0);
         }
@@ -226,12 +264,26 @@ mod tests {
         let srv = server().await;
         let c = UdpSocket::bind("127.0.0.1:0").await.unwrap();
 
-        c.send_to(&rrq("snponly.efi", &[("blksize", "1024"), ("tsize", "0"), ("timeout", "1")]), srv).await.unwrap();
+        c.send_to(
+            &rrq(
+                "snponly.efi",
+                &[("blksize", "1024"), ("tsize", "0"), ("timeout", "1")],
+            ),
+            srv,
+        )
+        .await
+        .unwrap();
         let (oack, tid) = recv(&c).await;
-        assert_eq!(oack, format!("\0\x06blksize\01024\0tsize\0{}\0timeout\01\0", want.len()).into_bytes());
+        assert_eq!(
+            oack,
+            format!("\0\x06blksize\01024\0tsize\0{}\0timeout\01\0", want.len()).into_bytes()
+        );
         c.send_to(&ack(0), tid).await.unwrap();
         let (b1, _) = recv(&c).await;
-        assert_eq!((op(&b1), &b1[2..4], b1.len()), (DATA, &[0, 1][..], 4 + 1024));
+        assert_eq!(
+            (op(&b1), &b1[2..4], b1.len()),
+            (DATA, &[0, 1][..], 4 + 1024)
+        );
         // Don't ACK block 1 → the server resends it after the 1 s timeout.
         let (again, _) = recv(&c).await;
         assert_eq!(again, b1);
@@ -251,8 +303,14 @@ mod tests {
         let ip = Ipv4Addr::new(10, 0, 0, 12);
         for name in ["autoexec.ipxe", "/autoexec.ipxe", "sb/autoexec.ipxe"] {
             let s = String::from_utf8(load(name, ip).unwrap().into_owned()).unwrap();
-            assert!(s.starts_with("#!ipxe\nifconf -c dhcp ||"), "{name}: DHCPv4 only, no IPv6 router discovery wait");
-            assert!(s.contains("chain http://10.0.0.12/boot.ipxe?mac=${net0/mac}&ip=${net0/ip}"), "{name}");
+            assert!(
+                s.starts_with("#!ipxe\nifconf -c dhcp ||"),
+                "{name}: DHCPv4 only, no IPv6 router discovery wait"
+            );
+            assert!(
+                s.contains("chain http://10.0.0.12/boot.ipxe?mac=${net0/mac}&ip=${net0/ip}"),
+                "{name}"
+            );
         }
     }
 
@@ -261,24 +319,47 @@ mod tests {
         let srv = server().await;
         let c = UdpSocket::bind("127.0.0.1:0").await.unwrap();
         // snponly.efi comes from the binary itself; tsize probe then abort (UEFI does this).
-        c.send_to(&rrq("snponly.efi", &[("tsize", "0")]), srv).await.unwrap();
+        c.send_to(&rrq("snponly.efi", &[("tsize", "0")]), srv)
+            .await
+            .unwrap();
         let (oack, tid) = recv(&c).await;
-        assert_eq!(oack, format!("\0\x06tsize\0{}\0", crate::boot::snponly_efi().len()).into_bytes());
+        assert_eq!(
+            oack,
+            format!("\0\x06tsize\0{}\0", crate::boot::snponly_efi().len()).into_bytes()
+        );
         c.send_to(b"\0\x05\0\x08abort\0", tid).await.unwrap();
         // The official Secure Boot pair under sb/ (shim → loads sb/snponly.efi by name).
-        for (name, want) in [("sb/snponly-shim.efi", crate::boot::sb_shim_efi()), ("sb/snponly.efi", crate::boot::sb_ipxe_efi())] {
+        for (name, want) in [
+            ("sb/snponly-shim.efi", crate::boot::sb_shim_efi()),
+            ("sb/snponly.efi", crate::boot::sb_ipxe_efi()),
+        ] {
             c.send_to(&rrq(name, &[("tsize", "0")]), srv).await.unwrap();
             let (oack, tid) = recv(&c).await;
-            assert_eq!(oack, format!("\0\x06tsize\0{}\0", want.len()).into_bytes(), "{name}");
+            assert_eq!(
+                oack,
+                format!("\0\x06tsize\0{}\0", want.len()).into_bytes(),
+                "{name}"
+            );
             c.send_to(b"\0\x05\0\x08abort\0", tid).await.unwrap();
         }
         // Anything else (including a traversal attempt) → "file not found" ERROR, never a disk read.
-        for req in [rrq("../etc/passwd", &[]), rrq("broom-win/x/golden.vhdx", &[]), rrq("nope.bin", &[]), rrq("sb/../x", &[])] {
+        for req in [
+            rrq("../etc/passwd", &[]),
+            rrq("broom-win/x/golden.vhdx", &[]),
+            rrq("nope.bin", &[]),
+            rrq("sb/../x", &[]),
+        ] {
             c.send_to(&req, srv).await.unwrap();
             assert_eq!(op(&recv(&c).await.0), ERROR);
         }
         // A WRQ (write) is dropped silently (no reflection): no reply within 300 ms.
-        c.send_to(&[0, 2, b'x', 0, b'o', b'c', b't', b'e', b't', 0], srv).await.unwrap();
-        assert!(tokio::time::timeout(Duration::from_millis(300), c.recv_from(&mut [0u8; 64])).await.is_err());
+        c.send_to(&[0, 2, b'x', 0, b'o', b'c', b't', b'e', b't', 0], srv)
+            .await
+            .unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(300), c.recv_from(&mut [0u8; 64]))
+                .await
+                .is_err()
+        );
     }
 }

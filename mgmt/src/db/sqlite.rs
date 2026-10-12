@@ -1,14 +1,18 @@
 // db/sqlite.rs — SQLite driver (rusqlite, bundled). The only place with SQL.
 // One Mutex<Connection> — admin + DHCP load is a few queries/second at most; a pool
 // (r2d2) only if there are ever many concurrent writers.
-use rusqlite::{params, Connection, OptionalExtension, Row};
-use std::sync::{Mutex, MutexGuard};
+use parking_lot::{Mutex, MutexGuard};
+use rusqlite::{Connection, OptionalExtension, Row, params};
 
 use super::{BenchRow, Db, DbResult, Driver, Image, Lease, Machine, NewImage};
 
 /// Newline-separated list column → items (empty lines dropped).
 fn lines(s: &str) -> Vec<String> {
-    s.lines().map(str::trim).filter(|l| !l.is_empty()).map(String::from).collect()
+    s.lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .map(String::from)
+        .collect()
 }
 
 pub struct Sqlite {
@@ -123,7 +127,12 @@ fn image_row(r: &Row) -> rusqlite::Result<Image> {
         active_version: r.get(7)?,
         base_mode: r.get::<_, i64>(8)? == 1,
         use_ssd: r.get::<_, i64>(9)? == 1,
-        groups: r.get::<_, String>(10)?.split(',').filter(|g| !g.is_empty()).map(String::from).collect(),
+        groups: r
+            .get::<_, String>(10)?
+            .split(',')
+            .filter(|g| !g.is_empty())
+            .map(String::from)
+            .collect(),
         preload: r.get::<_, i64>(11)? == 1,
     })
 }
@@ -135,7 +144,9 @@ fn e(err: rusqlite::Error) -> String {
 /// "iqn.2026-01.local.broom-<8 hex>" — RandomState is seeded from OS randomness (std only).
 fn random_iqn_base() -> String {
     use std::hash::{BuildHasher, Hasher};
-    let r = std::collections::hash_map::RandomState::new().build_hasher().finish();
+    let r = std::collections::hash_map::RandomState::new()
+        .build_hasher()
+        .finish();
     format!("iqn.2026-01.local.broom-{:08x}", r as u32)
 }
 
@@ -147,8 +158,17 @@ fn private_files(path: &str) -> std::io::Result<()> {
     if path.is_empty() || path == ":memory:" {
         return Ok(());
     }
-    std::fs::OpenOptions::new().create(true).truncate(false).write(true).mode(0o600).open(path)?;
-    for f in [path.to_string(), format!("{path}-wal"), format!("{path}-shm")] {
+    std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .mode(0o600)
+        .open(path)?;
+    for f in [
+        path.to_string(),
+        format!("{path}-wal"),
+        format!("{path}-shm"),
+    ] {
         if std::path::Path::new(&f).exists() {
             std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o600))?;
         }
@@ -161,7 +181,13 @@ fn private_files(path: &str) -> std::io::Result<()> {
 const SCHEMA_VERSION: i64 = 2;
 
 fn has_column(c: &Connection, table: &str, col: &str) -> rusqlite::Result<bool> {
-    c.query_row("SELECT 1 FROM pragma_table_info(?1) WHERE name=?2", [table, col], |_| Ok(())).optional().map(|r| r.is_some())
+    c.query_row(
+        "SELECT 1 FROM pragma_table_info(?1) WHERE name=?2",
+        [table, col],
+        |_| Ok(()),
+    )
+    .optional()
+    .map(|r| r.is_some())
 }
 
 /// Bring an older DB up to SCHEMA_VERSION, in one transaction: any error is real and stops the open.
@@ -198,7 +224,10 @@ fn migrate(c: &mut Connection) -> rusqlite::Result<()> {
     }
     if v < 2 {
         // Images per machine group + preloading.
-        for (col, ddl) in [("grps", "TEXT NOT NULL DEFAULT ''"), ("preload", "INTEGER NOT NULL DEFAULT 0")] {
+        for (col, ddl) in [
+            ("grps", "TEXT NOT NULL DEFAULT ''"),
+            ("preload", "INTEGER NOT NULL DEFAULT 0"),
+        ] {
             if !has_column(&tx, "images", col)? {
                 tx.execute(&format!("ALTER TABLE images ADD COLUMN {col} {ddl}"), [])?;
             }
@@ -223,19 +252,31 @@ impl Sqlite {
         c.execute_batch(SCHEMA).map_err(e)?;
         migrate(&mut c).map_err(|err| format!("{path}: schema migration: {err}"))?;
         // ProxyDHCP mode removed: off is the same for broom (the LAN's DHCP points clients at it).
-        c.execute("UPDATE config SET value='off' WHERE key='dhcp_mode' AND value='proxy'", []).map_err(e)?;
+        c.execute(
+            "UPDATE config SET value='off' WHERE key='dhcp_mode' AND value='proxy'",
+            [],
+        )
+        .map_err(e)?;
         // iSCSI IQN base, random per server, generated once (first open without it) and kept.
-        c.execute("INSERT OR IGNORE INTO config(key,value) VALUES('iqn_base',?1)", [random_iqn_base()]).map_err(e)?;
+        c.execute(
+            "INSERT OR IGNORE INTO config(key,value) VALUES('iqn_base',?1)",
+            [random_iqn_base()],
+        )
+        .map_err(e)?;
         Ok(Sqlite { c: Mutex::new(c) })
     }
 
     fn c(&self) -> MutexGuard<'_, Connection> {
-        self.c.lock().unwrap_or_else(|p| p.into_inner())
+        self.c.lock()
     }
 
     fn one_image(&self, sql_where: &str, p: impl rusqlite::Params) -> DbResult<Option<Image>> {
         self.c()
-            .query_row(&format!("SELECT {IMAGE_COLS} FROM images WHERE {sql_where}"), p, image_row)
+            .query_row(
+                &format!("SELECT {IMAGE_COLS} FROM images WHERE {sql_where}"),
+                p,
+                image_row,
+            )
             .optional()
             .map_err(e)
     }
@@ -260,7 +301,9 @@ impl Db for Sqlite {
 
     fn images(&self) -> DbResult<Vec<Image>> {
         let c = self.c();
-        let mut s = c.prepare(&format!("SELECT {IMAGE_COLS} FROM images ORDER BY id")).map_err(e)?;
+        let mut s = c
+            .prepare(&format!("SELECT {IMAGE_COLS} FROM images ORDER BY id"))
+            .map_err(e)?;
         let rows = s.query_map([], image_row).map_err(e)?;
         rows.collect::<Result<_, _>>().map_err(e)
     }
@@ -289,10 +332,15 @@ impl Db for Sqlite {
         // the same OS — never auto-boot another OS or an image with no boot script; none → no default (the menu waits).
         let mut c = self.c();
         let t = c.transaction().map_err(e)?;
-        let gone: Option<(String, bool)> =
-            t.query_row("SELECT os,is_default FROM images WHERE id=?1", [id], |r| Ok((r.get(0)?, r.get::<_, i64>(1)? == 1))).ok();
-        t.execute("UPDATE machines SET image_id=NULL WHERE image_id=?1", [id]).map_err(e)?;
-        t.execute("DELETE FROM images WHERE id=?1", [id]).map_err(e)?;
+        let gone: Option<(String, bool)> = t
+            .query_row("SELECT os,is_default FROM images WHERE id=?1", [id], |r| {
+                Ok((r.get(0)?, r.get::<_, i64>(1)? == 1))
+            })
+            .ok();
+        t.execute("UPDATE machines SET image_id=NULL WHERE image_id=?1", [id])
+            .map_err(e)?;
+        t.execute("DELETE FROM images WHERE id=?1", [id])
+            .map_err(e)?;
         if let Some((os, true)) = gone {
             t.execute(
                 "UPDATE images SET is_default=1 WHERE id=(SELECT MIN(id) FROM images WHERE os=?1 AND boot_script IS NOT NULL)",
@@ -307,62 +355,87 @@ impl Db for Sqlite {
         let mut c = self.c();
         let t = c.transaction().map_err(e)?;
         t.execute("UPDATE images SET is_default=0", []).map_err(e)?;
-        t.execute("UPDATE images SET is_default=1 WHERE id=?1", [id]).map_err(e)?;
+        t.execute("UPDATE images SET is_default=1 WHERE id=?1", [id])
+            .map_err(e)?;
         t.commit().map_err(e)
     }
 
     fn set_boot_script(&self, id: i64, boot_script: &str) -> DbResult<()> {
         self.c()
-            .execute("UPDATE images SET boot_script=?1 WHERE id=?2", params![boot_script, id])
+            .execute(
+                "UPDATE images SET boot_script=?1 WHERE id=?2",
+                params![boot_script, id],
+            )
             .map(|_| ())
             .map_err(e)
     }
 
     fn set_published(&self, id: i64, boot_script: &str, hash: &str) -> DbResult<()> {
         self.c()
-            .execute("UPDATE images SET boot_script=?1, hash=?2 WHERE id=?3", params![boot_script, hash, id])
+            .execute(
+                "UPDATE images SET boot_script=?1, hash=?2 WHERE id=?3",
+                params![boot_script, hash, id],
+            )
             .map(|_| ())
             .map_err(e)
     }
 
     fn set_cache_mode(&self, id: i64, mode: &str) -> DbResult<()> {
         self.c()
-            .execute("UPDATE images SET cache_mode=?1 WHERE id=?2", params![mode, id])
+            .execute(
+                "UPDATE images SET cache_mode=?1 WHERE id=?2",
+                params![mode, id],
+            )
             .map(|_| ())
             .map_err(e)
     }
 
     fn set_base_mode(&self, id: i64, on: bool) -> DbResult<()> {
         self.c()
-            .execute("UPDATE images SET base_mode=?1 WHERE id=?2", params![on as i64, id])
+            .execute(
+                "UPDATE images SET base_mode=?1 WHERE id=?2",
+                params![on as i64, id],
+            )
             .map(|_| ())
             .map_err(e)
     }
 
     fn set_use_ssd(&self, id: i64, on: bool) -> DbResult<()> {
         self.c()
-            .execute("UPDATE images SET use_ssd=?1 WHERE id=?2", params![on as i64, id])
+            .execute(
+                "UPDATE images SET use_ssd=?1 WHERE id=?2",
+                params![on as i64, id],
+            )
             .map(|_| ())
             .map_err(e)
     }
 
     fn set_image_groups(&self, id: i64, groups: &[String]) -> DbResult<()> {
         self.c()
-            .execute("UPDATE images SET grps=?1 WHERE id=?2", params![groups.join(","), id])
+            .execute(
+                "UPDATE images SET grps=?1 WHERE id=?2",
+                params![groups.join(","), id],
+            )
             .map(|_| ())
             .map_err(e)
     }
 
     fn set_preload(&self, id: i64, on: bool) -> DbResult<()> {
         self.c()
-            .execute("UPDATE images SET preload=?1 WHERE id=?2", params![on as i64, id])
+            .execute(
+                "UPDATE images SET preload=?1 WHERE id=?2",
+                params![on as i64, id],
+            )
             .map(|_| ())
             .map_err(e)
     }
 
     fn set_active_version(&self, id: i64, version: Option<&str>) -> DbResult<()> {
         self.c()
-            .execute("UPDATE images SET active_version=?1 WHERE id=?2", params![version, id])
+            .execute(
+                "UPDATE images SET active_version=?1 WHERE id=?2",
+                params![version, id],
+            )
             .map(|_| ())
             .map_err(e)
     }
@@ -384,7 +457,9 @@ impl Db for Sqlite {
                     ip: r.get(2)?,
                     hostname: r.get(3)?,
                     image_id: r.get(4)?,
-                    license_tail: key.as_ref().map(|k| k[k.len().saturating_sub(5)..].to_string()),
+                    license_tail: key
+                        .as_ref()
+                        .map(|k| k[k.len().saturating_sub(5)..].to_string()),
                     license_key: key,
                     license_state: r.get(6)?,
                     license_gen: r.get(7)?,
@@ -408,12 +483,18 @@ impl Db for Sqlite {
     }
 
     fn delete_machine(&self, machine_id: i64) -> DbResult<()> {
-        self.c().execute("DELETE FROM machines WHERE id=?1", [machine_id]).map(|_| ()).map_err(e)
+        self.c()
+            .execute("DELETE FROM machines WHERE id=?1", [machine_id])
+            .map(|_| ())
+            .map_err(e)
     }
 
     fn set_machine_image(&self, machine_id: i64, image_id: Option<i64>) -> DbResult<()> {
         self.c()
-            .execute("UPDATE machines SET image_id=?1 WHERE id=?2", params![image_id, machine_id])
+            .execute(
+                "UPDATE machines SET image_id=?1 WHERE id=?2",
+                params![image_id, machine_id],
+            )
             .map(|_| ())
             .map_err(e)
     }
@@ -424,7 +505,10 @@ impl Db for Sqlite {
         } else {
             "UPDATE machines SET license_key=?1, license_state=NULL, license_result=NULL WHERE id=?2"
         };
-        self.c().execute(sql, params![key, machine_id]).map(|_| ()).map_err(e)
+        self.c()
+            .execute(sql, params![key, machine_id])
+            .map(|_| ())
+            .map_err(e)
     }
 
     fn rearm_license(&self, machine_id: i64) -> DbResult<()> {
@@ -440,7 +524,10 @@ impl Db for Sqlite {
 
     fn rearm_quiet(&self, machine_id: i64) -> DbResult<bool> {
         self.c()
-            .execute("UPDATE machines SET license_state='armed' WHERE id=?1 AND license_state='sent'", [machine_id])
+            .execute(
+                "UPDATE machines SET license_state='armed' WHERE id=?1 AND license_state='sent'",
+                [machine_id],
+            )
             .map(|n| n > 0)
             .map_err(e)
     }
@@ -448,23 +535,40 @@ impl Db for Sqlite {
     fn take_license(&self, machine_id: i64) -> DbResult<Option<String>> {
         let c = self.c(); // one connection lock → check + flip are atomic
         let n = c
-            .execute("UPDATE machines SET license_state='sent' WHERE id=?1 AND license_state='armed'", [machine_id])
+            .execute(
+                "UPDATE machines SET license_state='sent' WHERE id=?1 AND license_state='armed'",
+                [machine_id],
+            )
             .map_err(e)?;
         if n == 0 {
             return Ok(None);
         }
-        c.query_row("SELECT license_key FROM machines WHERE id=?1", [machine_id], |r| r.get(0)).map_err(e)
+        c.query_row(
+            "SELECT license_key FROM machines WHERE id=?1",
+            [machine_id],
+            |r| r.get(0),
+        )
+        .map_err(e)
     }
 
     fn set_license_result(&self, machine_id: i64, result: &str) -> DbResult<()> {
         self.c()
-            .execute("UPDATE machines SET license_result=?1 WHERE id=?2", params![result, machine_id])
+            .execute(
+                "UPDATE machines SET license_result=?1 WHERE id=?2",
+                params![result, machine_id],
+            )
             .map(|_| ())
             .map_err(e)
     }
 
     fn set_machine_group(&self, machine_id: i64, grp: Option<&str>) -> DbResult<()> {
-        self.c().execute("UPDATE machines SET grp=?1 WHERE id=?2", params![grp, machine_id]).map(|_| ()).map_err(e)
+        self.c()
+            .execute(
+                "UPDATE machines SET grp=?1 WHERE id=?2",
+                params![grp, machine_id],
+            )
+            .map(|_| ())
+            .map_err(e)
     }
 
     fn put_machine_hw(&self, mac: &str, hwids: &[String], seen: i64) -> DbResult<()> {
@@ -481,7 +585,11 @@ impl Db for Sqlite {
     fn machine_hw(&self) -> DbResult<Vec<(String, Vec<String>)>> {
         let c = self.c();
         let mut s = c.prepare("SELECT mac,hwids FROM machine_hw").map_err(e)?;
-        let rows = s.query_map([], |r| Ok((r.get::<_, String>(0)?, lines(&r.get::<_, String>(1)?)))).map_err(e)?;
+        let rows = s
+            .query_map([], |r| {
+                Ok((r.get::<_, String>(0)?, lines(&r.get::<_, String>(1)?)))
+            })
+            .map_err(e)?;
         rows.collect::<Result<_, _>>().map_err(e)
     }
 
@@ -507,7 +615,14 @@ impl Db for Sqlite {
         rows.collect::<Result<_, _>>().map_err(e)
     }
 
-    fn put_driver(&self, name: &str, sha256: &str, size: u64, hwids: &[String], created: i64) -> DbResult<()> {
+    fn put_driver(
+        &self,
+        name: &str,
+        sha256: &str,
+        size: u64,
+        hwids: &[String],
+        created: i64,
+    ) -> DbResult<()> {
         self.c()
             .execute(
                 "INSERT INTO drivers(name,sha256,size,hwids,created) VALUES(?1,?2,?3,?4,?5)
@@ -530,22 +645,36 @@ impl Db for Sqlite {
     }
 
     fn delete_driver(&self, id: i64) -> DbResult<()> {
-        self.c().execute("DELETE FROM drivers WHERE id=?1", [id]).map(|_| ()).map_err(e)
+        self.c()
+            .execute("DELETE FROM drivers WHERE id=?1", [id])
+            .map(|_| ())
+            .map_err(e)
     }
 
     fn add_machine(&self, mac: &str, ip: Option<&str>, hostname: Option<&str>) -> DbResult<i64> {
         let c = self.c();
-        c.execute("INSERT INTO machines(mac,ip,hostname) VALUES(?1,?2,?3)", params![mac, ip, hostname])
-            .map_err(e)?;
+        c.execute(
+            "INSERT INTO machines(mac,ip,hostname) VALUES(?1,?2,?3)",
+            params![mac, ip, hostname],
+        )
+        .map_err(e)?;
         Ok(c.last_insert_rowid())
     }
 
     fn leases(&self) -> DbResult<Vec<Lease>> {
         let c = self.c();
-        let mut s = c.prepare("SELECT mac,ip,hostname,expires,source FROM leases").map_err(e)?;
+        let mut s = c
+            .prepare("SELECT mac,ip,hostname,expires,source FROM leases")
+            .map_err(e)?;
         let rows = s
             .query_map([], |r| {
-                Ok(Lease { mac: r.get(0)?, ip: r.get(1)?, hostname: r.get(2)?, expires: r.get(3)?, source: r.get(4)? })
+                Ok(Lease {
+                    mac: r.get(0)?,
+                    ip: r.get(1)?,
+                    hostname: r.get(2)?,
+                    expires: r.get(3)?,
+                    source: r.get(4)?,
+                })
             })
             .map_err(e)?;
         rows.collect::<Result<_, _>>().map_err(e)
@@ -564,16 +693,24 @@ impl Db for Sqlite {
     }
 
     fn delete_lease(&self, mac: &str) -> DbResult<()> {
-        self.c().execute("DELETE FROM leases WHERE mac=?1", [mac]).map(|_| ()).map_err(e)
+        self.c()
+            .execute("DELETE FROM leases WHERE mac=?1", [mac])
+            .map(|_| ())
+            .map_err(e)
     }
 
     fn prune_leases(&self, cutoff: i64) -> DbResult<usize> {
-        self.c().execute("DELETE FROM leases WHERE expires < ?1", [cutoff]).map_err(e)
+        self.c()
+            .execute("DELETE FROM leases WHERE expires < ?1", [cutoff])
+            .map_err(e)
     }
 
     fn add_bench(&self, r: &BenchRow) -> DbResult<()> {
         self.c()
-            .execute("INSERT INTO bench(at,mac,kind,value,detail) VALUES(?1,?2,?3,?4,?5)", params![r.at, r.mac, r.kind, r.value, r.detail])
+            .execute(
+                "INSERT INTO bench(at,mac,kind,value,detail) VALUES(?1,?2,?3,?4,?5)",
+                params![r.at, r.mac, r.kind, r.value, r.detail],
+            )
             .map(|_| ())
             .map_err(e)
     }
@@ -583,7 +720,9 @@ impl Db for Sqlite {
         let mut s = c
             .prepare("SELECT at,mac,kind,value,detail FROM bench WHERE ?1 IS NULL OR mac=?1 ORDER BY at DESC, id DESC LIMIT ?2")
             .map_err(e)?;
-        let rows = s.query_map(params![mac, limit as i64], bench_row).map_err(e)?;
+        let rows = s
+            .query_map(params![mac, limit as i64], bench_row)
+            .map_err(e)?;
         rows.collect::<Result<_, _>>().map_err(e)
     }
 
@@ -601,7 +740,9 @@ impl Db for Sqlite {
 
     fn prune_bench(&self, cutoff: i64, keep: usize) -> DbResult<usize> {
         let c = self.c();
-        let old = c.execute("DELETE FROM bench WHERE at < ?1", [cutoff]).map_err(e)?;
+        let old = c
+            .execute("DELETE FROM bench WHERE at < ?1", [cutoff])
+            .map_err(e)?;
         let over = c
             .execute("DELETE FROM bench WHERE id NOT IN (SELECT id FROM bench ORDER BY at DESC, id DESC LIMIT ?1)", [keep as i64])
             .map_err(e)?;
@@ -610,7 +751,13 @@ impl Db for Sqlite {
 }
 
 fn bench_row(r: &Row) -> rusqlite::Result<BenchRow> {
-    Ok(BenchRow { at: r.get(0)?, mac: r.get(1)?, kind: r.get(2)?, value: r.get(3)?, detail: r.get(4)? })
+    Ok(BenchRow {
+        at: r.get(0)?,
+        mac: r.get(1)?,
+        kind: r.get(2)?,
+        value: r.get(3)?,
+        detail: r.get(4)?,
+    })
 }
 
 #[cfg(test)]
@@ -629,31 +776,71 @@ mod tests {
     fn iqn_base_random_and_kept() {
         let p = tmp("broom_test_iqn.db");
         let a = Sqlite::open(&p).unwrap().get_config("iqn_base", "");
-        assert!(a.starts_with("iqn.2026-01.local.broom-") && a.len() == 32, "{a}");
-        assert_eq!(Sqlite::open(&p).unwrap().get_config("iqn_base", ""), a, "kept on reopen");
-        assert_ne!(Sqlite::open(":memory:").unwrap().get_config("iqn_base", ""), a, "new DB → new base");
+        assert!(
+            a.starts_with("iqn.2026-01.local.broom-") && a.len() == 32,
+            "{a}"
+        );
+        assert_eq!(
+            Sqlite::open(&p).unwrap().get_config("iqn_base", ""),
+            a,
+            "kept on reopen"
+        );
+        assert_ne!(
+            Sqlite::open(":memory:").unwrap().get_config("iqn_base", ""),
+            a,
+            "new DB → new base"
+        );
         tmp("broom_test_iqn.db");
     }
 
     #[test]
     fn delete_image_unlinks_machines_and_moves_default() {
         let db = Sqlite::open(":memory:").unwrap();
-        let new = |name, os| NewImage { name, os, boot_script: Some("boot"), cache_mode: "disk" };
-        let (a, b) = (db.add_image(&new("a", "linux")).unwrap(), db.add_image(&new("b", "linux")).unwrap());
-        let w = db.add_image(&NewImage { name: "w", os: "windows", boot_script: Some("boot"), cache_mode: "disk" }).unwrap();
+        let new = |name, os| NewImage {
+            name,
+            os,
+            boot_script: Some("boot"),
+            cache_mode: "disk",
+        };
+        let (a, b) = (
+            db.add_image(&new("a", "linux")).unwrap(),
+            db.add_image(&new("b", "linux")).unwrap(),
+        );
+        let w = db
+            .add_image(&NewImage {
+                name: "w",
+                os: "windows",
+                boot_script: Some("boot"),
+                cache_mode: "disk",
+            })
+            .unwrap();
         db.set_default_image(b).unwrap();
         let m = db.add_machine("aa:bb:cc:dd:ee:01", None, None).unwrap();
         db.set_machine_image(m, Some(b)).unwrap();
         db.delete_image(b).unwrap();
-        assert_eq!(db.machines().unwrap()[0].image_id, None, "no link to a deleted (reusable) id");
-        assert!(db.image(a).unwrap().unwrap().is_default, "default moves to the published image of the same OS");
+        assert_eq!(
+            db.machines().unwrap()[0].image_id,
+            None,
+            "no link to a deleted (reusable) id"
+        );
+        assert!(
+            db.image(a).unwrap().unwrap().is_default,
+            "default moves to the published image of the same OS"
+        );
         assert!(!db.image(w).unwrap().unwrap().is_default);
         let c = db.add_image(&new("c", "linux")).unwrap();
-        assert_eq!(db.machines().unwrap()[0].image_id, None, "a new image with the reused id {c} is not picked up");
+        assert_eq!(
+            db.machines().unwrap()[0].image_id,
+            None,
+            "a new image with the reused id {c} is not picked up"
+        );
         // Last Linux image gone → no default at all (the Windows one is not picked: another OS).
         db.delete_image(a).unwrap();
         db.delete_image(c).unwrap();
-        assert!(db.images().unwrap().iter().all(|i| !i.is_default), "never another OS");
+        assert!(
+            db.images().unwrap().iter().all(|i| !i.is_default),
+            "never another OS"
+        );
     }
 
     #[test]
@@ -676,14 +863,28 @@ mod tests {
             assert_eq!(db.machines().unwrap()[0].mac, "aa:bb:cc:dd:ee:01");
         }
         let c = Connection::open(&p).unwrap();
-        assert_eq!(c.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0)).unwrap(), SCHEMA_VERSION);
-        assert!(!has_column(&c, "images", "dataset").unwrap() && has_column(&c, "machines", "notes").unwrap());
+        assert_eq!(
+            c.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
+                .unwrap(),
+            SCHEMA_VERSION
+        );
+        assert!(
+            !has_column(&c, "images", "dataset").unwrap()
+                && has_column(&c, "machines", "notes").unwrap()
+        );
         // A new DB starts at the latest version.
         let p2 = tmp("broom_test_migrate_new.db");
         drop(Sqlite::open(&p2).unwrap());
-        let v: i64 = Connection::open(&p2).unwrap().query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
+        let v: i64 = Connection::open(&p2)
+            .unwrap()
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
         assert_eq!(v, SCHEMA_VERSION);
-        let sync: i64 = Sqlite::open(&p2).unwrap().c().query_row("PRAGMA synchronous", [], |r| r.get(0)).unwrap();
+        let sync: i64 = Sqlite::open(&p2)
+            .unwrap()
+            .c()
+            .query_row("PRAGMA synchronous", [], |r| r.get(0))
+            .unwrap();
         assert_eq!(sync, 1, "NORMAL on every open (per-connection pragma)");
         tmp("broom_test_migrate.db");
         tmp("broom_test_migrate_new.db");
@@ -698,7 +899,11 @@ mod tests {
         let db = Sqlite::open(&p).unwrap();
         db.set_config("x", "y").unwrap();
         for f in [p.clone(), format!("{p}-wal")] {
-            assert_eq!(std::fs::metadata(&f).unwrap().permissions().mode() & 0o777, 0o600, "{f}");
+            assert_eq!(
+                std::fs::metadata(&f).unwrap().permissions().mode() & 0o777,
+                0o600,
+                "{f}"
+            );
         }
         drop(db);
         tmp("broom_test_perm.db");
@@ -707,7 +912,10 @@ mod tests {
     #[test]
     fn dhcp_mode_proxy_becomes_off() {
         let p = tmp("broom_test_proxy.db");
-        Sqlite::open(&p).unwrap().set_config("dhcp_mode", "proxy").unwrap();
+        Sqlite::open(&p)
+            .unwrap()
+            .set_config("dhcp_mode", "proxy")
+            .unwrap();
         assert_eq!(Sqlite::open(&p).unwrap().get_config("dhcp_mode", ""), "off");
         tmp("broom_test_proxy.db");
     }
@@ -715,30 +923,56 @@ mod tests {
     #[test]
     fn images_machines_leases() {
         let db = Sqlite::open(":memory:").unwrap();
-        let new = |name| NewImage { name, os: "linux", boot_script: None, cache_mode: "disk" };
+        let new = |name| NewImage {
+            name,
+            os: "linux",
+            boot_script: None,
+            cache_mode: "disk",
+        };
         let a = db.add_image(&new("a")).unwrap();
         let b = db.add_image(&new("b")).unwrap();
         assert!(db.add_image(&new("a")).is_err(), "unique name");
         db.set_default_image(a).unwrap();
         db.set_default_image(b).unwrap();
         let imgs = db.images().unwrap();
-        assert_eq!(imgs.iter().filter(|i| i.is_default).map(|i| i.id).collect::<Vec<_>>(), vec![b]);
+        assert_eq!(
+            imgs.iter()
+                .filter(|i| i.is_default)
+                .map(|i| i.id)
+                .collect::<Vec<_>>(),
+            vec![b]
+        );
         db.set_published(a, "boot", "h1").unwrap();
         db.set_cache_mode(a, "zram").unwrap();
         db.set_active_version(a, Some("v2")).unwrap();
         let ia = db.image_by_name("a").unwrap().unwrap();
-        assert_eq!((ia.boot_script.as_deref(), ia.hash.as_deref(), ia.cache_mode.as_str()), (Some("boot"), Some("h1"), "zram"));
+        assert_eq!(
+            (
+                ia.boot_script.as_deref(),
+                ia.hash.as_deref(),
+                ia.cache_mode.as_str()
+            ),
+            (Some("boot"), Some("h1"), "zram")
+        );
         assert_eq!(ia.active_version.as_deref(), Some("v2"));
-        assert!(!ia.base_mode, "base mode off by default (first logon commits base by itself)");
+        assert!(
+            !ia.base_mode,
+            "base mode off by default (first logon commits base by itself)"
+        );
         db.set_base_mode(a, true).unwrap();
         assert!(db.image(a).unwrap().unwrap().base_mode);
-        assert!(ia.use_ssd, "SSD on by default (cache + writes on the machine's SSD)");
+        assert!(
+            ia.use_ssd,
+            "SSD on by default (cache + writes on the machine's SSD)"
+        );
         db.set_use_ssd(a, false).unwrap();
         assert!(!db.image(a).unwrap().unwrap().use_ssd);
         db.delete_image(a).unwrap();
         assert!(db.image(a).unwrap().is_none());
 
-        let m = db.add_machine("aa:bb:cc:dd:ee:01", Some("10.0.0.50"), Some("PC01")).unwrap();
+        let m = db
+            .add_machine("aa:bb:cc:dd:ee:01", Some("10.0.0.50"), Some("PC01"))
+            .unwrap();
         db.set_machine_image(m, Some(b)).unwrap();
         assert_eq!(db.machines().unwrap()[0].image_id, Some(b));
 
@@ -746,40 +980,86 @@ mod tests {
         let key = "ABCDE-FGHIJ-KLMNO-PQRST-VWXYZ";
         db.set_license(m, Some(key)).unwrap();
         let mc = &db.machines().unwrap()[0];
-        assert_eq!((mc.license_state.as_deref(), mc.license_gen, mc.license_tail.as_deref()), (Some("armed"), 1, Some("VWXYZ")));
+        assert_eq!(
+            (
+                mc.license_state.as_deref(),
+                mc.license_gen,
+                mc.license_tail.as_deref()
+            ),
+            (Some("armed"), 1, Some("VWXYZ"))
+        );
         let json = serde_json::to_string(mc).unwrap();
-        assert!(!json.contains("ABCDE") && !json.contains("license_key"), "{json}");
+        assert!(
+            !json.contains("ABCDE") && !json.contains("license_key"),
+            "{json}"
+        );
         assert_eq!(db.take_license(m).unwrap().as_deref(), Some(key));
         assert_eq!(db.take_license(m).unwrap(), None, "only once");
         db.set_license_result(m, "activated").unwrap();
         db.rearm_license(m).unwrap();
         let mc = &db.machines().unwrap()[0];
-        assert_eq!((mc.license_state.as_deref(), mc.license_gen, mc.license_result.as_deref()), (Some("armed"), 2, None));
+        assert_eq!(
+            (
+                mc.license_state.as_deref(),
+                mc.license_gen,
+                mc.license_result.as_deref()
+            ),
+            (Some("armed"), 2, None)
+        );
         assert_eq!(db.take_license(m).unwrap().as_deref(), Some(key));
         // Quiet re-arm (base rebuilt by the server's own change): armed again, SAME generation (no extra rebuild).
         assert!(db.rearm_quiet(m).unwrap());
         assert!(!db.rearm_quiet(m).unwrap(), "only from 'sent'");
         let mc = &db.machines().unwrap()[0];
-        assert_eq!((mc.license_state.as_deref(), mc.license_gen), (Some("armed"), 2));
+        assert_eq!(
+            (mc.license_state.as_deref(), mc.license_gen),
+            (Some("armed"), 2)
+        );
         assert_eq!(db.take_license(m).unwrap().as_deref(), Some(key));
         db.set_license(m, None).unwrap();
         let mc = &db.machines().unwrap()[0];
-        assert_eq!((mc.license_state.as_deref(), mc.license_tail.as_deref()), (None, None));
+        assert_eq!(
+            (mc.license_state.as_deref(), mc.license_tail.as_deref()),
+            (None, None)
+        );
         db.rearm_license(m).unwrap(); // no key → stays without state
         assert_eq!(db.machines().unwrap()[0].license_state, None);
 
         // Edit / image / delete; the mac stays unique.
-        let m2 = db.add_machine("aa:bb:cc:dd:ee:02", None, Some("PC02")).unwrap();
-        let mut row = db.machines().unwrap().into_iter().find(|x| x.id == m2).unwrap();
+        let m2 = db
+            .add_machine("aa:bb:cc:dd:ee:02", None, Some("PC02"))
+            .unwrap();
+        let mut row = db
+            .machines()
+            .unwrap()
+            .into_iter()
+            .find(|x| x.id == m2)
+            .unwrap();
         row.hostname = Some("PC22".into());
         row.notes = Some("seat 22".into());
         row.ip = Some("10.0.0.22".into());
         db.update_machine(&row).unwrap();
         db.set_machine_image(m2, Some(b)).unwrap();
-        let got = db.machines().unwrap().into_iter().find(|x| x.id == m2).unwrap();
-        assert_eq!((got.hostname.as_deref(), got.notes.as_deref(), got.image_id), (Some("PC22"), Some("seat 22"), Some(b)));
+        let got = db
+            .machines()
+            .unwrap()
+            .into_iter()
+            .find(|x| x.id == m2)
+            .unwrap();
+        assert_eq!(
+            (got.hostname.as_deref(), got.notes.as_deref(), got.image_id),
+            (Some("PC22"), Some("seat 22"), Some(b))
+        );
         db.set_machine_image(m2, None).unwrap();
-        assert_eq!(db.machines().unwrap().into_iter().find(|x| x.id == m2).unwrap().image_id, None);
+        assert_eq!(
+            db.machines()
+                .unwrap()
+                .into_iter()
+                .find(|x| x.id == m2)
+                .unwrap()
+                .image_id,
+            None
+        );
         row.mac = "aa:bb:cc:dd:ee:01".into();
         assert!(db.update_machine(&row).is_err(), "mac already used by PC01");
         db.delete_machine(m2).unwrap();
@@ -791,28 +1071,58 @@ mod tests {
         let ids = vec!["PCI\\VEN_10DE&DEV_2504".to_string()];
         db.put_machine_hw("aa:bb:cc:dd:ee:01", &ids, 1).unwrap();
         db.put_machine_hw("aa:bb:cc:dd:ee:01", &ids, 2).unwrap();
-        assert_eq!(db.machine_hw().unwrap(), vec![("aa:bb:cc:dd:ee:01".to_string(), ids.clone())]);
+        assert_eq!(
+            db.machine_hw().unwrap(),
+            vec![("aa:bb:cc:dd:ee:01".to_string(), ids.clone())]
+        );
         db.put_driver("nvidia", "s1", 10, &ids, 1).unwrap();
         let d = db.drivers().unwrap()[0].clone();
-        db.set_driver_targets(d.id, true, &["VIP".into(), "Pro".into()]).unwrap();
+        db.set_driver_targets(d.id, true, &["VIP".into(), "Pro".into()])
+            .unwrap();
         db.put_driver("nvidia", "s2", 20, &[], 2).unwrap();
         let d = db.drivers().unwrap()[0].clone();
-        assert_eq!((d.sha256.as_str(), d.size, d.hwids.len(), d.all_machines), ("s2", 20, 0, true));
+        assert_eq!(
+            (d.sha256.as_str(), d.size, d.hwids.len(), d.all_machines),
+            ("s2", 20, 0, true)
+        );
         assert_eq!(d.groups, vec!["VIP", "Pro"]);
         db.delete_driver(d.id).unwrap();
         assert!(db.drivers().unwrap().is_empty());
 
-        let l = Lease { mac: "m1".into(), ip: Some("10.0.0.100".into()), hostname: Some("x".into()), expires: 5, source: "full".into() };
+        let l = Lease {
+            mac: "m1".into(),
+            ip: Some("10.0.0.100".into()),
+            hostname: Some("x".into()),
+            expires: 5,
+            source: "full".into(),
+        };
         db.put_lease(&l).unwrap();
         // None ip/hostname keep the stored values.
-        db.put_lease(&Lease { ip: None, hostname: None, expires: 9, source: "proxy".into(), ..l.clone() }).unwrap();
-        assert_eq!(db.leases().unwrap(), vec![Lease { expires: 9, source: "proxy".into(), ..l }]);
+        db.put_lease(&Lease {
+            ip: None,
+            hostname: None,
+            expires: 9,
+            source: "proxy".into(),
+            ..l.clone()
+        })
+        .unwrap();
+        assert_eq!(
+            db.leases().unwrap(),
+            vec![Lease {
+                expires: 9,
+                source: "proxy".into(),
+                ..l
+            }]
+        );
         db.delete_lease("m1").unwrap();
         assert!(db.leases().unwrap().is_empty());
 
         db.set_config("k", "v1").unwrap();
         db.set_config("k", "v2").unwrap();
-        assert_eq!((db.get_config("k", ""), db.get_config("missing", "d")), ("v2".into(), "d".into()));
+        assert_eq!(
+            (db.get_config("k", ""), db.get_config("missing", "d")),
+            ("v2".into(), "d".into())
+        );
     }
 
     #[test]
@@ -835,12 +1145,32 @@ mod tests {
             db.add_bench(&r).unwrap();
         }
         assert_eq!(db.bench_rows(None, 10).unwrap().len(), 5);
-        assert_eq!(db.bench_rows(Some("m1"), 10).unwrap(), vec![row(4, Some("m1"), "boot", 30.0), row(3, Some("m1"), "boot", 40.0)]);
+        assert_eq!(
+            db.bench_rows(Some("m1"), 10).unwrap(),
+            vec![
+                row(4, Some("m1"), "boot", 30.0),
+                row(3, Some("m1"), "boot", 40.0)
+            ]
+        );
         let mut latest = db.bench_latest().unwrap();
         latest.sort_by_key(|r| r.at);
-        assert_eq!(latest, vec![row(2, None, "srv_seq", 200.0), row(4, Some("m1"), "boot", 30.0), row(5, Some("m2"), "net", 110.0)]);
+        assert_eq!(
+            latest,
+            vec![
+                row(2, None, "srv_seq", 200.0),
+                row(4, Some("m1"), "boot", 30.0),
+                row(5, Some("m2"), "net", 110.0)
+            ]
+        );
         // Older than the cutoff (at 1) + over the cap (keep the newest 2: at 5, 4).
         assert_eq!(db.prune_bench(2, 2).unwrap(), 3);
-        assert_eq!(db.bench_rows(None, 10).unwrap().iter().map(|r| r.at).collect::<Vec<_>>(), vec![5, 4]);
+        assert_eq!(
+            db.bench_rows(None, 10)
+                .unwrap()
+                .iter()
+                .map(|r| r.at)
+                .collect::<Vec<_>>(),
+            vec![5, 4]
+        );
     }
 }

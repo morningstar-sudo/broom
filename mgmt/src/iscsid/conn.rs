@@ -3,16 +3,17 @@
 // (an initiator queues up to dozens; one at a time would cut it to queue depth 1), NOP, SendTargets, task management,
 // logout. The reader parses PDUs and spawns a task per command; one writer task numbers and sends every reply.
 // Writes (only the game update machine may): the data is asked for with R2T, one write's data at a time.
+use parking_lot::Mutex;
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicU16, AtomicU32, AtomicU64, Ordering};
-use std::sync::{Arc, LazyLock, Mutex};
+use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufWriter};
-use tokio::sync::{mpsc, Notify, OwnedSemaphorePermit, Semaphore};
+use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore, mpsc};
 
 use super::overlay::Overlay;
-use super::{scsi, Lun};
+use super::{Lun, scsi};
 
 /// What a session reads: `lun` under `layers` (games disk versions, oldest first); with an overlay it also writes.
 #[derive(Clone)]
@@ -30,7 +31,7 @@ static PEERS: LazyLock<Mutex<HashMap<String, Arc<AtomicU64>>>> = LazyLock::new(D
 const PEERS_MAX: usize = 1024;
 
 fn peer_counter(ip: &str) -> Arc<AtomicU64> {
-    let mut p = PEERS.lock().unwrap();
+    let mut p = PEERS.lock();
     if p.len() >= PEERS_MAX && !p.contains_key(ip) {
         p.retain(|_, c| Arc::strong_count(c) > 1); // no session holds it
     }
@@ -41,9 +42,12 @@ pub fn peers() -> Vec<super::PeerInfo> {
     // A session holds a clone of its IP's counter: more than the map's own = logged in.
     PEERS
         .lock()
-        .unwrap()
         .iter()
-        .map(|(ip, c)| super::PeerInfo { ip: ip.clone(), read_bytes: c.load(Ordering::Relaxed), connected: Arc::strong_count(c) > 1 })
+        .map(|(ip, c)| super::PeerInfo {
+            ip: ip.clone(),
+            read_bytes: c.load(Ordering::Relaxed),
+            connected: Arc::strong_count(c) > 1,
+        })
         .collect()
 }
 
@@ -60,7 +64,8 @@ pub const MRDSL: usize = 262_144;
 const WINDOW: u32 = 64;
 /// Commands in flight in the whole daemon: bounds the read buffers (≤ 1 MB each) whatever the connection count — to
 /// 10% of the server's RAM (16 GB → ~1600), so a burst can't run it out of memory.
-pub static IN_FLIGHT_MAX: LazyLock<usize> = LazyLock::new(|| crate::sysmon::ram_share(10, 1 << 20, 256));
+pub static IN_FLIGHT_MAX: LazyLock<usize> =
+    LazyLock::new(|| crate::sysmon::ram_share(10, 1 << 20, 256));
 static IN_FLIGHT: LazyLock<Semaphore> = LazyLock::new(|| Semaphore::new(*IN_FLIGHT_MAX));
 /// A data segment bigger than this ends the connection (login/text are small; Data-Out ≤ MRDSL).
 const MAX_IN: usize = 1 << 20;
@@ -86,7 +91,10 @@ pub async fn read_pdu(r: &mut (impl AsyncRead + Unpin)) -> std::io::Result<Pdu> 
     let ahs = bhs[4] as usize * 4;
     let dlen = (bhs[5] as usize) << 16 | (bhs[6] as usize) << 8 | bhs[7] as usize;
     if dlen > MAX_IN {
-        return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "data segment too big"));
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "data segment too big",
+        ));
     }
     let mut data = vec![0u8; ahs + dlen + pad(dlen)];
     r.read_exact(&mut data).await?;
@@ -106,7 +114,12 @@ pub struct Out {
 impl Out {
     fn new(bhs: [u8; 48], data: Vec<u8>, status: bool) -> Out {
         let n = data.len();
-        Out { bhs, data: Arc::new(data), range: (0, n), status }
+        Out {
+            bhs,
+            data: Arc::new(data),
+            range: (0, n),
+            status,
+        }
     }
 }
 
@@ -133,7 +146,10 @@ pub async fn writer(w: impl AsyncWrite + Unpin, mut rx: mpsc::Receiver<Out>, exp
                 w.write_all(d).await?;
                 w.write_all(&[0u8; 3][..pad(d.len())]).await
             };
-            if !matches!(tokio::time::timeout(Duration::from_secs(30), send).await, Ok(Ok(()))) {
+            if !matches!(
+                tokio::time::timeout(Duration::from_secs(30), send).await,
+                Ok(Ok(()))
+            ) {
                 return;
             }
             match rx.try_recv() {
@@ -141,16 +157,20 @@ pub async fn writer(w: impl AsyncWrite + Unpin, mut rx: mpsc::Receiver<Out>, exp
                 Err(_) => break,
             }
         }
-        if !matches!(tokio::time::timeout(Duration::from_secs(30), w.flush()).await, Ok(Ok(()))) {
+        if !matches!(
+            tokio::time::timeout(Duration::from_secs(30), w.flush()).await,
+            Ok(Ok(()))
+        ) {
             return;
         }
     }
     let _ = tokio::time::timeout(Duration::from_secs(5), w.flush()).await;
 }
 
+type Sessions = HashMap<(String, [u8; 6]), Arc<Notify>>;
 /// Logged-in sessions by (initiator name, ISID): a new login with the same ones replaces the old session (the
 /// initiator lost it, e.g. a network blip) — the old connection is told to close instead of waiting for TCP to time out.
-static ACTIVE: LazyLock<Mutex<HashMap<(String, [u8; 6]), Arc<Notify>>>> = LazyLock::new(Default::default);
+static ACTIVE: LazyLock<Mutex<Sessions>> = LazyLock::new(Default::default);
 static TSIH: AtomicU16 = AtomicU16::new(1);
 
 struct Login {
@@ -168,7 +188,8 @@ fn keys(d: &[u8]) -> Vec<(String, String)> {
     d.split(|&b| b == 0)
         .filter_map(|kv| {
             let s = String::from_utf8_lossy(kv);
-            s.split_once('=').map(|(k, v)| (k.to_string(), v.to_string()))
+            s.split_once('=')
+                .map(|(k, v)| (k.to_string(), v.to_string()))
         })
         .collect()
 }
@@ -177,9 +198,25 @@ fn keys(d: &[u8]) -> Vec<(String, String)> {
 fn answer(k: &str, v: &str) -> Option<String> {
     let num = |max: u64| v.parse::<u64>().map_or(max, |n| n.min(max)).to_string();
     Some(match k {
-        "InitiatorName" | "TargetName" | "SessionType" | "InitiatorAlias" | "MaxRecvDataSegmentLength" => return None,
-        "AuthMethod" => if v.split(',').any(|m| m == "None") { "None".into() } else { "Reject".into() },
-        "HeaderDigest" | "DataDigest" => if v.split(',').any(|m| m == "None") { "None".into() } else { "Reject".into() },
+        "InitiatorName"
+        | "TargetName"
+        | "SessionType"
+        | "InitiatorAlias"
+        | "MaxRecvDataSegmentLength" => return None,
+        "AuthMethod" => {
+            if v.split(',').any(|m| m == "None") {
+                "None".into()
+            } else {
+                "Reject".into()
+            }
+        }
+        "HeaderDigest" | "DataDigest" => {
+            if v.split(',').any(|m| m == "None") {
+                "None".into()
+            } else {
+                "Reject".into()
+            }
+        }
         "MaxConnections" | "MaxOutstandingR2T" => "1".into(),
         "ErrorRecoveryLevel" | "DefaultTime2Retain" => "0".into(),
         "InitialR2T" | "DataPDUInOrder" | "DataSequenceInOrder" => "Yes".into(),
@@ -192,8 +229,14 @@ fn answer(k: &str, v: &str) -> Option<String> {
 }
 
 /// Login phase. Ok(None) = refused (response already queued) or the connection ended.
-async fn login(r: &mut (impl AsyncRead + Unpin), tx: &mpsc::Sender<Out>, exp: &AtomicU32, peer: &str) -> std::io::Result<Option<Login>> {
-    let (mut name, mut target, mut kind, mut their_mrdsl) = (String::new(), None::<String>, "Normal".to_string(), 8192);
+async fn login(
+    r: &mut (impl AsyncRead + Unpin),
+    tx: &mpsc::Sender<Out>,
+    exp: &AtomicU32,
+    peer: &str,
+) -> std::io::Result<Option<Login>> {
+    let (mut name, mut target, mut kind, mut their_mrdsl) =
+        (String::new(), None::<String>, "Normal".to_string(), 8192);
     let mut burst = MRDSL;
     let (mut sent_tpgt, mut sent_mrdsl, mut pending) = (false, false, Vec::new());
     loop {
@@ -202,7 +245,12 @@ async fn login(r: &mut (impl AsyncRead + Unpin), tx: &mpsc::Sender<Out>, exp: &A
             return Ok(None); // anything but a login before full feature phase
         }
         let (flags, cmdsn) = (p.bhs[1], get32(&p.bhs, 24));
-        let (transit, cont, csg, nsg) = (flags & 0x80 != 0, flags & 0x40 != 0, (flags >> 2) & 3, flags & 3);
+        let (transit, cont, csg, nsg) = (
+            flags & 0x80 != 0,
+            flags & 0x40 != 0,
+            (flags >> 2) & 3,
+            flags & 3,
+        );
         exp.store(cmdsn, Ordering::Relaxed); // login is immediate: ExpCmdSN = its CmdSN
         let mut rsp = [0u8; 48];
         rsp[0] = 0x23;
@@ -221,7 +269,9 @@ async fn login(r: &mut (impl AsyncRead + Unpin), tx: &mpsc::Sender<Out>, exp: &A
                 "InitiatorName" => name = v.clone(),
                 "TargetName" => target = Some(v.clone()),
                 "SessionType" => kind = v.clone(),
-                "MaxRecvDataSegmentLength" => their_mrdsl = v.parse::<usize>().unwrap_or(8192).clamp(512, MRDSL),
+                "MaxRecvDataSegmentLength" => {
+                    their_mrdsl = v.parse::<usize>().unwrap_or(8192).clamp(512, MRDSL)
+                }
                 "MaxBurstLength" => burst = v.parse::<usize>().unwrap_or(MRDSL).clamp(512, MRDSL), // as `answer` says
                 _ => {}
             }
@@ -232,7 +282,11 @@ async fn login(r: &mut (impl AsyncRead + Unpin), tx: &mpsc::Sender<Out>, exp: &A
                 out.push(format!("{k}={a}"));
             }
         }
-        let lun = if kind == "Discovery" { None } else { target.as_deref().and_then(super::lookup) };
+        let lun = if kind == "Discovery" {
+            None
+        } else {
+            target.as_deref().and_then(super::lookup)
+        };
         if fail.is_none() && kind != "Discovery" && lun.is_none() {
             fail = Some((0x02, 0x03)); // target not found
         }
@@ -265,7 +319,11 @@ async fn login(r: &mut (impl AsyncRead + Unpin), tx: &mpsc::Sender<Out>, exp: &A
             out.push(format!("MaxRecvDataSegmentLength={MRDSL}"));
             sent_mrdsl = true;
         }
-        rsp[1] = if transit { 0x80 | csg << 2 | nsg } else { csg << 2 };
+        rsp[1] = if transit {
+            0x80 | csg << 2 | nsg
+        } else {
+            csg << 2
+        };
         if done {
             rsp[14..16].copy_from_slice(&TSIH.fetch_add(1, Ordering::Relaxed).max(1).to_be_bytes());
         }
@@ -273,9 +331,22 @@ async fn login(r: &mut (impl AsyncRead + Unpin), tx: &mpsc::Sender<Out>, exp: &A
         tx.send(Out::new(rsp, text, true)).await.ok();
         if done {
             let isid: [u8; 6] = p.bhs[8..14].try_into().unwrap();
-            let (layers, ov) = games.as_ref().map_or((Arc::from([]), None), |v| (Arc::from(v.layers.clone()), v.ov.clone()));
-            let disk = lun.map(|lun| Disk { lun, layers, ov, rx: peer_counter(peer) });
-            return Ok(Some(Login { disk, games, their_mrdsl, burst, key: (name, isid) }));
+            let (layers, ov) = games.as_ref().map_or((Arc::from([]), None), |v| {
+                (Arc::from(v.layers.clone()), v.ov.clone())
+            });
+            let disk = lun.map(|lun| Disk {
+                lun,
+                layers,
+                ov,
+                rx: peer_counter(peer),
+            });
+            return Ok(Some(Login {
+                disk,
+                games,
+                their_mrdsl,
+                burst,
+                key: (name, isid),
+            }));
         }
     }
 }
@@ -297,13 +368,18 @@ impl Drop for Attached {
 }
 
 pub async fn serve(sock: tokio::net::TcpStream, peer: String) {
-    let local = sock.local_addr().map(|a| a.ip().to_string()).unwrap_or_default();
+    let local = sock
+        .local_addr()
+        .map(|a| a.ip().to_string())
+        .unwrap_or_default();
     let (mut r, w) = sock.into_split();
     let (tx, rx) = mpsc::channel::<Out>(256);
     let exp = Arc::new(AtomicU32::new(0));
     let wt = tokio::spawn(writer(w, rx, exp.clone()));
     // A connection that never finishes logging in is dropped (slow-loris on a public port).
-    let Ok(Ok(Some(l))) = tokio::time::timeout(Duration::from_secs(15), login(&mut r, &tx, &exp, &peer)).await else {
+    let Ok(Ok(Some(l))) =
+        tokio::time::timeout(Duration::from_secs(15), login(&mut r, &tx, &exp, &peer)).await
+    else {
         drop(tx);
         let _ = wt.await;
         return;
@@ -313,14 +389,14 @@ pub async fn serve(sock: tokio::net::TcpStream, peer: String) {
     let kick = Arc::new(Notify::new());
     let _counted = l.disk.as_ref().map(|d| {
         d.lun.sessions.fetch_add(1, Ordering::Relaxed);
-        if let Some(old) = ACTIVE.lock().unwrap().insert(l.key.clone(), kick.clone()) {
+        if let Some(old) = ACTIVE.lock().insert(l.key.clone(), kick.clone()) {
             old.notify_one();
         }
         Counted(d.lun.clone())
     });
     full_feature(&mut r, &tx, &exp, &l, &kick, &local).await;
     if l.disk.is_some() {
-        let mut a = ACTIVE.lock().unwrap();
+        let mut a = ACTIVE.lock();
         if a.get(&l.key).is_some_and(|k| Arc::ptr_eq(k, &kick)) {
             a.remove(&l.key);
         }
@@ -406,14 +482,24 @@ async fn full_feature(
             return; // the writer gave up on this client
         }
         // Next write in line: its slot, its buffer, its first R2T.
-        if incoming.is_none() {
-            if let Some(bhs) = waiting.pop_front() {
-                let Ok(slot) = slots.clone().acquire_owned().await else { return };
-                ttt = ttt.wrapping_add(1) & 0x7fff_ffff;
-                let mut w = Incoming { bhs, buf: vec![0u8; get32(&bhs, 20) as usize], got: 0, burst_end: 0, ttt, r2tsn: 0, slot };
-                tx.send(w.r2t(l.burst, ttt)).await.ok();
-                incoming = Some(w);
-            }
+        if incoming.is_none()
+            && let Some(bhs) = waiting.pop_front()
+        {
+            let Ok(slot) = slots.clone().acquire_owned().await else {
+                return;
+            };
+            ttt = ttt.wrapping_add(1) & 0x7fff_ffff;
+            let mut w = Incoming {
+                bhs,
+                buf: vec![0u8; get32(&bhs, 20) as usize],
+                got: 0,
+                burst_end: 0,
+                ttt,
+                r2tsn: 0,
+                slot,
+            };
+            tx.send(w.r2t(l.burst, ttt)).await.ok();
+            incoming = Some(w);
         }
         let p = tokio::select! {
             p = read_pdu(r) => match p { Ok(p) => p, Err(_) => return },
@@ -442,19 +528,39 @@ async fn full_feature(
             }
             0x00 => {} // NOP-Out answering ours
             0x01 => {
-                let Some(disk) = l.disk.clone() else { return reject(tx, &p.bhs, 0x05).await };
+                let Some(disk) = l.disk.clone() else {
+                    return reject(tx, &p.bhs, 0x05).await;
+                };
                 if is_write(&p.bhs, &disk) {
                     waiting.push_back(p.bhs);
                     continue;
                 }
-                let Ok(slot) = slots.clone().acquire_owned().await else { return };
-                let Ok(global) = IN_FLIGHT.acquire().await else { return };
-                spawn_command(p.bhs, disk, l.their_mrdsl, Vec::new(), tx.clone(), slot, Some(global));
+                let Ok(slot) = slots.clone().acquire_owned().await else {
+                    return;
+                };
+                let Ok(global) = IN_FLIGHT.acquire().await else {
+                    return;
+                };
+                spawn_command(
+                    p.bhs,
+                    disk,
+                    l.their_mrdsl,
+                    Vec::new(),
+                    tx.clone(),
+                    slot,
+                    Some(global),
+                );
             }
             0x05 => {
                 // Data-Out: only the data our last R2T asked for, in order (DataPDUInOrder / DataSequenceInOrder).
-                let (ttt_in, off, n) = (get32(&p.bhs, 20), get32(&p.bhs, 40) as usize, p.data.len());
-                let ok = |w: &&mut Incoming| get32(&w.bhs, 16) == itt && w.ttt == ttt_in && off == w.got && off + n <= w.burst_end;
+                let (ttt_in, off, n) =
+                    (get32(&p.bhs, 20), get32(&p.bhs, 40) as usize, p.data.len());
+                let ok = |w: &&mut Incoming| {
+                    get32(&w.bhs, 16) == itt
+                        && w.ttt == ttt_in
+                        && off == w.got
+                        && off + n <= w.burst_end
+                };
                 let Some(w) = incoming.as_mut().filter(ok) else {
                     return reject(tx, &p.bhs, 0x09).await; // invalid PDU field: data nobody asked for
                 };
@@ -493,7 +599,9 @@ async fn full_feature(
                 let mut text = Vec::new();
                 if keys(&p.data).iter().any(|(k, _)| k == "SendTargets") {
                     for iqn in super::iqns() {
-                        text.extend(format!("TargetName={iqn}\0TargetAddress={local}:3260,1\0").bytes());
+                        text.extend(
+                            format!("TargetName={iqn}\0TargetAddress={local}:3260,1\0").bytes(),
+                        );
                     }
                 }
                 tx.send(Out::new(rsp, text, true)).await.ok();
@@ -580,10 +688,16 @@ pub async fn command(bhs: &[u8; 48], disk: Disk, mrdsl: usize, data: Vec<u8>) ->
                 Err(_) => scsi::Cmd::Check(0x04, 0x44, 0x00),
             }
         }
-        (scsi::Cmd::Write { lba, blocks }, Some(ov)) if blocks as usize * scsi::BLOCK as usize == moved => {
+        (scsi::Cmd::Write { lba, blocks }, Some(ov))
+            if blocks as usize * scsi::BLOCK as usize == moved =>
+        {
             let d = disk.clone();
             let off = lba * scsi::BLOCK;
-            match tokio::task::spawn_blocking(move || ov.write_at(&|o, b| d.read_at(o, b), off, &data)).await {
+            match tokio::task::spawn_blocking(move || {
+                ov.write_at(&|o, b| d.read_at(o, b), off, &data)
+            })
+            .await
+            {
                 Ok(Ok(())) => scsi::Cmd::Ok,
                 Ok(Err(e)) => {
                     tracing::warn!("iscsid: write {} @{off}+{moved}: {e}", lun.iqn);
@@ -593,14 +707,16 @@ pub async fn command(bhs: &[u8; 48], disk: Disk, mrdsl: usize, data: Vec<u8>) ->
             }
         }
         (scsi::Cmd::Write { .. }, _) => scsi::Cmd::Check(0x05, 0x24, 0x00), // data length ≠ the CDB's
-        (scsi::Cmd::Sync, Some(ov)) => match tokio::task::spawn_blocking(move || ov.flush()).await {
-            Ok(Ok(())) => scsi::Cmd::Ok,
-            Ok(Err(e)) => {
-                tracing::warn!("iscsid: sync {}: {e}", lun.iqn);
-                scsi::Cmd::Check(0x03, 0x0c, 0x00)
+        (scsi::Cmd::Sync, Some(ov)) => {
+            match tokio::task::spawn_blocking(move || ov.flush()).await {
+                Ok(Ok(())) => scsi::Cmd::Ok,
+                Ok(Err(e)) => {
+                    tracing::warn!("iscsid: sync {}: {e}", lun.iqn);
+                    scsi::Cmd::Check(0x03, 0x0c, 0x00)
+                }
+                Err(_) => scsi::Cmd::Check(0x04, 0x44, 0x00),
             }
-            Err(_) => scsi::Cmd::Check(0x04, 0x44, 0x00),
-        },
+        }
         (c, _) => c,
     };
     let mut base = [0u8; 48];
@@ -617,7 +733,9 @@ pub async fn command(bhs: &[u8; 48], disk: Disk, mrdsl: usize, data: Vec<u8>) ->
         Out::new(b, sense, true)
     };
     match cmd {
-        scsi::Cmd::Ok | scsi::Cmd::Read { .. } | scsi::Cmd::Write { .. } | scsi::Cmd::Sync => vec![response(0, Vec::new(), moved)],
+        scsi::Cmd::Ok | scsi::Cmd::Read { .. } | scsi::Cmd::Write { .. } | scsi::Cmd::Sync => {
+            vec![response(0, Vec::new(), moved)]
+        }
         scsi::Cmd::Check(k, a, q) => {
             let s = scsi::sense(k, a, q);
             let mut d = (s.len() as u16).to_be_bytes().to_vec();
@@ -648,7 +766,12 @@ pub async fn command(bhs: &[u8; 48], disk: Disk, mrdsl: usize, data: Vec<u8>) ->
                         put32(&mut b, 44, (edtl - n) as u32);
                     }
                 }
-                v.push(Out { bhs: b, data: data.clone(), range: (at, end), status: last });
+                v.push(Out {
+                    bhs: b,
+                    data: data.clone(),
+                    range: (at, end),
+                    status: last,
+                });
             }
             v
         }
@@ -673,14 +796,30 @@ mod tests {
 
     #[test]
     fn login_keys_answered() {
-        assert_eq!(answer("HeaderDigest", "CRC32C,None").as_deref(), Some("None"));
+        assert_eq!(
+            answer("HeaderDigest", "CRC32C,None").as_deref(),
+            Some("None")
+        );
         assert_eq!(answer("DataDigest", "CRC32C").as_deref(), Some("Reject"));
         assert_eq!(answer("AuthMethod", "CHAP,None").as_deref(), Some("None"));
-        assert_eq!(answer("MaxBurstLength", "16776192").as_deref(), Some("262144"));
+        assert_eq!(
+            answer("MaxBurstLength", "16776192").as_deref(),
+            Some("262144")
+        );
         assert_eq!(answer("MaxBurstLength", "65536").as_deref(), Some("65536"));
         assert_eq!(answer("ImmediateData", "Yes").as_deref(), Some("No"));
-        assert_eq!(answer("X-com.example", "1").as_deref(), Some("NotUnderstood"));
-        assert_eq!(answer("MaxRecvDataSegmentLength", "8192"), None, "declarative");
-        assert_eq!(keys(b"A=1\0B=x=y\0\0"), [("A".into(), "1".into()), ("B".into(), "x=y".into())]);
+        assert_eq!(
+            answer("X-com.example", "1").as_deref(),
+            Some("NotUnderstood")
+        );
+        assert_eq!(
+            answer("MaxRecvDataSegmentLength", "8192"),
+            None,
+            "declarative"
+        );
+        assert_eq!(
+            keys(b"A=1\0B=x=y\0\0"),
+            [("A".into(), "1".into()), ("B".into(), "x=y".into())]
+        );
     }
 }

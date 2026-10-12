@@ -27,7 +27,8 @@ pub struct Table {
 
 fn rd(f: &File, off: u64, len: usize) -> Result<Vec<u8>, String> {
     let mut b = vec![0u8; len];
-    f.read_exact_at(&mut b, off).map_err(|e| format!("read at {off}: {e}"))?;
+    f.read_exact_at(&mut b, off)
+        .map_err(|e| format!("read at {off}: {e}"))?;
     Ok(b)
 }
 
@@ -45,7 +46,14 @@ pub fn guid_str(g: &[u8]) -> String {
         u32le(g, 0),
         u16::from_le_bytes([g[4], g[5]]),
         u16::from_le_bytes([g[6], g[7]]),
-        g[8], g[9], g[10], g[11], g[12], g[13], g[14], g[15]
+        g[8],
+        g[9],
+        g[10],
+        g[11],
+        g[12],
+        g[13],
+        g[14],
+        g[15]
     )
 }
 
@@ -55,7 +63,9 @@ fn guid_bytes(s: &str) -> Option<[u8; 16]> {
     if h.len() != 32 {
         return None;
     }
-    let b: Vec<u8> = (0..16).map(|i| u8::from_str_radix(&h[i * 2..i * 2 + 2], 16).ok()).collect::<Option<_>>()?;
+    let b: Vec<u8> = (0..16)
+        .map(|i| u8::from_str_radix(&h[i * 2..i * 2 + 2], 16).ok())
+        .collect::<Option<_>>()?;
     let mut g = [0u8; 16];
     g[..4].copy_from_slice(&[b[3], b[2], b[1], b[0]]);
     g[4..6].copy_from_slice(&[b[5], b[4]]);
@@ -72,10 +82,10 @@ pub fn read(path: &str) -> Result<Option<Table>, String> {
         return Ok(None);
     }
     for ss in [512u64, 4096] {
-        if len >= ss * 2 {
-            if let Some(t) = read_gpt(&f, ss)? {
-                return Ok(Some(t));
-            }
+        if len >= ss * 2
+            && let Some(t) = read_gpt(&f, ss)?
+        {
+            return Ok(Some(t));
         }
     }
     read_mbr(&f, len)
@@ -93,7 +103,11 @@ fn read_gpt(f: &File, ss: u64) -> Result<Option<Table>, String> {
     if crc32fast::hash(&h) != want {
         return Err("GPT header checksum mismatch (corrupt partition table)".into());
     }
-    let (lba, n, esize) = (u64le(&h, 72), u32le(&h, 80) as usize, u32le(&h, 84) as usize);
+    let (lba, n, esize) = (
+        u64le(&h, 72),
+        u32le(&h, 80) as usize,
+        u32le(&h, 84) as usize,
+    );
     if !(128..=4096).contains(&esize) || n > 1024 {
         return Err(format!("GPT: unexpected entry table ({n} × {esize} bytes)"));
     }
@@ -103,10 +117,18 @@ fn read_gpt(f: &File, ss: u64) -> Result<Option<Table>, String> {
         .filter(|e| e[..16].iter().any(|&b| b != 0))
         .map(|e| {
             let (first, last) = (u64le(e, 32), u64le(e, 40));
-            Part { start: first * ss, size: (last + 1).saturating_sub(first) * ss, kind: guid_str(&e[..16]) }
+            Part {
+                start: first * ss,
+                size: (last + 1).saturating_sub(first) * ss,
+                kind: guid_str(&e[..16]),
+            }
         })
         .collect();
-    Ok(Some(Table { gpt: true, sector: ss, parts }))
+    Ok(Some(Table {
+        gpt: true,
+        sector: ss,
+        parts,
+    }))
 }
 
 fn read_mbr(f: &File, len: u64) -> Result<Option<Table>, String> {
@@ -119,7 +141,10 @@ fn read_mbr(f: &File, len: u64) -> Result<Option<Table>, String> {
         (e[4], u32le(e, 8) as u64, u32le(e, 12) as u64)
     };
     // A FAT/NTFS boot sector also ends in 55AA: a real MBR has sane entries inside the disk.
-    let prim: Vec<(u8, u64, u64)> = (0..4).map(|i| entry(&m, i)).filter(|(t, _, n)| *t != 0 && *n > 0).collect();
+    let prim: Vec<(u8, u64, u64)> = (0..4)
+        .map(|i| entry(&m, i))
+        .filter(|(t, _, n)| *t != 0 && *n > 0)
+        .collect();
     if prim.is_empty() || prim.iter().any(|(_, s, n)| (s + n) * 512 > len) {
         return Ok(None);
     }
@@ -136,7 +161,11 @@ fn read_mbr(f: &File, len: u64) -> Result<Option<Table>, String> {
                 }
                 let (lt, ls, ln) = entry(&b, 0);
                 if lt != 0 && ln > 0 {
-                    parts.push(Part { start: (ebr + ls) * 512, size: ln * 512, kind: format!("{lt:x}") });
+                    parts.push(Part {
+                        start: (ebr + ls) * 512,
+                        size: ln * 512,
+                        kind: format!("{lt:x}"),
+                    });
                 }
                 let (nt, ns, _) = entry(&b, 1);
                 if nt == 0 || ns == 0 {
@@ -145,11 +174,19 @@ fn read_mbr(f: &File, len: u64) -> Result<Option<Table>, String> {
                 ebr = s + ns;
             }
         } else {
-            parts.push(Part { start: s * 512, size: n * 512, kind: format!("{t:x}") });
+            parts.push(Part {
+                start: s * 512,
+                size: n * 512,
+                kind: format!("{t:x}"),
+            });
         }
     }
     parts.sort_by_key(|p| p.start);
-    Ok(Some(Table { gpt: false, sector: 512, parts }))
+    Ok(Some(Table {
+        gpt: false,
+        sector: 512,
+        parts,
+    }))
 }
 
 /// Rewrite `path` (a GPT disk image, 512-byte sectors) so it keeps ONE basic-data partition [start, start+size)
@@ -158,30 +195,44 @@ fn read_mbr(f: &File, len: u64) -> Result<Option<Table>, String> {
 /// (Windows' drive-letter mapping uses the partition GUID), so republishing gives the same bytes.
 pub fn write_single_gpt(path: &str, start: u64, size: u64) -> Result<(), String> {
     const SS: u64 = 512;
-    if start % SS != 0 || size % SS != 0 || size == 0 {
+    if !start.is_multiple_of(SS) || !size.is_multiple_of(SS) || size == 0 {
         return Err(format!("partition {start}+{size} is not sector-aligned"));
     }
-    let f = std::fs::OpenOptions::new().read(true).write(true).open(path).map_err(|e| format!("{path}: {e}"))?;
+    let f = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(path)
+        .map_err(|e| format!("{path}: {e}"))?;
     let total = f.metadata().map_err(|e| e.to_string())?.len() / SS;
     let (first, last) = (start / SS, (start + size) / SS - 1);
     if first < 34 || last + 34 > total {
-        return Err(format!("partition {start}+{size} does not fit a GPT on a {}-byte disk", total * SS));
+        return Err(format!(
+            "partition {start}+{size} does not fit a GPT on a {}-byte disk",
+            total * SS
+        ));
     }
     // Old table (if GPT): keep disk GUID + the matching entry's identity.
     let mut disk_guid = *blake3::hash(format!("broom-disk {path} {total}").as_bytes()).as_bytes();
     let mut entry = [0u8; 128];
-    entry[16..32].copy_from_slice(&blake3::hash(format!("broom-part {start} {size}").as_bytes()).as_bytes()[..16]);
-    if let Ok(h) = rd(&f, SS, 92) {
-        if &h[..8] == b"EFI PART" {
-            disk_guid[..16].copy_from_slice(&h[56..72]);
-            let (lba, n, esize) = (u64le(&h, 72), (u32le(&h, 80) as usize).min(1024), u32le(&h, 84) as usize);
-            if (128..=4096).contains(&esize) {
-                if let Ok(ents) = rd(&f, lba * SS, n * esize) {
-                    if let Some(e) = ents.chunks(esize).find(|e| u64le(e, 32) == first && e[..16].iter().any(|&b| b != 0)) {
-                        entry.copy_from_slice(&e[..128]);
-                    }
-                }
-            }
+    entry[16..32].copy_from_slice(
+        &blake3::hash(format!("broom-part {start} {size}").as_bytes()).as_bytes()[..16],
+    );
+    if let Ok(h) = rd(&f, SS, 92)
+        && &h[..8] == b"EFI PART"
+    {
+        disk_guid[..16].copy_from_slice(&h[56..72]);
+        let (lba, n, esize) = (
+            u64le(&h, 72),
+            (u32le(&h, 80) as usize).min(1024),
+            u32le(&h, 84) as usize,
+        );
+        if (128..=4096).contains(&esize)
+            && let Ok(ents) = rd(&f, lba * SS, n * esize)
+            && let Some(e) = ents
+                .chunks(esize)
+                .find(|e| u64le(e, 32) == first && e[..16].iter().any(|&b| b != 0))
+        {
+            entry.copy_from_slice(&e[..128]);
         }
     }
     entry[..16].copy_from_slice(&guid_bytes(BASIC_DATA).unwrap());
@@ -216,9 +267,13 @@ pub fn write_single_gpt(path: &str, start: u64, size: u64) -> Result<(), String>
     mbr[446 + 1..446 + 4].copy_from_slice(&[0x00, 0x02, 0x00]); // CHS 0/0/2
     mbr[446 + 5..446 + 8].copy_from_slice(&[0xFF, 0xFF, 0xFF]);
     mbr[446 + 8..446 + 12].copy_from_slice(&1u32.to_le_bytes());
-    mbr[446 + 12..446 + 16].copy_from_slice(&((total - 1).min(u32::MAX as u64) as u32).to_le_bytes());
+    mbr[446 + 12..446 + 16]
+        .copy_from_slice(&((total - 1).min(u32::MAX as u64) as u32).to_le_bytes());
     mbr[510..].copy_from_slice(&[0x55, 0xAA]);
-    let w = |off: u64, b: &[u8]| f.write_all_at(b, off).map_err(|e| format!("write {path} at {off}: {e}"));
+    let w = |off: u64, b: &[u8]| {
+        f.write_all_at(b, off)
+            .map_err(|e| format!("write {path} at {off}: {e}"))
+    };
     w(0, &mbr)?;
     w(SS, &header(1, total - 1, 2))?;
     w(2 * SS, &ents)?;
@@ -229,34 +284,47 @@ pub fn write_single_gpt(path: &str, start: u64, size: u64) -> Result<(), String>
 
 /// I/O threads for image conversions: the CPU count, 2..=8 (more only queues behind the disk).
 pub fn workers() -> usize {
-    std::thread::available_parallelism().map_or(4, |n| n.get()).clamp(2, 8)
+    std::thread::available_parallelism()
+        .map_or(4, |n| n.get())
+        .clamp(2, 8)
 }
 
 /// `f` over `items` on `workers()` threads (a shared work queue), results in input order. The first error stops
 /// the remaining items and is returned.
-pub fn par_map<T: Sync, R: Send>(items: &[T], f: impl Fn(&T) -> Result<R, String> + Sync) -> Result<Vec<R>, String> {
+pub fn par_map<T: Sync, R: Send>(
+    items: &[T],
+    f: impl Fn(&T) -> Result<R, String> + Sync,
+) -> Result<Vec<R>, String> {
     use std::sync::atomic::{AtomicUsize, Ordering};
     let next = AtomicUsize::new(0);
-    let out: Vec<std::sync::Mutex<Option<Result<R, String>>>> = items.iter().map(|_| Default::default()).collect();
+    let out: Vec<parking_lot::Mutex<Option<Result<R, String>>>> =
+        items.iter().map(|_| Default::default()).collect();
     std::thread::scope(|s| {
         for _ in 0..workers().min(items.len()) {
-            s.spawn(|| loop {
-                let i = next.fetch_add(1, Ordering::Relaxed);
-                if i >= items.len() {
-                    break;
-                }
-                let r = f(&items[i]);
-                let failed = r.is_err();
-                *out[i].lock().unwrap() = Some(r);
-                if failed {
-                    next.store(items.len(), Ordering::Relaxed);
-                    break;
+            s.spawn(|| {
+                loop {
+                    let i = next.fetch_add(1, Ordering::Relaxed);
+                    if i >= items.len() {
+                        break;
+                    }
+                    let r = f(&items[i]);
+                    let failed = r.is_err();
+                    *out[i].lock() = Some(r);
+                    if failed {
+                        next.store(items.len(), Ordering::Relaxed);
+                        break;
+                    }
                 }
             });
         }
     });
     // Items before a failure were all claimed earlier, so they finished: the first Err in order is the real one.
-    out.into_iter().map(|m| m.into_inner().unwrap().unwrap_or_else(|| Err("stopped after an error".into()))).collect()
+    out.into_iter()
+        .map(|m| {
+            m.into_inner()
+                .unwrap_or_else(|| Err("stopped after an error".into()))
+        })
+        .collect()
 }
 
 /// A virtual disk made of byte ranges of files, back to back (a whole raw golden, or head.raw + the Windows
@@ -280,7 +348,10 @@ impl Source {
             let size = f.metadata().map_err(|e| e.to_string())?.len();
             let l = l.unwrap_or(size.saturating_sub(*off));
             if off + l > size {
-                return Err(format!("{}: range {off}+{l} beyond its {size} bytes", p.display()));
+                return Err(format!(
+                    "{}: range {off}+{l} beyond its {size} bytes",
+                    p.display()
+                ));
             }
             len += l;
             segs.push((f, *off, l));
@@ -298,7 +369,8 @@ impl Source {
             }
             if off < base + sl {
                 let n = ((base + sl - off) as usize).min(buf.len() - done);
-                f.read_exact_at(&mut buf[done..done + n], so + (off - base)).map_err(|e| format!("read: {e}"))?;
+                f.read_exact_at(&mut buf[done..done + n], so + (off - base))
+                    .map_err(|e| format!("read: {e}"))?;
                 done += n;
                 off += n as u64;
             }
@@ -349,8 +421,18 @@ mod tests {
     #[test]
     fn par_map_order_and_errors() {
         let items: Vec<u32> = (0..100).collect();
-        assert_eq!(par_map(&items, |&x| Ok(x * 2)).unwrap(), items.iter().map(|x| x * 2).collect::<Vec<_>>());
-        let e = par_map(&items, |&x| if x == 37 { Err(format!("bad {x}")) } else { Ok(x) }).unwrap_err();
+        assert_eq!(
+            par_map(&items, |&x| Ok(x * 2)).unwrap(),
+            items.iter().map(|x| x * 2).collect::<Vec<_>>()
+        );
+        let e = par_map(&items, |&x| {
+            if x == 37 {
+                Err(format!("bad {x}"))
+            } else {
+                Ok(x)
+            }
+        })
+        .unwrap_err();
         assert_eq!(e, "bad 37");
         assert!(par_map(&Vec::<u32>::new(), |&x| Ok(x)).unwrap().is_empty());
     }
@@ -373,7 +455,11 @@ mod tests {
         s.read_at(4 + (16 << 20), &mut buf[..4]).unwrap();
         assert_eq!(&buf[..4], b"DATA");
         let r = s.data_ranges();
-        assert!(r.iter().any(|&(x, y)| x <= 4 + (16 << 20) && y >= 8 + (16 << 20)), "{r:?}");
+        assert!(
+            r.iter()
+                .any(|&(x, y)| x <= 4 + (16 << 20) && y >= 8 + (16 << 20)),
+            "{r:?}"
+        );
         let total: u64 = r.iter().map(|(x, y)| y - x).sum();
         assert!(total < 8 << 20, "holes skipped: {r:?}");
         let _ = std::fs::remove_dir_all(&d);
@@ -381,8 +467,16 @@ mod tests {
 
     fn sfdisk(path: &str, script: &str) {
         use std::io::Write;
-        let mut c = Command::new("sfdisk").args(["-q", "--no-reread", path]).stdin(std::process::Stdio::piped()).spawn().unwrap();
-        c.stdin.take().unwrap().write_all(script.as_bytes()).unwrap();
+        let mut c = Command::new("sfdisk")
+            .args(["-q", "--no-reread", path])
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        c.stdin
+            .take()
+            .unwrap()
+            .write_all(script.as_bytes())
+            .unwrap();
         assert!(c.wait().unwrap().success(), "sfdisk {script}");
     }
 
@@ -397,14 +491,26 @@ mod tests {
             .unwrap()
             .iter()
             .filter(|p| !matches!(p["type"].as_str(), Some("5" | "f" | "85")))
-            .map(|p| (p["start"].as_u64().unwrap() * ss, p["size"].as_u64().unwrap() * ss, p["type"].as_str().unwrap().to_uppercase()))
+            .map(|p| {
+                (
+                    p["start"].as_u64().unwrap() * ss,
+                    p["size"].as_u64().unwrap() * ss,
+                    p["type"].as_str().unwrap().to_uppercase(),
+                )
+            })
             .collect();
         (t["label"] == "gpt", parts)
     }
 
     fn mine(path: &str) -> (bool, Vec<(u64, u64, String)>) {
         let t = read(path).unwrap().unwrap();
-        (t.gpt, t.parts.into_iter().map(|p| (p.start, p.size, p.kind.to_uppercase())).collect())
+        (
+            t.gpt,
+            t.parts
+                .into_iter()
+                .map(|p| (p.start, p.size, p.kind.to_uppercase()))
+                .collect(),
+        )
     }
 
     fn disk(name: &str, mb: u64) -> String {
@@ -417,14 +523,26 @@ mod tests {
     #[test]
     fn reads_like_sfdisk() {
         let g = disk("gpt", 64);
-        sfdisk(&g, &format!("label: gpt\nsize=8MiB, type={ESP}\nsize=1MiB, type=E3C9E316-0B5C-4DB8-817D-F92DF00215AE\ntype={BASIC_DATA}\n"));
+        sfdisk(
+            &g,
+            &format!(
+                "label: gpt\nsize=8MiB, type={ESP}\nsize=1MiB, type=E3C9E316-0B5C-4DB8-817D-F92DF00215AE\ntype={BASIC_DATA}\n"
+            ),
+        );
         assert_eq!(mine(&g), sfdisk_json(&g));
         assert_eq!(read(&g).unwrap().unwrap().parts.len(), 3);
         let m = disk("mbr", 64);
-        sfdisk(&m, "label: dos\nsize=8MiB, type=7, bootable\nsize=20MiB, type=83\ntype=5\nsize=10MiB, type=82\ntype=8e\n");
+        sfdisk(
+            &m,
+            "label: dos\nsize=8MiB, type=7, bootable\nsize=20MiB, type=83\ntype=5\nsize=10MiB, type=82\ntype=8e\n",
+        );
         let (gpt, parts) = mine(&m);
         assert!(!gpt && parts.len() == 4, "{parts:?}");
-        assert_eq!((gpt, parts), sfdisk_json(&m), "primaries + logicals, extended container left out");
+        assert_eq!(
+            (gpt, parts),
+            sfdisk_json(&m),
+            "primaries + logicals, extended container left out"
+        );
         assert_eq!(read(&disk("empty", 4)).unwrap(), None, "no table");
         for p in [g, m] {
             let _ = std::fs::remove_file(p);
@@ -434,24 +552,63 @@ mod tests {
     #[test]
     fn single_gpt_keeps_the_windows_partition() {
         let g = disk("single", 64);
-        sfdisk(&g, &format!("label: gpt\nsize=8MiB, type={ESP}\nsize=1MiB, type=E3C9E316-0B5C-4DB8-817D-F92DF00215AE\nsize=40MiB, type={BASIC_DATA}, name=\"Basic data partition\"\n"));
+        sfdisk(
+            &g,
+            &format!(
+                "label: gpt\nsize=8MiB, type={ESP}\nsize=1MiB, type=E3C9E316-0B5C-4DB8-817D-F92DF00215AE\nsize=40MiB, type={BASIC_DATA}, name=\"Basic data partition\"\n"
+            ),
+        );
         let win = read(&g).unwrap().unwrap().parts[2].clone();
-        let uuid = |p: &str| String::from_utf8(Command::new("sfdisk").args(["--part-uuid", p, "3"]).output().unwrap().stdout).unwrap();
+        let uuid = |p: &str| {
+            String::from_utf8(
+                Command::new("sfdisk")
+                    .args(["--part-uuid", p, "3"])
+                    .output()
+                    .unwrap()
+                    .stdout,
+            )
+            .unwrap()
+        };
         let before = uuid(&g);
-        File::options().write(true).open(&g).unwrap().write_all_at(b"NTFS-DATA", win.start + 3).unwrap();
+        File::options()
+            .write(true)
+            .open(&g)
+            .unwrap()
+            .write_all_at(b"NTFS-DATA", win.start + 3)
+            .unwrap();
         write_single_gpt(&g, win.start, win.size).unwrap();
         let (gpt, parts) = sfdisk_json(&g);
         assert!(gpt);
         assert_eq!(parts, vec![(win.start, win.size, BASIC_DATA.to_string())]);
-        assert!(Command::new("sfdisk").args(["--verify", &g]).status().unwrap().success(), "sfdisk accepts both tables");
-        let after = String::from_utf8(Command::new("sfdisk").args(["--part-uuid", &g, "1"]).output().unwrap().stdout).unwrap();
+        assert!(
+            Command::new("sfdisk")
+                .args(["--verify", &g])
+                .status()
+                .unwrap()
+                .success(),
+            "sfdisk accepts both tables"
+        );
+        let after = String::from_utf8(
+            Command::new("sfdisk")
+                .args(["--part-uuid", &g, "1"])
+                .output()
+                .unwrap()
+                .stdout,
+        )
+        .unwrap();
         assert_eq!(after, before, "partition GUID kept");
         let mut b = [0u8; 9];
-        File::open(&g).unwrap().read_exact_at(&mut b, win.start + 3).unwrap();
+        File::open(&g)
+            .unwrap()
+            .read_exact_at(&mut b, win.start + 3)
+            .unwrap();
         assert_eq!(&b, b"NTFS-DATA", "partition contents untouched");
         let first = std::fs::read(&g).unwrap();
         write_single_gpt(&g, win.start, win.size).unwrap();
-        assert!(std::fs::read(&g).unwrap() == first, "same input → same bytes");
+        assert!(
+            std::fs::read(&g).unwrap() == first,
+            "same input → same bytes"
+        );
         let _ = std::fs::remove_file(g);
     }
 

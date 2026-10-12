@@ -1,16 +1,16 @@
 // monitor.rs — Machine list (registered + discovered via DHCP) + on/off (ICMP ping) + Wake-on-LAN.
 // The web polls /api/status every 15 s → pings are never logged (only real events are).
 use axum::{
+    Json, Router,
     extract::State,
     http::StatusCode,
     routing::{get, post},
-    Json, Router,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 use crate::db::Machine;
-use crate::{wol, SharedState};
+use crate::{SharedState, wol};
 
 pub fn routes() -> Router<SharedState> {
     Router::new()
@@ -48,12 +48,21 @@ async fn status(State(st): State<SharedState>) -> Json<Vec<MachineStatus>> {
 
     // 1. Registered, from the DB.
     for m in st.db.machines().unwrap_or_default() {
-        map.insert(m.mac.to_lowercase(), (m.ip.clone(), m.hostname.clone(), true));
+        map.insert(
+            m.mac.to_lowercase(),
+            (m.ip.clone(), m.hostname.clone(), true),
+        );
         rows.insert(m.mac.to_lowercase(), m);
     }
 
     // 2. Discovered via the built-in DHCP server (active leases).
-    for l in st.db.leases().unwrap_or_default().into_iter().filter(|l| !l.mac.starts_with("declined-")) {
+    for l in st
+        .db
+        .leases()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|l| !l.mac.starts_with("declined-"))
+    {
         let (mac, ip, host) = (l.mac, l.ip, l.hostname);
         map.entry(mac.to_lowercase())
             .and_modify(|e| {
@@ -65,15 +74,23 @@ async fn status(State(st): State<SharedState>) -> Json<Vec<MachineStatus>> {
     }
 
     // 3. Seen PXE-booting (boot menu choice) — how new machines show up when the LAN's own DHCP serves them.
-    let seen = st.pxe_ip.lock().unwrap().clone();
+    let seen = st.pxe_ip.lock().clone();
     for (mac, ip) in seen {
-        map.entry(mac).and_modify(|e| { if e.0.is_none() { e.0 = Some(ip.clone()); } }).or_insert((Some(ip), None, false));
+        map.entry(mac)
+            .and_modify(|e| {
+                if e.0.is_none() {
+                    e.0 = Some(ip.clone());
+                }
+            })
+            .or_insert((Some(ip), None, false));
     }
 
     // PARALLEL ping (JoinSet + spawn_blocking): 30 offline machines waiting 1 s in sequence = ~30 s
     // and blocks the runtime → concurrently it's ~1 s, without blocking a tokio worker.
-    let entries: Vec<(String, Option<String>, Option<String>, bool)> =
-        map.into_iter().map(|(mac, (ip, hostname, registered))| (mac, ip, hostname, registered)).collect();
+    let entries: Vec<(String, Option<String>, Option<String>, bool)> = map
+        .into_iter()
+        .map(|(mac, (ip, hostname, registered))| (mac, ip, hostname, registered))
+        .collect();
     // At most 32 pings at once: each holds a blocking thread up to 1 s, and the list can hold many machines (it also
     // shows every MAC seen PXE-booting) — they must not crowd out logins and jobs on the blocking pool.
     let mut set = tokio::task::JoinSet::new();
@@ -82,7 +99,12 @@ async fn status(State(st): State<SharedState>) -> Json<Vec<MachineStatus>> {
         let (ip, slots) = (ip.clone(), slots.clone());
         set.spawn(async move {
             let _slot = slots.acquire_owned().await;
-            (i, tokio::task::spawn_blocking(move || ip.as_deref().is_some_and(ping)).await.unwrap_or(false))
+            (
+                i,
+                tokio::task::spawn_blocking(move || ip.as_deref().is_some_and(ping))
+                    .await
+                    .unwrap_or(false),
+            )
         });
     }
     let mut online = vec![false; entries.len()];
@@ -91,8 +113,8 @@ async fn status(State(st): State<SharedState>) -> Json<Vec<MachineStatus>> {
             online[i] = on;
         }
     }
-    let not_reset = st.not_reset.lock().unwrap().clone();
-    let ssd_low = st.ssd_low.lock().unwrap().clone();
+    let not_reset = st.not_reset.lock().clone();
+    let ssd_low = st.ssd_low.lock().clone();
     let mut out: Vec<MachineStatus> = entries
         .into_iter()
         .zip(online)
@@ -131,14 +153,37 @@ fn ping(ip: &str) -> bool {
     use socket2::{Domain, Protocol, Socket, Type};
     use std::io::Read;
     use std::time::{Duration, Instant};
-    let Ok(addr) = ip.parse::<std::net::Ipv4Addr>() else { return false };
-    let Ok(mut s) = Socket::new(Domain::IPV4, Type::RAW, Some(Protocol::ICMPV4)) else { return false };
+    let Ok(addr) = ip.parse::<std::net::Ipv4Addr>() else {
+        return false;
+    };
+    let Ok(mut s) = Socket::new(Domain::IPV4, Type::RAW, Some(Protocol::ICMPV4)) else {
+        return false;
+    };
     // Identifier distinguishes our echo from other pings in flight (raw sockets see every ICMP packet).
     let id = (std::process::id() as u16) ^ (u32::from(addr) as u16);
-    let mut pkt = [8, 0, 0, 0, (id >> 8) as u8, id as u8, 0, 1, b'b', b'r', b'o', b'o', b'm', 0, 0, 0];
+    let mut pkt = [
+        8,
+        0,
+        0,
+        0,
+        (id >> 8) as u8,
+        id as u8,
+        0,
+        1,
+        b'b',
+        b'r',
+        b'o',
+        b'o',
+        b'm',
+        0,
+        0,
+        0,
+    ];
     let ck = icmp_checksum(&pkt);
     pkt[2..4].copy_from_slice(&ck.to_be_bytes());
-    if s.send_to(&pkt, &std::net::SocketAddrV4::new(addr, 0).into()).is_err() {
+    if s.send_to(&pkt, &std::net::SocketAddrV4::new(addr, 0).into())
+        .is_err()
+    {
         return false;
     }
     let deadline = Instant::now() + Duration::from_secs(1);
@@ -148,10 +193,16 @@ fn ping(ip: &str) -> bool {
         if left.is_zero() || s.set_read_timeout(Some(left)).is_err() {
             return false;
         }
-        let Ok(n) = s.read(&mut buf) else { return false };
+        let Ok(n) = s.read(&mut buf) else {
+            return false;
+        };
         // Raw IPv4 socket: IP header first (source at 12..16), then ICMP.
         let hl = (buf[0] & 0x0f) as usize * 4;
-        if n >= hl + 8 && buf[12..16] == addr.octets() && buf[hl] == 0 && buf[hl + 4..hl + 6] == id.to_be_bytes() {
+        if n >= hl + 8
+            && buf[12..16] == addr.octets()
+            && buf[hl] == 0
+            && buf[hl + 4..hl + 6] == id.to_be_bytes()
+        {
             return true;
         }
     }
@@ -159,7 +210,10 @@ fn ping(ip: &str) -> bool {
 
 /// RFC 1071 internet checksum.
 fn icmp_checksum(b: &[u8]) -> u16 {
-    let mut s: u32 = b.chunks(2).map(|c| u16::from_be_bytes([c[0], *c.get(1).unwrap_or(&0)]) as u32).sum();
+    let mut s: u32 = b
+        .chunks(2)
+        .map(|c| u16::from_be_bytes([c[0], *c.get(1).unwrap_or(&0)]) as u32)
+        .sum();
     while s >> 16 != 0 {
         s = (s & 0xffff) + (s >> 16);
     }
@@ -189,7 +243,10 @@ struct WakeBody {
     mac: String,
 }
 
-async fn wake(State(st): State<SharedState>, Json(b): Json<WakeBody>) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+async fn wake(
+    State(st): State<SharedState>,
+    Json(b): Json<WakeBody>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     wol::wake(&*st.db, &b.mac).map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
     tracing::info!(mac = %b.mac, "wake-on-LAN sent");
     Ok(Json(serde_json::json!({"ok": true})))

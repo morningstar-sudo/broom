@@ -35,7 +35,11 @@ fn crc32c(data: &[u8]) -> u32 {
     for &b in data {
         c ^= b as u32;
         for _ in 0..8 {
-            c = if c & 1 != 0 { (c >> 1) ^ 0x82F6_3B78 } else { c >> 1 };
+            c = if c & 1 != 0 {
+                (c >> 1) ^ 0x82F6_3B78
+            } else {
+                c >> 1
+            };
         }
     }
     !c
@@ -61,7 +65,14 @@ pub fn guid_str(b: &[u8; 16]) -> String {
     a[0..4].reverse();
     a[4..6].reverse();
     a[6..8].reverse();
-    format!("{{{}-{}-{}-{}-{}}}", h(&a[0..4]), h(&a[4..6]), h(&a[6..8]), h(&a[8..10]), h(&a[10..16]))
+    format!(
+        "{{{}-{}-{}-{}-{}}}",
+        h(&a[0..4]),
+        h(&a[4..6]),
+        h(&a[6..8]),
+        h(&a[8..10]),
+        h(&a[10..16])
+    )
 }
 
 fn rand_guid() -> [u8; 16] {
@@ -75,17 +86,24 @@ fn rand_guid() -> [u8; 16] {
 }
 
 #[cfg(test)]
-fn u16le(b: &[u8], o: usize) -> u16 { u16::from_le_bytes([b[o], b[o + 1]]) }
+fn u16le(b: &[u8], o: usize) -> u16 {
+    u16::from_le_bytes([b[o], b[o + 1]])
+}
 #[cfg(test)]
-fn u32le(b: &[u8], o: usize) -> u32 { u32::from_le_bytes(b[o..o + 4].try_into().unwrap()) }
+fn u32le(b: &[u8], o: usize) -> u32 {
+    u32::from_le_bytes(b[o..o + 4].try_into().unwrap())
+}
 #[cfg(test)]
-fn u64le(b: &[u8], o: usize) -> u64 { u64::from_le_bytes(b[o..o + 8].try_into().unwrap()) }
+fn u64le(b: &[u8], o: usize) -> u64 {
+    u64::from_le_bytes(b[o..o + 8].try_into().unwrap())
+}
 
 #[cfg(test)]
 fn read_at(f: &mut File, off: u64, len: usize) -> Result<Vec<u8>, String> {
     let mut buf = vec![0u8; len];
     f.seek(SeekFrom::Start(off)).map_err(|e| e.to_string())?;
-    f.read_exact(&mut buf).map_err(|e| format!("read VHDX @{off}: {e}"))?;
+    f.read_exact(&mut buf)
+        .map_err(|e| format!("read VHDX @{off}: {e}"))?;
     Ok(buf)
 }
 
@@ -108,13 +126,18 @@ pub fn read_info(path: &str) -> Result<Info, String> {
     let mut hdr: Option<Vec<u8>> = None;
     for off in [KB64, 2 * KB64] {
         let h = read_at(&mut f, off, 4096)?;
-        if &h[0..4] == b"head" && crc_ok(&h) && hdr.as_ref().map_or(true, |c| u64le(&h, 8) > u64le(c, 8)) {
+        if &h[0..4] == b"head"
+            && crc_ok(&h)
+            && hdr.as_ref().is_none_or(|c| u64le(&h, 8) > u64le(c, 8))
+        {
             hdr = Some(h);
         }
     }
     let hdr = hdr.ok_or(format!("{path}: corrupt VHDX header"))?;
     if hdr[48..64].iter().any(|&x| x != 0) {
-        return Err(format!("{path}: VHDX has an unreplayed log (unclean shutdown?)"));
+        return Err(format!(
+            "{path}: VHDX has an unreplayed log (unclean shutdown?)"
+        ));
     }
     let rt = read_at(&mut f, 3 * KB64, KB64 as usize)?;
     if &rt[0..4] != b"regi" || !crc_ok(&rt) {
@@ -198,7 +221,10 @@ fn layout(info: &Info, block: u64, rel_parent: Option<&str>, ids: [[u8; 16]; 3])
         let r = &mut head[off as usize..(off + KB64) as usize];
         r[0..4].copy_from_slice(b"regi");
         r[8..12].copy_from_slice(&2u32.to_le_bytes());
-        for (i, (g, o, l)) in [(BAT_GUID, bat_off, bat_len), (META_GUID, meta_off, MB)].iter().enumerate() {
+        for (i, (g, o, l)) in [(BAT_GUID, bat_off, bat_len), (META_GUID, meta_off, MB)]
+            .iter()
+            .enumerate()
+        {
             let e = 16 + i * 32;
             r[e..e + 16].copy_from_slice(&guid_bytes(g));
             r[e + 16..e + 24].copy_from_slice(&o.to_le_bytes());
@@ -211,11 +237,15 @@ fn layout(info: &Info, block: u64, rel_parent: Option<&str>, ids: [[u8; 16]; 3])
 
     // Metadata region: entry table (≤64KB) + entry data from 64KB.
     let mut items: Vec<(&str, Vec<u8>, u32)> = vec![
-        (FILE_PARAMS, {
-            let mut v = (block as u32).to_le_bytes().to_vec();
-            v.extend_from_slice(&(if rel_parent.is_some() { 2u32 } else { 0 }).to_le_bytes()); // HasParent
-            v
-        }, 4), // IsRequired
+        (
+            FILE_PARAMS,
+            {
+                let mut v = (block as u32).to_le_bytes().to_vec();
+                v.extend_from_slice(&(if rel_parent.is_some() { 2u32 } else { 0 }).to_le_bytes()); // HasParent
+                v
+            },
+            4,
+        ), // IsRequired
         (VDISK_SIZE, info.virtual_size.to_le_bytes().to_vec(), 6), // IsVirtualDisk|IsRequired
         (PAGE83, page83.to_vec(), 6),
         (LOGICAL_SS, info.logical_sector.to_le_bytes().to_vec(), 6),
@@ -223,7 +253,10 @@ fn layout(info: &Info, block: u64, rel_parent: Option<&str>, ids: [[u8; 16]; 3])
     ];
     let mut linkage_in_item = 0u64;
     if let Some(rel) = rel_parent {
-        let kv = [("parent_linkage", guid_str(&info.data_write_guid)), ("relative_path", rel.to_string())];
+        let kv = [
+            ("parent_linkage", guid_str(&info.data_write_guid)),
+            ("relative_path", rel.to_string()),
+        ];
         let mut loc = guid_bytes(PARENT_LOC_TYPE).to_vec();
         loc.extend_from_slice(&0u16.to_le_bytes());
         loc.extend_from_slice(&(kv.len() as u16).to_le_bytes());
@@ -263,7 +296,13 @@ fn layout(info: &Info, block: u64, rel_parent: Option<&str>, ids: [[u8; 16]; 3])
         }
         data_off += data.len().div_ceil(8) * 8;
     }
-    Layout { head, meta, bat_off, meta_off, linkage_abs }
+    Layout {
+        head,
+        meta,
+        bat_off,
+        meta_off,
+        linkage_abs,
+    }
 }
 
 /// Write an empty VHDX with the same size as `parent`. `rel_parent` Some → differencing pointing to the parent
@@ -271,12 +310,18 @@ fn layout(info: &Info, block: u64, rel_parent: Option<&str>, ids: [[u8; 16]; 3])
 /// Returns the absolute offset of the parent_linkage GUID string (UTF-16, 76 bytes) — the client stage patches
 /// it there when the parent (base.vhdx) GUID is only known at run time.
 pub fn write_empty(path: &str, parent: &Info, rel_parent: Option<&str>) -> Result<u64, String> {
-    let l = layout(parent, CHILD_BLOCK, rel_parent, [rand_guid(), rand_guid(), rand_guid()]);
+    let l = layout(
+        parent,
+        CHILD_BLOCK,
+        rel_parent,
+        [rand_guid(), rand_guid(), rand_guid()],
+    );
     // BAT + log = all zeros (sparse, set_len). Write the header area + metadata.
     let mut f = File::create(path).map_err(|e| format!("{path}: {e}"))?;
     f.set_len(l.meta_off + MB).map_err(|e| e.to_string())?;
     f.write_all(&l.head).map_err(|e| e.to_string())?;
-    f.seek(SeekFrom::Start(l.meta_off)).map_err(|e| e.to_string())?;
+    f.seek(SeekFrom::Start(l.meta_off))
+        .map_err(|e| e.to_string())?;
     f.write_all(&l.meta).map_err(|e| e.to_string())?;
     f.sync_all().map_err(|e| e.to_string())?;
     Ok(l.linkage_abs)
@@ -307,23 +352,37 @@ impl Virtual {
     pub fn open(raw: &std::path::Path, id: &str) -> Result<Virtual, String> {
         let src = crate::disk::Source::file(raw)?;
         if src.len % 512 != 0 || src.len == 0 {
-            return Err(format!("raw disk size {} is not a multiple of 512", src.len));
+            return Err(format!(
+                "raw disk size {} is not a multiple of 512",
+                src.len
+            ));
         }
         let guid = |tag: &str| -> [u8; 16] {
-            let mut b: [u8; 16] = blake3::hash(format!("broom golden {id} {tag}").as_bytes()).as_bytes()[..16].try_into().unwrap();
+            let mut b: [u8; 16] = blake3::hash(format!("broom golden {id} {tag}").as_bytes())
+                .as_bytes()[..16]
+                .try_into()
+                .unwrap();
             b[7] = (b[7] & 0x0f) | 0x40; // version 4 layout, like rand_guid
             b[8] = (b[8] & 0x3f) | 0x80;
             b
         };
         let ids = [guid("file"), guid("data"), guid("page83")];
-        let info = Info { data_write_guid: ids[1], virtual_size: src.len, logical_sector: 512, physical_sector: 4096 };
+        let info = Info {
+            data_write_guid: ids[1],
+            virtual_size: src.len,
+            logical_sector: 512,
+            physical_sector: 4096,
+        };
         let l = layout(&info, GOLDEN_BLOCK, None, ids);
         let chunk = (1u64 << 23) * 512 / GOLDEN_BLOCK;
         let mut set = std::collections::BTreeSet::new();
         for (a, b) in src.data_ranges() {
             set.extend(a / GOLDEN_BLOCK..b.div_ceil(GOLDEN_BLOCK));
         }
-        let blocks: Vec<u64> = set.into_iter().filter(|&i| i * GOLDEN_BLOCK < src.len).collect();
+        let blocks: Vec<u64> = set
+            .into_iter()
+            .filter(|&i| i * GOLDEN_BLOCK < src.len)
+            .collect();
         let start = l.meta_off + MB;
         let mut prefix = vec![0u8; start as usize];
         prefix[..l.head.len()].copy_from_slice(&l.head);
@@ -333,7 +392,12 @@ impl Virtual {
             prefix[at..at + 8].copy_from_slice(&e.to_le_bytes());
         }
         prefix[l.meta_off as usize..start as usize].copy_from_slice(&l.meta);
-        Ok(Virtual { raw: src, prefix, blocks, info })
+        Ok(Virtual {
+            raw: src,
+            prefix,
+            blocks,
+            info,
+        })
     }
 
     pub fn len(&self) -> u64 {
@@ -342,7 +406,10 @@ impl Virtual {
 
     /// Bytes of the VHDX at `off` (inside it).
     pub fn read_at(&self, mut off: u64, mut buf: &mut [u8]) -> Result<(), String> {
-        if off.checked_add(buf.len() as u64).is_none_or(|end| end > self.len()) {
+        if off
+            .checked_add(buf.len() as u64)
+            .is_none_or(|end| end > self.len())
+        {
             return Err("read past the end of the golden".into());
         }
         let p = self.prefix.len() as u64;
@@ -355,7 +422,10 @@ impl Virtual {
                 let (k, within) = ((off - p) / GOLDEN_BLOCK, (off - p) % GOLDEN_BLOCK);
                 let n = ((GOLDEN_BLOCK - within) as usize).min(buf.len());
                 // Past the raw disk's end (its last block is partial) Source reads zeros.
-                self.raw.read_at(self.blocks[k as usize] * GOLDEN_BLOCK + within, &mut buf[..n])?;
+                self.raw.read_at(
+                    self.blocks[k as usize] * GOLDEN_BLOCK + within,
+                    &mut buf[..n],
+                )?;
                 n
             };
             buf = &mut buf[n..];
@@ -434,12 +504,20 @@ mod tests {
         f.set_len(len).unwrap();
         let mut seed = 0x1234_5678u32;
         let mut noise = |n: usize| -> Vec<u8> {
-            (0..n).map(|_| { seed ^= seed << 13; seed ^= seed >> 17; seed ^= seed << 5; seed as u8 }).collect()
+            (0..n)
+                .map(|_| {
+                    seed ^= seed << 13;
+                    seed ^= seed >> 17;
+                    seed ^= seed << 5;
+                    seed as u8
+                })
+                .collect()
         };
         f.write_all_at(&noise(4096), 0).unwrap(); // block 0
         f.write_all_at(&noise(3 * MB as usize), 70 * MB).unwrap(); // block 2, spans 1MB pieces
         f.write_all_at(&noise(700), len - 700).unwrap(); // partial last block
-        f.write_all_at(&vec![0u8; 4 * MB as usize], 130 * MB).unwrap(); // written zeros: data on disk → stored
+        f.write_all_at(&vec![0u8; 4 * MB as usize], 130 * MB)
+            .unwrap(); // written zeros: data on disk → stored
         drop(f);
         let v = Virtual::open(&raw, "stamp-1").unwrap();
         // The virtual golden, written out once here only to check it with qemu-img.
@@ -448,13 +526,39 @@ mod tests {
         v.read_at(0, &mut whole).unwrap();
         std::fs::write(&out, &whole).unwrap();
         let i = read_info(out.to_str().unwrap()).unwrap();
-        assert_eq!((i.virtual_size, i.logical_sector, i.physical_sector), (len, 512, 4096));
-        assert_eq!(i.data_write_guid, v.info.data_write_guid, "templates get the GUID the file really has");
-        let q = |args: &[&str]| std::process::Command::new("qemu-img").args(args).status().unwrap().success();
-        assert!(q(&["check", "-q", "-f", "vhdx", out.to_str().unwrap()]), "qemu-img check");
+        assert_eq!(
+            (i.virtual_size, i.logical_sector, i.physical_sector),
+            (len, 512, 4096)
+        );
+        assert_eq!(
+            i.data_write_guid, v.info.data_write_guid,
+            "templates get the GUID the file really has"
+        );
+        let q = |args: &[&str]| {
+            std::process::Command::new("qemu-img")
+                .args(args)
+                .status()
+                .unwrap()
+                .success()
+        };
+        assert!(
+            q(&["check", "-q", "-f", "vhdx", out.to_str().unwrap()]),
+            "qemu-img check"
+        );
         let back = d.join("back.raw");
-        assert!(q(&["convert", "-f", "vhdx", "-O", "raw", out.to_str().unwrap(), back.to_str().unwrap()]));
-        assert!(std::fs::read(&back).unwrap() == std::fs::read(&raw).unwrap(), "same bytes");
+        assert!(q(&[
+            "convert",
+            "-f",
+            "vhdx",
+            "-O",
+            "raw",
+            out.to_str().unwrap(),
+            back.to_str().unwrap()
+        ]));
+        assert!(
+            std::fs::read(&back).unwrap() == std::fs::read(&raw).unwrap(),
+            "same bytes"
+        );
         // 4 stored blocks (0, 2, 4, last) after header/log/BAT/metadata; holes (1, 3, 5) left out.
         assert_eq!(v.len(), 4 * MB + 4 * GOLDEN_BLOCK);
         // Any range reads the same bytes as the whole; the same raw + id → the same file (hash), another id → another.
@@ -464,8 +568,16 @@ mod tests {
         assert!(v.read_at(v.len() - 1, &mut [0u8; 2]).is_err());
         let sha = v.sha256().unwrap();
         assert_eq!(sha, crate::hash::file_hash(out.to_str().unwrap()).unwrap());
-        assert_eq!(Virtual::open(&raw, "stamp-1").unwrap().sha256().unwrap(), sha, "stable across opens (server restart)");
-        assert_ne!(Virtual::open(&raw, "stamp-2").unwrap().sha256().unwrap(), sha, "a new golden gets new GUIDs");
+        assert_eq!(
+            Virtual::open(&raw, "stamp-1").unwrap().sha256().unwrap(),
+            sha,
+            "stable across opens (server restart)"
+        );
+        assert_ne!(
+            Virtual::open(&raw, "stamp-2").unwrap().sha256().unwrap(),
+            sha,
+            "a new golden gets new GUIDs"
+        );
         let _ = std::fs::remove_dir_all(&d);
     }
 
@@ -473,24 +585,49 @@ mod tests {
     #[test]
     #[ignore]
     fn bench_convert() {
-        let Ok(raw) = std::env::var("BROOM_BENCH_RAW") else { return };
+        let Ok(raw) = std::env::var("BROOM_BENCH_RAW") else {
+            return;
+        };
         let _ = std::process::Command::new("sync").status();
         let out = format!("{raw}.broom.vhdx");
         let t = std::time::Instant::now();
-        let sha = Virtual::open(std::path::Path::new(&raw), "bench").unwrap().sha256().unwrap();
-        println!("broom vhdx (virtual: layout + sha256 {}): {:?}", &sha[..12], t.elapsed());
+        let sha = Virtual::open(std::path::Path::new(&raw), "bench")
+            .unwrap()
+            .sha256()
+            .unwrap();
+        println!(
+            "broom vhdx (virtual: layout + sha256 {}): {:?}",
+            &sha[..12],
+            t.elapsed()
+        );
         let t = std::time::Instant::now();
         let q = format!("{raw}.qemu.vhdx");
-        assert!(std::process::Command::new("qemu-img")
-            .args(["convert", "-m", "16", "-O", "vhdx", "-o", "subformat=dynamic", &raw, &q])
-            .status()
-            .unwrap()
-            .success());
+        assert!(
+            std::process::Command::new("qemu-img")
+                .args([
+                    "convert",
+                    "-m",
+                    "16",
+                    "-O",
+                    "vhdx",
+                    "-o",
+                    "subformat=dynamic",
+                    &raw,
+                    &q
+                ])
+                .status()
+                .unwrap()
+                .success()
+        );
         let _ = std::process::Command::new("sync").status(); // both sides pay the flush
         println!("qemu-img vhdx: {:?}", t.elapsed());
         let v = format!("{raw}.broom.vmdk");
         let t = std::time::Instant::now();
-        crate::vmdk::write_sparse(&crate::disk::Source::file(std::path::Path::new(&raw)).unwrap(), std::path::Path::new(&v)).unwrap();
+        crate::vmdk::write_sparse(
+            &crate::disk::Source::file(std::path::Path::new(&raw)).unwrap(),
+            std::path::Path::new(&v),
+        )
+        .unwrap();
         let _ = std::process::Command::new("sync").status(); // both sides pay the flush
         println!("broom vmdk:    {:?}", t.elapsed());
         let back = format!("{raw}.back");
@@ -499,11 +636,24 @@ mod tests {
         let _ = std::process::Command::new("sync").status(); // both sides pay the flush
         println!("broom vmdk→raw:{:?}", t.elapsed());
         let t = std::time::Instant::now();
-        assert!(std::process::Command::new("qemu-img")
-            .args(["convert", "-m", "16", "-W", "-f", "vmdk", "-O", "raw", &v, &format!("{raw}.qback")])
-            .status()
-            .unwrap()
-            .success());
+        assert!(
+            std::process::Command::new("qemu-img")
+                .args([
+                    "convert",
+                    "-m",
+                    "16",
+                    "-W",
+                    "-f",
+                    "vmdk",
+                    "-O",
+                    "raw",
+                    &v,
+                    &format!("{raw}.qback")
+                ])
+                .status()
+                .unwrap()
+                .success()
+        );
         let _ = std::process::Command::new("sync").status(); // both sides pay the flush
         println!("qemu vmdk→raw: {:?}", t.elapsed());
         for f in [out, q, v, back, format!("{raw}.qback")] {
@@ -528,8 +678,14 @@ mod tests {
         assert_eq!((i.logical_sector, i.physical_sector), (512, 4096));
         let mut f = File::open(p).unwrap();
         let raw = read_at(&mut f, off, 76).unwrap();
-        let s: Vec<u16> = raw.chunks(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
-        assert_eq!(String::from_utf16(&s).unwrap(), "{11223344-5566-7788-99aa-bbccddeeff00}");
+        let s: Vec<u16> = raw
+            .chunks(2)
+            .map(|c| u16::from_le_bytes([c[0], c[1]]))
+            .collect();
+        assert_eq!(
+            String::from_utf16(&s).unwrap(),
+            "{11223344-5566-7788-99aa-bbccddeeff00}"
+        );
         // 80GB / 2MB = 40960 block, chunk 2048 → 20 SB → BAT 20*2049*8 B → 1MB region.
         assert_eq!(std::fs::metadata(p).unwrap().len(), 4 * MB);
         let _ = std::fs::remove_file(p);

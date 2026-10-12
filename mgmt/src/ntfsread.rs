@@ -34,7 +34,12 @@ impl Seek for Part {
             SeekFrom::End(d) => self.len.checked_add_signed(d),
             SeekFrom::Current(d) => self.pos.checked_add_signed(d),
         };
-        self.pos = p.ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "seek before the partition"))?;
+        self.pos = p.ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "seek before the partition",
+            )
+        })?;
         Ok(self.pos)
     }
 }
@@ -53,7 +58,12 @@ impl Vol {
     /// The NTFS volume in [start, start+size) of the raw image `raw`.
     pub fn open(raw: &str, (start, size): (u64, u64)) -> Result<Vol, String> {
         let f = File::open(raw).map_err(|e| format!("{raw}: {e}"))?;
-        let mut fs = BufReader::new(Part { f, base: start, len: size, pos: 0 });
+        let mut fs = BufReader::new(Part {
+            f,
+            base: start,
+            len: size,
+            pos: 0,
+        });
         let mut ntfs = Ntfs::new(&mut fs).map_err(err)?;
         // Needed for the case-insensitive name lookups.
         ntfs.read_upcase_table(&mut fs).map_err(err)?;
@@ -62,7 +72,12 @@ impl Vol {
 
     /// Windows did not unmount it cleanly (hibernated, Fast Startup, forced power-off): its files may be half-written.
     pub fn is_dirty(&mut self) -> Result<bool, String> {
-        Ok(self.ntfs.volume_info(&mut self.fs).map_err(err)?.flags().contains(NtfsVolumeFlags::IS_DIRTY))
+        Ok(self
+            .ntfs
+            .volume_info(&mut self.fs)
+            .map_err(err)?
+            .flags()
+            .contains(NtfsVolumeFlags::IS_DIRTY))
     }
 
     pub fn exists(&mut self, path: &str) -> bool {
@@ -85,15 +100,26 @@ impl Vol {
     /// Up to `max` names in the root directory (for error messages).
     pub fn root_names(&mut self, max: usize) -> Vec<String> {
         let Vol { fs, ntfs } = self;
-        ntfs.root_directory(fs).and_then(|root| entries(&root, fs)).map_or_else(|_| Vec::new(), |v| {
-            v.into_iter().map(|(n, _, _)| n).filter(|n| !n.starts_with('$') && n != ".").take(max).collect()
-        })
+        ntfs.root_directory(fs)
+            .and_then(|root| entries(&root, fs))
+            .map_or_else(
+                |_| Vec::new(),
+                |v| {
+                    v.into_iter()
+                        .map(|(n, _, _)| n)
+                        .filter(|n| !n.starts_with('$') && n != ".")
+                        .take(max)
+                        .collect()
+                },
+            )
     }
 
     /// Copy directory `path` (recursively) to `dest` on the local disk.
     pub fn extract_dir(&mut self, path: &str, dest: &Path) -> Result<(), String> {
         let Vol { fs, ntfs } = self;
-        let dir = find(ntfs, fs, path)?.filter(NtfsFile::is_directory).ok_or_else(|| format!("{path}: no such directory"))?;
+        let dir = find(ntfs, fs, path)?
+            .filter(NtfsFile::is_directory)
+            .ok_or_else(|| format!("{path}: no such directory"))?;
         extract(ntfs, fs, &dir, dest)
     }
 }
@@ -120,7 +146,10 @@ fn find<'n>(ntfs: &'n Ntfs, fs: &mut Fs, path: &str) -> Result<Option<NtfsFile<'
 
 /// (name, file record, is directory) of every entry of a directory. DOS 8.3 aliases are skipped (the same file
 /// under its long name is listed too).
-fn entries(dir: &NtfsFile, fs: &mut Fs) -> ntfs::Result<Vec<(String, ntfs::NtfsFileReference, bool)>> {
+fn entries(
+    dir: &NtfsFile,
+    fs: &mut Fs,
+) -> ntfs::Result<Vec<(String, ntfs::NtfsFileReference, bool)>> {
     let index = dir.directory_index(fs)?;
     let mut it = index.entries();
     let mut v = Vec::new();
@@ -131,14 +160,20 @@ fn entries(dir: &NtfsFile, fs: &mut Fs) -> ntfs::Result<Vec<(String, ntfs::NtfsF
         if key.namespace() == NtfsFileNamespace::Dos {
             continue;
         }
-        v.push((key.name().to_string_lossy(), e.file_reference(), key.is_directory()));
+        v.push((
+            key.name().to_string_lossy(),
+            e.file_reference(),
+            key.is_directory(),
+        ));
     }
     Ok(v)
 }
 
 /// The unnamed $DATA stream of `f` into `w`.
 fn copy_data(f: &NtfsFile, fs: &mut Fs, w: &mut impl Write) -> Result<(), String> {
-    let Some(item) = f.data(fs, "") else { return Ok(()) }; // no data stream = empty file
+    let Some(item) = f.data(fs, "") else {
+        return Ok(());
+    }; // no data stream = empty file
     let attr = item.map_err(err)?;
     let attr = attr.to_attribute().map_err(err)?;
     let mut value = attr.value(fs).map_err(err)?;
@@ -178,14 +213,23 @@ mod tests {
     fn part_reads_inside_its_range() {
         let p = std::env::temp_dir().join("broom_test_part.bin");
         std::fs::write(&p, (0u8..100).collect::<Vec<_>>()).unwrap();
-        let mut part = Part { f: File::open(&p).unwrap(), base: 10, len: 20, pos: 0 };
+        let mut part = Part {
+            f: File::open(&p).unwrap(),
+            base: 10,
+            len: 20,
+            pos: 0,
+        };
         let mut b = [0u8; 8];
         part.read_exact(&mut b).unwrap();
         assert_eq!(b, [10, 11, 12, 13, 14, 15, 16, 17]);
         assert_eq!(part.seek(SeekFrom::End(-4)).unwrap(), 16);
         let mut rest = Vec::new();
         part.read_to_end(&mut rest).unwrap();
-        assert_eq!(rest, [26, 27, 28, 29], "stops at the partition end, not the file end");
+        assert_eq!(
+            rest,
+            [26, 27, 28, 29],
+            "stops at the partition end, not the file end"
+        );
         assert!(part.seek(SeekFrom::Current(-100)).is_err());
         let _ = std::fs::remove_file(p);
     }
@@ -200,29 +244,61 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(d.join("mnt")).unwrap();
         let img = d.join("vol.img");
-        let sh = |c: &str| assert!(Command::new("sh").args(["-c", c]).status().unwrap().success(), "{c}");
+        let sh = |c: &str| {
+            assert!(
+                Command::new("sh")
+                    .args(["-c", c])
+                    .status()
+                    .unwrap()
+                    .success(),
+                "{c}"
+            )
+        };
         // 1 MiB of something else before the partition, like a disk image.
-        sh(&format!("truncate -s 65M {0} && truncate -s 64M {0}.p && mkntfs -F -f -q {0}.p", img.display()));
-        sh(&format!("ntfs-3g {}.p {}", img.display(), d.join("mnt").display()));
+        sh(&format!(
+            "truncate -s 65M {0} && truncate -s 64M {0}.p && mkntfs -F -f -q {0}.p",
+            img.display()
+        ));
+        sh(&format!(
+            "ntfs-3g {}.p {}",
+            img.display(),
+            d.join("mnt").display()
+        ));
         let m = d.join("mnt");
         std::fs::create_dir_all(m.join("Windows/System32/config")).unwrap();
         std::fs::write(m.join("Windows/System32/config/SYSTEM"), b"hive").unwrap();
         std::fs::create_dir_all(m.join("broom/efi/EFI/Microsoft/Boot")).unwrap();
-        std::fs::write(m.join("broom/efi/EFI/Microsoft/Boot/BCD"), vec![7u8; 300_000]).unwrap();
+        std::fs::write(
+            m.join("broom/efi/EFI/Microsoft/Boot/BCD"),
+            vec![7u8; 300_000],
+        )
+        .unwrap();
         std::fs::write(m.join("broom/boot-storage.ok"), b"storahci stornvme\r\n").unwrap();
         sh(&format!("umount {}", m.display()));
-        sh(&format!("dd if={0}.p of={0} bs=1M seek=1 conv=notrunc status=none", img.display()));
+        sh(&format!(
+            "dd if={0}.p of={0} bs=1M seek=1 conv=notrunc status=none",
+            img.display()
+        ));
 
         let mut v = Vol::open(img.to_str().unwrap(), (1 << 20, 64 << 20)).unwrap();
         assert!(!v.is_dirty().unwrap());
-        assert!(v.exists("windows/system32/CONFIG/system"), "case-insensitive like Windows");
+        assert!(
+            v.exists("windows/system32/CONFIG/system"),
+            "case-insensitive like Windows"
+        );
         assert!(!v.exists("Windows/nope"));
-        assert_eq!(v.read("broom/boot-storage.ok").unwrap().unwrap(), b"storahci stornvme\r\n");
+        assert_eq!(
+            v.read("broom/boot-storage.ok").unwrap().unwrap(),
+            b"storahci stornvme\r\n"
+        );
         assert_eq!(v.read("broom").unwrap(), None, "a directory has no content");
         assert!(v.root_names(12).iter().any(|n| n == "Windows"));
         let out = d.join("efi");
         v.extract_dir("broom/efi", &out).unwrap();
-        assert_eq!(std::fs::read(out.join("EFI/Microsoft/Boot/BCD")).unwrap(), vec![7u8; 300_000]);
+        assert_eq!(
+            std::fs::read(out.join("EFI/Microsoft/Boot/BCD")).unwrap(),
+            vec![7u8; 300_000]
+        );
         let _ = std::fs::remove_dir_all(&d);
     }
 }

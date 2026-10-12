@@ -5,7 +5,7 @@
 // Secure Boot shim copy.
 use std::path::Path;
 
-use crate::{images_dir, SharedState};
+use crate::{SharedState, images_dir};
 
 /// Publish job progress: each step shows "⏳ <step>..." on the web + is timed; the ✓ result includes
 /// a per-step timing table → you see right away where it is slow.
@@ -18,7 +18,12 @@ pub(crate) struct Steps<'a> {
 
 impl<'a> Steps<'a> {
     pub fn new(st: &'a SharedState, name: &str) -> Self {
-        Steps { st, name: name.to_string(), cur: None, done: Vec::new() }
+        Steps {
+            st,
+            name: name.to_string(),
+            cur: None,
+            done: Vec::new(),
+        }
     }
     /// Finish the running step (record its time), start a new one.
     pub fn go(&mut self, label: &str) {
@@ -30,7 +35,11 @@ impl<'a> Steps<'a> {
     fn end(&mut self) {
         if let Some((l, t)) = self.cur.take() {
             let s = t.elapsed().as_secs();
-            self.done.push(if s >= 60 { format!("{l} {}m{:02}s", s / 60, s % 60) } else { format!("{l} {s}s") });
+            self.done.push(if s >= 60 {
+                format!("{l} {}m{:02}s", s / 60, s % 60)
+            } else {
+                format!("{l} {s}s")
+            });
         }
     }
     /// "step1 12s, step2 3m05s, ..."
@@ -43,7 +52,9 @@ impl<'a> Steps<'a> {
 /// Free bytes on the filesystem holding `path` (libc statvfs). 0 on error (callers treat 0 as "unknown → allow").
 pub(crate) fn free_bytes(path: &Path) -> u64 {
     use std::os::unix::ffi::OsStrExt;
-    let Ok(c) = std::ffi::CString::new(path.as_os_str().as_bytes()) else { return 0 };
+    let Ok(c) = std::ffi::CString::new(path.as_os_str().as_bytes()) else {
+        return 0;
+    };
     // SAFETY: c is a valid NUL-terminated path; s is written by statvfs before use.
     let mut s: libc::statvfs = unsafe { std::mem::zeroed() };
     if unsafe { libc::statvfs(c.as_ptr(), &mut s) } != 0 {
@@ -71,7 +82,11 @@ pub(crate) fn need_space(dir: &Path, need: u64, what: &str) -> Result<(), String
 /// RAM (bytes) a RAM copy must leave free for the OS and the rest of the server (config zram_reserve_mb, web System
 /// page). The copy checks it itself, when it claims its RAM (iscsid::ramimg).
 pub(crate) fn ram_reserve(st: &SharedState) -> u64 {
-    st.db.get_config("zram_reserve_mb", "2048").parse::<u64>().unwrap_or(2048).saturating_mul(1 << 20)
+    st.db
+        .get_config("zram_reserve_mb", "2048")
+        .parse::<u64>()
+        .unwrap_or(2048)
+        .saturating_mul(1 << 20)
 }
 
 /// Publish an image according to its os. Blocking (called from spawn_blocking).
@@ -81,12 +96,21 @@ pub(crate) fn ram_reserve(st: &SharedState) -> u64 {
 /// publish (cheap); boot.rs adds the `shim` line. Missing → only Secure Boot clients are affected (warning).
 pub(crate) fn refresh_shim() {
     // The stage bundle (CI-built, see winstage::ensure_stage) carries Ubuntu's shim; else the server's own shim-signed.
-    let bundled = crate::tftp_dir().join("broom-stage/shimx64.efi").to_string_lossy().into_owned();
-    let src = [bundled.as_str(), "/usr/lib/shim/shimx64.efi.signed.latest", "/usr/lib/shim/shimx64.efi.signed"]
-        .into_iter()
-        .find(|p| Path::new(p).is_file());
+    let bundled = crate::tftp_dir()
+        .join("broom-stage/shimx64.efi")
+        .to_string_lossy()
+        .into_owned();
+    let src = [
+        bundled.as_str(),
+        "/usr/lib/shim/shimx64.efi.signed.latest",
+        "/usr/lib/shim/shimx64.efi.signed",
+    ]
+    .into_iter()
+    .find(|p| Path::new(p).is_file());
     let Some(src) = src else {
-        return tracing::warn!("no shim: the stage bundle is not installed (see the 'stage bundle' log line) and no shim-signed package → Secure Boot clients cannot boot the kernels");
+        return tracing::warn!(
+            "no shim: the stage bundle is not installed (see the 'stage bundle' log line) and no shim-signed package → Secure Boot clients cannot boot the kernels"
+        );
     };
     // Copied next to it, then renamed over it: a client downloading the shim meanwhile never gets a half-written file.
     let dir = crate::tftp_dir().join("shim");
@@ -112,15 +136,18 @@ pub(crate) fn prepare_stage() {
 }
 
 pub fn run_publish(st: &SharedState, name: &str, steps: &mut Steps) -> Result<String, String> {
-    let img = st.db.image_by_name(name)?.ok_or(format!("image '{name}' not found in DB"))?;
+    let img = st
+        .db
+        .image_by_name(name)?
+        .ok_or(format!("image '{name}' not found in DB"))?;
     let (id, os) = (img.id, img.os);
     let r = match os.as_str() {
         "linux" => {
             // Secure Boot clients boot Linux goldens through the shim, which comes with the stage bundle.
-            if st.db.get_config("ipxe_signed", "0") == "1" {
-                if let Err(e) = crate::winstage::ensure_stage() {
-                    tracing::warn!("stage bundle (for its Secure Boot shim): {e}");
-                }
+            if st.db.get_config("ipxe_signed", "0") == "1"
+                && let Err(e) = crate::winstage::ensure_stage()
+            {
+                tracing::warn!("stage bundle (for its Secure Boot shim): {e}");
             }
             steps.go("publish linux (kernel/initrd + iSCSI)");
             publish_iscsi(st, id, name)
@@ -134,10 +161,20 @@ pub fn run_publish(st: &SharedState, name: &str, steps: &mut Steps) -> Result<St
 
 /// Shared RO iSCSI target for an image (the iSCSI daemon, iscsi.rs): the golden file, or a compressed copy of it in
 /// RAM (`ram`, cache_mode zram). Idempotent (re-creates). Returns the IQN.
-fn export_target(st: &SharedState, name: &str, g: u64, ram: bool, path: &str) -> Result<String, String> {
+fn export_target(
+    st: &SharedState,
+    name: &str,
+    g: u64,
+    ram: bool,
+    path: &str,
+) -> Result<String, String> {
     let iqn = iqn_at(st, name, g);
-    crate::iscsi::export(&iqn, path, ram, ram_reserve(st)).map_err(|e| format!("iSCSI target: {e}"))?;
-    tracing::info!("iSCSI target {iqn} ready ({}: {path})", if ram { "RAM" } else { "disk" });
+    crate::iscsi::export(&iqn, path, ram, ram_reserve(st))
+        .map_err(|e| format!("iSCSI target: {e}"))?;
+    tracing::info!(
+        "iSCSI target {iqn} ready ({}: {path})",
+        if ram { "RAM" } else { "disk" }
+    );
     Ok(iqn)
 }
 
@@ -160,14 +197,18 @@ pub fn start_iscsi(st: &SharedState) {
 /// zram devices an older version loaded goldens into (kernel RAM held until reset). Their LIO targets are gone.
 fn clear_legacy_zram(st: &SharedState) {
     for img in st.db.images().unwrap_or_default() {
-        let keys = std::iter::once(format!("zram_dev:{}", img.name)).chain((0..=gen_of(st, &img.name)).map(|g| format!("zram_dev:{}:g{g}", img.name)));
+        let keys = std::iter::once(format!("zram_dev:{}", img.name))
+            .chain((0..=gen_of(st, &img.name)).map(|g| format!("zram_dev:{}:g{g}", img.name)));
         for k in keys {
             let dev = st.db.get_config(&k, "");
             if let Some(n) = dev.strip_prefix("/dev/zram") {
                 let _ = std::fs::write(format!("/sys/block/zram{n}/reset"), "1");
                 let _ = std::fs::write("/sys/class/zram-control/hot_remove", n);
                 let _ = st.db.set_config(&k, "");
-                tracing::info!("freed {dev} (image {}: RAM copies now live in the iSCSI daemon)", img.name);
+                tracing::info!(
+                    "freed {dev} (image {}: RAM copies now live in the iSCSI daemon)",
+                    img.name
+                );
             }
         }
     }
@@ -177,7 +218,11 @@ fn clear_legacy_zram(st: &SharedState) {
 /// disk → export it again; zram → publish again (new generation + RAM copy, falls back to disk on RAM overflow).
 /// Targets the daemon still has are left alone (clients stay connected).
 fn restore_targets(st: &SharedState) {
-    let have: Vec<String> = crate::iscsi::list().unwrap_or_default().into_iter().map(|t| t.iqn).collect();
+    let have: Vec<String> = crate::iscsi::list()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|t| t.iqn)
+        .collect();
     for img in st.db.images().unwrap_or_default() {
         if img.os != "linux" || img.boot_script.is_none() || have.contains(&iqn_of(st, &img.name)) {
             continue;
@@ -185,7 +230,7 @@ fn restore_targets(st: &SharedState) {
         // Claim the job slot like any job: a publish / rollback / delete started from the web meanwhile is refused
         // instead of racing this one (same staging dir, same generation, same image.img).
         {
-            let mut jobs = st.jobs.lock().unwrap();
+            let mut jobs = st.jobs.lock();
             if jobs.get(&img.name).is_some_and(|s| s.starts_with('⏳')) {
                 continue;
             }
@@ -197,12 +242,27 @@ fn restore_targets(st: &SharedState) {
             let path = images_dir().join(&img.name).join("image.img");
             std::fs::canonicalize(&path)
                 .map_err(|e| format!("{}: {e}", path.display()))
-                .and_then(|p| export_target(st, &img.name, gen_of(st, &img.name), false, &p.to_string_lossy()))
+                .and_then(|p| {
+                    export_target(
+                        st,
+                        &img.name,
+                        gen_of(st, &img.name),
+                        false,
+                        &p.to_string_lossy(),
+                    )
+                })
         };
         match r {
             Ok(_) => {
-                tracing::info!("iSCSI target for image {} restored ({})", img.name, img.cache_mode);
-                st.set_job(&img.name, format!("✓ iSCSI target restored ({})", img.cache_mode));
+                tracing::info!(
+                    "iSCSI target for image {} restored ({})",
+                    img.name,
+                    img.cache_mode
+                );
+                st.set_job(
+                    &img.name,
+                    format!("✓ iSCSI target restored ({})", img.cache_mode),
+                );
             }
             Err(e) => {
                 tracing::error!("iSCSI target for image {} not restored: {e}", img.name);
@@ -219,7 +279,10 @@ fn publish_iscsi(st: &SharedState, id: i64, name: &str) -> Result<String, String
     let img_abs = std::fs::canonicalize(&img)
         .map_err(|e| format!("no golden raw yet ({}): {e}", img.display()))?;
     // Every refusal BEFORE anything is written: a refused publish leaves the served image exactly as it was.
-    let want = st.db.image(id)?.map_or_else(|| "disk".into(), |i| i.cache_mode);
+    let want = st
+        .db
+        .image(id)?
+        .map_or_else(|| "disk".into(), |i| i.cache_mode);
     // Disk cache serves ONE shared golden file → it can't be swapped under a live client. Refuse to (re)publish it
     // while a client of this image is connected (they would read changed bytes mid-session → FS corruption). zram is
     // fine: each publish makes a fresh device + target, and the old one is kept for already-connected clients.
@@ -254,10 +317,13 @@ fn publish_iscsi(st: &SharedState, id: i64, name: &str) -> Result<String, String
     });
     match out {
         Ok((bs, hash, cache_mode)) => {
-            st.db.set_config(&format!("iscsi_gen:{name}"), &g.to_string())?;
+            st.db
+                .set_config(&format!("iscsi_gen:{name}"), &g.to_string())?;
             st.db.set_published(id, &bs, &hash)?;
             gc_superseded(st, name);
-            Ok(format!("Publish OK — golden '{name}' iSCSI RO ({cache_mode}) + kernel/initrd + boot_script overlay"))
+            Ok(format!(
+                "Publish OK — golden '{name}' iSCSI RO ({cache_mode}) + kernel/initrd + boot_script overlay"
+            ))
         }
         Err(e) => {
             let _ = std::fs::remove_dir_all(&staged);
@@ -294,7 +360,9 @@ fn publish_iscsi_staged(
     let (iqn, ram) = match export_target(st, name, g, ram, &path) {
         Ok(iqn) => (iqn, ram),
         Err(e) if ram => {
-            tracing::warn!("image {name}: RAM cache not used ({e}) → falling back to cache_mode=disk");
+            tracing::warn!(
+                "image {name}: RAM cache not used ({e}) → falling back to cache_mode=disk"
+            );
             (export_target(st, name, g, false, &path)?, false)
         }
         Err(e) => return Err(e),
@@ -312,8 +380,9 @@ fn publish_iscsi_staged(
     // `quiet` left out so overlayroot/broom logs show on the client console (easier to debug a boot).
     // broom.name/hash/size: the initrd hook compares the hash with the SSD cache copy (match → boot from the SSD,
     // skip iSCSI; mismatch → iSCSI + background copy). Hash computed FIRST to embed it in the cmdline.
-    let hash = crate::hash::file_hash_cached(img_abs, &images_dir().join(name).join("image.sha256"))
-        .ok_or_else(|| format!("sha256 of {} failed", img_abs.display()))?;
+    let hash =
+        crate::hash::file_hash_cached(img_abs, &images_dir().join(name).join("image.sha256"))
+            .ok_or_else(|| format!("sha256 of {} failed", img_abs.display()))?;
     let size = std::fs::metadata(img_abs).map_err(|e| e.to_string())?.len();
     let bs = format!(
         "sanhook iscsi:${{broom-srv}}::::{iqn} || shell\n\
@@ -333,14 +402,18 @@ pub fn unpublish(st: &SharedState, name: &str) {
         let _ = std::fs::remove_dir_all(crate::tftp_dir().join(d).join(name));
     }
     for s in ["new", "old"] {
-        let _ = std::fs::remove_dir_all(crate::tftp_dir().join("broom").join(format!("{name}.{s}")));
+        let _ =
+            std::fs::remove_dir_all(crate::tftp_dir().join("broom").join(format!("{name}.{s}")));
     }
 }
 
 /// Publish generation for an image (config `iscsi_gen:<name>`, starts 0). Bumped on each Linux (re)publish so a new
 /// target gets a NEW IQN, leaving the previous one serving already-connected clients.
 fn gen_of(st: &SharedState, name: &str) -> u64 {
-    st.db.get_config(&format!("iscsi_gen:{name}"), "0").parse().unwrap_or(0)
+    st.db
+        .get_config(&format!("iscsi_gen:{name}"), "0")
+        .parse()
+        .unwrap_or(0)
 }
 
 /// The current (published) IQN for an image — the one its saved boot script points at.
@@ -351,13 +424,23 @@ pub(crate) fn iqn_of(st: &SharedState, name: &str) -> String {
 /// IQN of generation `g`: `<iqn_base>:<name>.g<g>`. Image names are `[A-Za-z0-9_-]` (no dot), so `.g` is an
 /// unambiguous separator.
 fn iqn_at(st: &SharedState, name: &str, g: u64) -> String {
-    format!("{}:{name}.g{g}", st.db.get_config("iqn_base", "iqn.2026-01.local.broom"))
+    format!(
+        "{}:{name}.g{g}",
+        st.db.get_config("iqn_base", "iqn.2026-01.local.broom")
+    )
 }
 
 /// This image's targets (every generation), with their session counts.
 fn targets_of(st: &SharedState, name: &str) -> Vec<crate::iscsi::TargetInfo> {
-    let prefix = format!("{}:{name}.g", st.db.get_config("iqn_base", "iqn.2026-01.local.broom"));
-    crate::iscsi::list().unwrap_or_default().into_iter().filter(|t| t.iqn.starts_with(&prefix)).collect()
+    let prefix = format!(
+        "{}:{name}.g",
+        st.db.get_config("iqn_base", "iqn.2026-01.local.broom")
+    );
+    crate::iscsi::list()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|t| t.iqn.starts_with(&prefix))
+        .collect()
 }
 
 /// Remove this image's iSCSI targets (every generation except `keep`; a RAM copy goes with its target). `idle_only`:

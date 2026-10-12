@@ -4,16 +4,16 @@
 // Changes made here go through the same rules as on each resource's own page: a driver change re-arms the license
 // keys of the machines whose driver set changes (their base is rebuilt), a games disk change goes to the iSCSI daemon.
 use axum::{
+    Json, Router,
     extract::State,
     http::StatusCode,
     routing::{get, post},
-    Json, Router,
 };
 use serde::Deserialize;
 
-use crate::api::{bad, ise, ok, ApiError};
-use crate::machines::who;
 use crate::SharedState;
+use crate::api::{ApiError, bad, ise, ok};
+use crate::machines::who;
 
 pub fn routes() -> Router<SharedState> {
     Router::new()
@@ -29,7 +29,9 @@ fn saved(st: &SharedState) -> Vec<String> {
 }
 
 fn save(st: &SharedState, v: &[String]) -> Result<(), ApiError> {
-    st.db.set_config("groups", &serde_json::to_string(v).unwrap()).map_err(ise)
+    st.db
+        .set_config("groups", &serde_json::to_string(v).unwrap())
+        .map_err(ise)
 }
 
 fn same(a: &str, b: &str) -> bool {
@@ -38,7 +40,11 @@ fn same(a: &str, b: &str) -> bool {
 
 fn name_ok(name: &str) -> Result<String, ApiError> {
     let n = name.trim();
-    if crate::drivers::group_ok(n) { Ok(n.to_string()) } else { Err(bad(format!("group {n:?}: letters/digits/_/-, max 32"))) }
+    if crate::drivers::group_ok(n) {
+        Ok(n.to_string())
+    } else {
+        Err(bad(format!("group {n:?}: letters/digits/_/-, max 32")))
+    }
 }
 
 /// Every group in use or created here, one spelling each, sorted.
@@ -50,10 +56,28 @@ fn all(st: &SharedState) -> Vec<String> {
         }
     };
     saved(st).iter().for_each(|g| add(g));
-    st.db.machines().unwrap_or_default().iter().filter_map(|m| m.grp.as_deref()).for_each(&mut add);
-    st.db.images().unwrap_or_default().iter().flat_map(|i| i.groups.iter()).for_each(|g| add(g));
-    crate::games::disks(st).iter().flat_map(|d| d.groups.iter()).for_each(|g| add(g));
-    st.db.drivers().unwrap_or_default().iter().flat_map(|d| d.groups.iter()).for_each(|g| add(g));
+    st.db
+        .machines()
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|m| m.grp.as_deref())
+        .for_each(&mut add);
+    st.db
+        .images()
+        .unwrap_or_default()
+        .iter()
+        .flat_map(|i| i.groups.iter())
+        .for_each(|g| add(g));
+    crate::games::disks(st)
+        .iter()
+        .flat_map(|d| d.groups.iter())
+        .for_each(|g| add(g));
+    st.db
+        .drivers()
+        .unwrap_or_default()
+        .iter()
+        .flat_map(|d| d.groups.iter())
+        .for_each(|g| add(g));
     v.sort_by_key(|g| g.to_ascii_lowercase());
     v
 }
@@ -61,11 +85,28 @@ fn all(st: &SharedState) -> Vec<String> {
 /// GET /api/groups — the groups, and every machine / image / games disk / driver package with its groups (the page
 /// works out each group's connections).
 async fn list(State(st): State<SharedState>) -> Json<serde_json::Value> {
-    let machines: Vec<_> = st.db.machines().unwrap_or_default().iter().map(|m| serde_json::json!({"id": m.id, "name": who(m), "grp": m.grp})).collect();
-    let images: Vec<_> = st.db.images().unwrap_or_default().iter().map(|i| serde_json::json!({"id": i.id, "name": i.name, "os": i.os, "groups": i.groups})).collect();
-    let disks: Vec<_> = crate::games::disks(&st).iter().map(|d| serde_json::json!({"name": d.name, "letter": d.letter, "groups": d.groups})).collect();
+    let machines: Vec<_> = st
+        .db
+        .machines()
+        .unwrap_or_default()
+        .iter()
+        .map(|m| serde_json::json!({"id": m.id, "name": who(m), "grp": m.grp}))
+        .collect();
+    let images: Vec<_> = st
+        .db
+        .images()
+        .unwrap_or_default()
+        .iter()
+        .map(|i| serde_json::json!({"id": i.id, "name": i.name, "os": i.os, "groups": i.groups}))
+        .collect();
+    let disks: Vec<_> = crate::games::disks(&st)
+        .iter()
+        .map(|d| serde_json::json!({"name": d.name, "letter": d.letter, "groups": d.groups}))
+        .collect();
     let drivers: Vec<_> = st.db.drivers().unwrap_or_default().iter().map(|d| serde_json::json!({"id": d.id, "name": d.name, "all": d.all_machines, "groups": d.groups})).collect();
-    Json(serde_json::json!({"groups": all(&st), "machines": machines, "images": images, "disks": disks, "drivers": drivers}))
+    Json(
+        serde_json::json!({"groups": all(&st), "machines": machines, "images": images, "disks": disks, "drivers": drivers}),
+    )
 }
 
 #[derive(Deserialize)]
@@ -74,7 +115,10 @@ struct NameBody {
 }
 
 /// POST /api/groups/create {name} — a new, empty group.
-async fn create(State(st): State<SharedState>, Json(b): Json<NameBody>) -> Result<Json<serde_json::Value>, ApiError> {
+async fn create(
+    State(st): State<SharedState>,
+    Json(b): Json<NameBody>,
+) -> Result<Json<serde_json::Value>, ApiError> {
     let name = name_ok(&b.name)?;
     if all(&st).iter().any(|g| same(g, &name)) {
         return Err(bad(format!("group {name} already exists")));
@@ -90,7 +134,14 @@ async fn create(State(st): State<SharedState>, Json(b): Json<NameBody>) -> Resul
 fn swap(groups: &[String], from: &str, to: Option<&str>) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     for g in groups {
-        let g = if same(g, from) { match to { Some(t) => t, None => continue } } else { g.as_str() };
+        let g = if same(g, from) {
+            match to {
+                Some(t) => t,
+                None => continue,
+            }
+        } else {
+            g.as_str()
+        };
         if !out.iter().any(|x| same(x, g)) {
             out.push(g.to_string());
         }
@@ -101,7 +152,12 @@ fn swap(groups: &[String], from: &str, to: Option<&str>) -> Vec<String> {
 /// Apply `f` (groups → new groups) to every image, games disk and driver package, and `machine` (a machine's group →
 /// its new one) to every machine. `allow_all`: an image / games disk may lose its last group (= every machine gets
 /// it); otherwise that is refused, nothing changed, with their names.
-fn apply(st: &SharedState, f: &dyn Fn(&str, &[String]) -> Vec<String>, machine: &dyn Fn(&crate::db::Machine) -> Option<String>, allow_all: bool) -> Result<(), ApiError> {
+fn apply(
+    st: &SharedState,
+    f: &dyn Fn(&str, &[String]) -> Vec<String>,
+    machine: &dyn Fn(&crate::db::Machine) -> Option<String>,
+    allow_all: bool,
+) -> Result<(), ApiError> {
     let images = st.db.images().map_err(ise)?;
     let mut disks = crate::games::disks(st);
     if !allow_all {
@@ -109,10 +165,23 @@ fn apply(st: &SharedState, f: &dyn Fn(&str, &[String]) -> Vec<String>, machine: 
             .iter()
             .filter(|i| !i.groups.is_empty() && f(&format!("i{}", i.id), &i.groups).is_empty())
             .map(|i| format!("image {}", i.name))
-            .chain(disks.iter().filter(|d| !d.groups.is_empty() && f(&format!("d{}", d.name), &d.groups).is_empty()).map(|d| format!("games disk {}", d.name)))
+            .chain(
+                disks
+                    .iter()
+                    .filter(|d| {
+                        !d.groups.is_empty() && f(&format!("d{}", d.name), &d.groups).is_empty()
+                    })
+                    .map(|d| format!("games disk {}", d.name)),
+            )
             .collect();
         if !to_all.is_empty() {
-            return Err((StatusCode::CONFLICT, format!("{} would go to EVERY machine (no group left)", to_all.join(", "))));
+            return Err((
+                StatusCode::CONFLICT,
+                format!(
+                    "{} would go to EVERY machine (no group left)",
+                    to_all.join(", ")
+                ),
+            ));
         }
     }
     let mut disks_changed = false;
@@ -126,7 +195,10 @@ fn apply(st: &SharedState, f: &dyn Fn(&str, &[String]) -> Vec<String>, machine: 
     // Two games disks a machine could both get can't share a drive letter (checked before anything is written).
     for a in &disks {
         if let Some(b) = disks.iter().find(|b| crate::games::clash(a, b)) {
-            return Err(bad(format!("games disks {} and {} would share drive {}: on the same machines", a.name, b.name, a.letter)));
+            return Err(bad(format!(
+                "games disks {} and {} would share drive {}: on the same machines",
+                a.name, b.name, a.letter
+            )));
         }
     }
     let before = crate::drivers::key_sets(st);
@@ -142,7 +214,9 @@ fn apply(st: &SharedState, f: &dyn Fn(&str, &[String]) -> Vec<String>, machine: 
     for d in st.db.drivers().map_err(ise)? {
         let g = f(&format!("r{}", d.id), &d.groups);
         if g != d.groups {
-            st.db.set_driver_targets(d.id, d.all_machines, &g).map_err(ise)?;
+            st.db
+                .set_driver_targets(d.id, d.all_machines, &g)
+                .map_err(ise)?;
         }
     }
     for m in st.db.machines().map_err(ise)? {
@@ -163,13 +237,25 @@ struct RenameBody {
 
 /// POST /api/groups/rename {from, to} — everywhere (machines, images, games disks, drivers). Into an existing group =
 /// the two merged.
-async fn rename(State(st): State<SharedState>, Json(b): Json<RenameBody>) -> Result<Json<serde_json::Value>, ApiError> {
+async fn rename(
+    State(st): State<SharedState>,
+    Json(b): Json<RenameBody>,
+) -> Result<Json<serde_json::Value>, ApiError> {
     let to = name_ok(&b.to)?;
     let from = b.from.trim().to_string();
     let st2 = st.clone();
     let (f2, t2) = (from.clone(), to.clone());
     tokio::task::spawn_blocking(move || {
-        apply(&st2, &|_, g| swap(g, &f2, Some(&t2)), &|m| m.grp.as_ref().map(|g| if same(g, &f2) { t2.clone() } else { g.clone() }), true)?;
+        apply(
+            &st2,
+            &|_, g| swap(g, &f2, Some(&t2)),
+            &|m| {
+                m.grp
+                    .as_ref()
+                    .map(|g| if same(g, &f2) { t2.clone() } else { g.clone() })
+            },
+            true,
+        )?;
         save(&st2, &swap(&saved(&st2), &f2, Some(&t2)))
     })
     .await
@@ -181,11 +267,19 @@ async fn rename(State(st): State<SharedState>, Json(b): Json<RenameBody>) -> Res
 
 /// POST /api/groups/delete {name} — its machines get no group; it leaves every image / games disk / driver. Refused
 /// while an image or games disk is only for this group (it would go to every machine).
-async fn delete(State(st): State<SharedState>, Json(b): Json<NameBody>) -> Result<Json<serde_json::Value>, ApiError> {
+async fn delete(
+    State(st): State<SharedState>,
+    Json(b): Json<NameBody>,
+) -> Result<Json<serde_json::Value>, ApiError> {
     let name = b.name.trim().to_string();
     let (st2, n2) = (st.clone(), name.clone());
     tokio::task::spawn_blocking(move || {
-        apply(&st2, &|_, g| swap(g, &n2, None), &|m| m.grp.clone().filter(|g| !same(g, &n2)), false)?;
+        apply(
+            &st2,
+            &|_, g| swap(g, &n2, None),
+            &|m| m.grp.clone().filter(|g| !same(g, &n2)),
+            false,
+        )?;
         save(&st2, &swap(&saved(&st2), &n2, None))
     })
     .await
@@ -216,7 +310,10 @@ struct SetBody {
 
 /// POST /api/groups/set {name, machines, images, disks, drivers, allow_all} — exactly these are the group's. Images /
 /// games disks for every machine (no group) are left as they are: limit them on their own page.
-async fn set(State(st): State<SharedState>, Json(b): Json<SetBody>) -> Result<Json<serde_json::Value>, ApiError> {
+async fn set(
+    State(st): State<SharedState>,
+    Json(b): Json<SetBody>,
+) -> Result<Json<serde_json::Value>, ApiError> {
     let name = name_ok(&b.name)?;
     let (st2, n2) = (st.clone(), name.clone());
     tokio::task::spawn_blocking(move || {
@@ -272,8 +369,18 @@ mod tests {
     #[test]
     fn swap_renames_removes_merges() {
         let g = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
-        assert_eq!(super::swap(&g(&["VIP", "Staff"]), "vip", Some("Gold")), g(&["Gold", "Staff"]));
-        assert_eq!(super::swap(&g(&["VIP", "Staff"]), "VIP", None), g(&["Staff"]));
-        assert_eq!(super::swap(&g(&["VIP", "Gold"]), "VIP", Some("gold")), g(&["gold"]), "merged into an existing one");
+        assert_eq!(
+            super::swap(&g(&["VIP", "Staff"]), "vip", Some("Gold")),
+            g(&["Gold", "Staff"])
+        );
+        assert_eq!(
+            super::swap(&g(&["VIP", "Staff"]), "VIP", None),
+            g(&["Staff"])
+        );
+        assert_eq!(
+            super::swap(&g(&["VIP", "Gold"]), "VIP", Some("gold")),
+            g(&["gold"]),
+            "merged into an existing one"
+        );
     }
 }

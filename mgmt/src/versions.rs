@@ -39,7 +39,9 @@ fn chunk() -> u64 {
 
 /// `<home>/storage` by default (next to the binary); override with BOOTROM_STORAGE_DIR.
 fn storage() -> PathBuf {
-    std::env::var("BOOTROM_STORAGE_DIR").map(PathBuf::from).unwrap_or_else(|_| crate::home().join("storage"))
+    std::env::var("BOOTROM_STORAGE_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| crate::home().join("storage"))
 }
 
 fn chunk_path(root: &Path, hash: &str) -> PathBuf {
@@ -104,10 +106,18 @@ fn snapshot_at(root: &Path, img: &Path, name: &str, label: &str) -> Result<Manif
     let img = std::fs::canonicalize(img).map_err(e(&img.display().to_string()))?;
     let meta = std::fs::metadata(&img).map_err(e("stat image"))?;
     let have = manifests(root, name);
-    if let Some(m) = have.iter().find(|m| m.file.as_ref().is_some_and(|f| same_file(&root.join(f), &img))) {
+    if let Some(m) = have.iter().find(|m| {
+        m.file
+            .as_ref()
+            .is_some_and(|f| same_file(&root.join(f), &img))
+    }) {
         return Err(format!("the golden is already saved as {}", m.version));
     }
-    let n = have.first().and_then(|m| m.version[1..].parse::<u64>().ok()).unwrap_or(0) + 1;
+    let n = have
+        .first()
+        .and_then(|m| m.version[1..].parse::<u64>().ok())
+        .unwrap_or(0)
+        + 1;
     let rel = format!("files/{name}/v{n}.img");
     let p = root.join(&rel);
     std::fs::create_dir_all(p.parent().unwrap()).map_err(e("mkdir files"))?;
@@ -124,7 +134,9 @@ fn snapshot_at(root: &Path, img: &Path, name: &str, label: &str) -> Result<Manif
     sync_fs(root)?; // the file on disk before the manifest that names it
     let dir = manifest_dir(root, name);
     std::fs::create_dir_all(&dir).map_err(e("mkdir manifests"))?;
-    let created = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+    let created = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
     let m = Manifest {
         version: format!("v{n}"),
         label: label.to_string(),
@@ -134,7 +146,11 @@ fn snapshot_at(root: &Path, img: &Path, name: &str, label: &str) -> Result<Manif
         chunks: Vec::new(),
         file: Some(rel),
     };
-    write_durable(&dir.join(format!("{}.json", m.version)), &serde_json::to_vec(&m).unwrap()).map_err(e("store manifest"))?;
+    write_durable(
+        &dir.join(format!("{}.json", m.version)),
+        &serde_json::to_vec(&m).unwrap(),
+    )
+    .map_err(e("store manifest"))?;
     Ok(m)
 }
 
@@ -144,7 +160,11 @@ fn sync_fs(dir: &Path) -> Result<(), String> {
     let d = File::open(dir).map_err(e("open storage"))?;
     // SAFETY: valid fd; syncfs only flushes.
     if unsafe { libc::syncfs(d.as_raw_fd()) } != 0 {
-        return Err(format!("syncfs {}: {}", dir.display(), std::io::Error::last_os_error()));
+        return Err(format!(
+            "syncfs {}: {}",
+            dir.display(),
+            std::io::Error::last_os_error()
+        ));
     }
     Ok(())
 }
@@ -160,7 +180,10 @@ fn write_durable(p: &Path, data: &[u8]) -> std::io::Result<()> {
 }
 
 fn load(root: &Path, name: &str, version: &str) -> Result<Manifest, String> {
-    if !version.starts_with('v') || !version[1..].chars().all(|c| c.is_ascii_digit()) || version.len() < 2 {
+    if !version.starts_with('v')
+        || !version[1..].chars().all(|c| c.is_ascii_digit())
+        || version.len() < 2
+    {
         return Err(format!("invalid version {version:?}"));
     }
     let p = manifest_dir(root, name).join(format!("{version}.json"));
@@ -181,8 +204,13 @@ fn clone_at(root: &Path, from: &str, version: &str, to: &str, label: &str) -> Re
         return Err(format!("image {to} already has versions"));
     }
     std::fs::create_dir_all(&dir).map_err(e("mkdir manifests"))?;
-    let m = Manifest { version: "v1".into(), label: label.to_string(), ..m };
-    write_durable(&dir.join("v1.json"), &serde_json::to_vec(&m).unwrap()).map_err(e("write manifest"))
+    let m = Manifest {
+        version: "v1".into(),
+        label: label.to_string(),
+        ..m
+    };
+    write_durable(&dir.join("v1.json"), &serde_json::to_vec(&m).unwrap())
+        .map_err(e("write manifest"))
 }
 
 /// Can `version` be restored? Its file (or every chunk) is there with the right length. → the bytes a restore must
@@ -196,14 +224,23 @@ fn check_at(root: &Path, name: &str, version: &str) -> Result<u64, String> {
     if let Some(f) = &m.file {
         return match std::fs::metadata(root.join(f)) {
             Ok(x) if x.len() == m.size => Ok(0),
-            _ => Err(format!("version {version}: its file is missing or damaged — it can't be restored")),
+            _ => Err(format!(
+                "version {version}: its file is missing or damaged — it can't be restored"
+            )),
         };
     }
     let mut data = 0;
-    for (i, h) in m.chunks.iter().enumerate().filter(|(_, h)| h.as_str() != ZERO) {
+    for (i, h) in m
+        .chunks
+        .iter()
+        .enumerate()
+        .filter(|(_, h)| h.as_str() != ZERO)
+    {
         let len = m.chunk_size.min(m.size - i as u64 * m.chunk_size);
         if std::fs::metadata(chunk_path(root, h)).map(|x| x.len()).ok() != Some(len) {
-            return Err(format!("version {version}: chunk {i} is missing or damaged — it can't be restored"));
+            return Err(format!(
+                "version {version}: chunk {i} is missing or damaged — it can't be restored"
+            ));
         }
         data += len;
     }
@@ -234,12 +271,18 @@ fn rehydrate_at(root: &Path, dst: &Path, name: &str, version: &str) -> Result<()
     // A chunk version of an older release: written chunk by chunk (each checked against its hash), zero = hole.
     let f = File::create(dst).map_err(e(&dst.display().to_string()))?;
     f.set_len(m.size).map_err(e("size image"))?;
-    for (i, h) in m.chunks.iter().enumerate().filter(|(_, h)| h.as_str() != ZERO) {
+    for (i, h) in m
+        .chunks
+        .iter()
+        .enumerate()
+        .filter(|(_, h)| h.as_str() != ZERO)
+    {
         let data = std::fs::read(chunk_path(root, h)).map_err(e(&format!("chunk {h} missing")))?;
         if blake3::hash(&data).to_hex().as_str() != h {
             return Err(format!("chunk {h} is corrupt"));
         }
-        f.write_all_at(&data, i as u64 * m.chunk_size).map_err(e("write image"))?;
+        f.write_all_at(&data, i as u64 * m.chunk_size)
+            .map_err(e("write image"))?;
     }
     f.sync_all().map_err(e("sync image"))
 }
@@ -269,7 +312,8 @@ pub fn delete(name: &str, version: &str) -> Result<usize, String> {
 
 fn delete_at(root: &Path, name: &str, version: &str) -> Result<usize, String> {
     load(root, name, version)?; // validates + exists
-    std::fs::remove_file(manifest_dir(root, name).join(format!("{version}.json"))).map_err(e("delete manifest"))?;
+    std::fs::remove_file(manifest_dir(root, name).join(format!("{version}.json")))
+        .map_err(e("delete manifest"))?;
     // The version is gone either way; a gc that fails (an unreadable manifest) only leaves data for a later one.
     Ok(gc(root).unwrap_or_else(|err| {
         tracing::warn!("versions gc after deleting {name} {version}: {err}");
@@ -286,32 +330,62 @@ pub fn delete_all(name: &str) -> Result<usize, String> {
 
 /// Mark & sweep: keep the files and chunks named by any manifest of any image.
 fn gc(root: &Path) -> Result<usize, String> {
-    let (mut chunks, mut files) = (std::collections::HashSet::new(), std::collections::HashSet::new());
-    for img in std::fs::read_dir(root.join("manifests")).into_iter().flatten().flatten() {
-        for mf in std::fs::read_dir(img.path()).into_iter().flatten().flatten() {
+    let (mut chunks, mut files) = (
+        std::collections::HashSet::new(),
+        std::collections::HashSet::new(),
+    );
+    for img in std::fs::read_dir(root.join("manifests"))
+        .into_iter()
+        .flatten()
+        .flatten()
+    {
+        for mf in std::fs::read_dir(img.path())
+            .into_iter()
+            .flatten()
+            .flatten()
+        {
             // Only manifests (a leftover vN.tmp of an interrupted write is not one); an unreadable manifest still
             // stops gc — what it names may be in use.
             if mf.path().extension().is_none_or(|x| x != "json") {
                 continue;
             }
-            let m: Manifest = serde_json::from_slice(&std::fs::read(mf.path()).map_err(e("read manifest"))?)
-                .map_err(e(&mf.path().display().to_string()))?;
+            let m: Manifest =
+                serde_json::from_slice(&std::fs::read(mf.path()).map_err(e("read manifest"))?)
+                    .map_err(e(&mf.path().display().to_string()))?;
             chunks.extend(m.chunks);
             files.extend(m.file.map(|f| root.join(f)));
         }
     }
     let mut freed = 0;
-    for img in std::fs::read_dir(root.join("files")).into_iter().flatten().flatten() {
-        for f in std::fs::read_dir(img.path()).into_iter().flatten().flatten() {
+    for img in std::fs::read_dir(root.join("files"))
+        .into_iter()
+        .flatten()
+        .flatten()
+    {
+        for f in std::fs::read_dir(img.path())
+            .into_iter()
+            .flatten()
+            .flatten()
+        {
             if !files.contains(&f.path()) && std::fs::remove_file(f.path()).is_ok() {
                 freed += 1;
             }
         }
         let _ = std::fs::remove_dir(img.path()); // only when empty
     }
-    for sub in std::fs::read_dir(root.join("chunks")).into_iter().flatten().flatten() {
-        for c in std::fs::read_dir(sub.path()).into_iter().flatten().flatten() {
-            if !chunks.contains(&*c.file_name().to_string_lossy()) && std::fs::remove_file(c.path()).is_ok() {
+    for sub in std::fs::read_dir(root.join("chunks"))
+        .into_iter()
+        .flatten()
+        .flatten()
+    {
+        for c in std::fs::read_dir(sub.path())
+            .into_iter()
+            .flatten()
+            .flatten()
+        {
+            if !chunks.contains(&*c.file_name().to_string_lossy())
+                && std::fs::remove_file(c.path()).is_ok()
+            {
                 freed += 1;
             }
         }
@@ -325,7 +399,9 @@ mod tests {
     use super::*;
 
     fn hash_file(p: &Path) -> String {
-        blake3::hash(&std::fs::read(p).unwrap()).to_hex().to_string()
+        blake3::hash(&std::fs::read(p).unwrap())
+            .to_hex()
+            .to_string()
     }
 
     fn dir(name: &str) -> (PathBuf, PathBuf, PathBuf) {
@@ -349,14 +425,21 @@ mod tests {
         let v1_file = root.join(v1.file.as_ref().unwrap());
         assert_eq!((v1.version.as_str(), v1.size), ("v1", 5 * CHUNK));
         assert!(same_file(&v1_file, &img), "a hard link, no copy");
-        assert!(snapshot_at(&root, &img, "img", "").unwrap_err().contains("already saved as v1"));
+        assert!(
+            snapshot_at(&root, &img, "img", "")
+                .unwrap_err()
+                .contains("already saved as v1")
+        );
         // image.img replaced (an upload renames a new file over it) → v2.
         let new = d.join("image.img.new");
         std::fs::write(&new, vec![9u8; 3000]).unwrap();
         std::fs::rename(&new, &img).unwrap();
         assert_eq!(hash_file(&v1_file), v1_hash, "v1 kept its bytes");
         let v2 = snapshot_at(&root, &img, "img", "").unwrap();
-        let ver = list_at(&root, "img").into_iter().map(|m| m.version).collect::<Vec<_>>();
+        let ver = list_at(&root, "img")
+            .into_iter()
+            .map(|m| m.version)
+            .collect::<Vec<_>>();
         assert_eq!(ver, ["v2", "v1"], "newest first");
         // Rollback to v1 = hard link again: no space needed, same bytes, same file.
         assert_eq!(check_at(&root, "img", "v1").unwrap(), 0);
@@ -383,7 +466,10 @@ mod tests {
     fn old_chunk_versions_still_restore() {
         let (root, img, d) = dir("chunks");
         let c = |b: u8| vec![b; CHUNK as usize];
-        let (h1, h3) = (blake3::hash(&c(1)).to_hex().to_string(), blake3::hash(&c(3)).to_hex().to_string());
+        let (h1, h3) = (
+            blake3::hash(&c(1)).to_hex().to_string(),
+            blake3::hash(&c(3)).to_hex().to_string(),
+        );
         for (h, data) in [(&h1, c(1)), (&h3, c(3))] {
             std::fs::create_dir_all(chunk_path(&root, h).parent().unwrap()).unwrap();
             std::fs::write(chunk_path(&root, h), data).unwrap();
@@ -391,14 +477,23 @@ mod tests {
         std::fs::create_dir_all(chunk_path(&root, "ffff").parent().unwrap()).unwrap();
         std::fs::write(chunk_path(&root, "ffff"), b"orphan").unwrap();
         std::fs::create_dir_all(manifest_dir(&root, "img")).unwrap();
-        let m = format!(r#"{{"version":"v1","label":"","created":1,"size":{},"chunk_size":{CHUNK},"chunks":["{h1}","zero","{h3}"]}}"#, 3 * CHUNK);
+        let m = format!(
+            r#"{{"version":"v1","label":"","created":1,"size":{},"chunk_size":{CHUNK},"chunks":["{h1}","zero","{h3}"]}}"#,
+            3 * CHUNK
+        );
         std::fs::write(manifest_dir(&root, "img").join("v1.json"), m).unwrap();
         std::fs::write(manifest_dir(&root, "img").join("v2.tmp"), b"{").unwrap(); // half-written: not a manifest
         assert_eq!(check_at(&root, "img", "v1").unwrap(), 2 * CHUNK);
         rehydrate_at(&root, &img, "img", "v1").unwrap();
-        assert_eq!(std::fs::read(&img).unwrap(), [c(1), vec![0; CHUNK as usize], c(3)].concat());
+        assert_eq!(
+            std::fs::read(&img).unwrap(),
+            [c(1), vec![0; CHUNK as usize], c(3)].concat()
+        );
         use std::os::unix::fs::MetadataExt;
-        assert!(std::fs::metadata(&img).unwrap().blocks() * 512 <= 2 * CHUNK + (1 << 20), "zero chunk = hole");
+        assert!(
+            std::fs::metadata(&img).unwrap().blocks() * 512 <= 2 * CHUNK + (1 << 20),
+            "zero chunk = hole"
+        );
         assert_eq!(gc(&root).unwrap(), 1, "only the orphan chunk");
         assert_eq!(delete_at(&root, "img", "v1").unwrap(), 2);
         std::fs::remove_file(chunk_path(&root, &h1)).ok();
@@ -415,7 +510,10 @@ mod tests {
         f.write_all_at(&[3u8; 5000], 40 << 20).unwrap();
         copy_sparse(&a, &b).unwrap();
         assert_eq!(std::fs::read(&a).unwrap(), std::fs::read(&b).unwrap());
-        assert!(std::fs::metadata(&b).unwrap().blocks() * 512 <= 1 << 20, "holes stay holes");
+        assert!(
+            std::fs::metadata(&b).unwrap().blocks() * 512 <= 1 << 20,
+            "holes stay holes"
+        );
         let _ = std::fs::remove_dir_all(&d);
     }
 }

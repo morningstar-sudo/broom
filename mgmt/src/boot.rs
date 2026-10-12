@@ -12,15 +12,21 @@ use axum::{
 use std::collections::HashMap;
 use tracing::{info, warn};
 
-use crate::db::Machine;
 use crate::SharedState;
+use crate::db::Machine;
 
 /// iPXE built by mgmt/ipxe/build.sh (upstream + mgmt/ipxe/patches) (upgrading the mgmt binary = upgrading iPXE too).
-pub(crate) fn snponly_efi() -> &'static [u8] { crate::assets::bytes("ipxe/snponly.efi") }
+pub(crate) fn snponly_efi() -> &'static [u8] {
+    crate::assets::bytes("ipxe/snponly.efi")
+}
 /// Official Secure Boot iPXE (mgmt/ipxe/fetch-signed.sh), served under `sb/` when "Secure Boot clients" is on:
 /// the iPXE shim (signed by Microsoft) loads `sb/snponly.efi` (signed by the iPXE CA) by name from the same directory.
-pub(crate) fn sb_shim_efi() -> &'static [u8] { crate::assets::bytes("ipxe/signed/snponly-shim.efi") }
-pub(crate) fn sb_ipxe_efi() -> &'static [u8] { crate::assets::bytes("ipxe/signed/snponly.efi") }
+pub(crate) fn sb_shim_efi() -> &'static [u8] {
+    crate::assets::bytes("ipxe/signed/snponly-shim.efi")
+}
+pub(crate) fn sb_ipxe_efi() -> &'static [u8] {
+    crate::assets::bytes("ipxe/signed/snponly.efi")
+}
 
 type Q = Query<HashMap<String, String>>;
 
@@ -31,8 +37,14 @@ fn norm_mac(m: &str) -> String {
 /// mac + ip from the query, validated: these endpoints are open to anyone and both values go into the log, so
 /// anything that is not a MAC / an IPv4 address (e.g. a URL-encoded newline forging a log line) is dropped.
 fn client_ids(q: &HashMap<String, String>) -> (String, String) {
-    let mac = q.get("mac").map(|m| norm_mac(m)).filter(|m| m.len() == 17 && m.chars().all(|c| c.is_ascii_hexdigit() || c == ':'));
-    let ip = q.get("ip").and_then(|i| i.parse::<std::net::Ipv4Addr>().ok()).map(|i| i.to_string());
+    let mac = q
+        .get("mac")
+        .map(|m| norm_mac(m))
+        .filter(|m| m.len() == 17 && m.chars().all(|c| c.is_ascii_hexdigit() || c == ':'));
+    let ip = q
+        .get("ip")
+        .and_then(|i| i.parse::<std::net::Ipv4Addr>().ok())
+        .map(|i| i.to_string());
     (mac.unwrap_or_default(), ip.unwrap_or_else(|| "?".into()))
 }
 
@@ -40,7 +52,15 @@ fn client_ids(q: &HashMap<String, String>) -> (String, String) {
 /// (mac, ip, its row in the Machines table).
 fn client(st: &SharedState, q: &HashMap<String, String>) -> (String, String, Option<Machine>) {
     let (mac, ip) = client_ids(q);
-    let m = if mac.is_empty() { None } else { st.db.machines().unwrap_or_default().into_iter().find(|m| norm_mac(&m.mac) == mac) };
+    let m = if mac.is_empty() {
+        None
+    } else {
+        st.db
+            .machines()
+            .unwrap_or_default()
+            .into_iter()
+            .find(|m| norm_mac(&m.mac) == mac)
+    };
     (mac, ip, m)
 }
 
@@ -52,14 +72,32 @@ pub async fn render(State(st): State<SharedState>, Query(q): Q) -> impl IntoResp
     let (mac, ip, m) = client(&st, &q);
     let host = m.as_ref().and_then(|m| m.hostname.clone());
     // License generation (a counter, never the key) → stage rebuilds base when it changes.
-    let lic = m.as_ref().filter(|m| m.license_key.is_some()).map(|m| m.license_gen);
+    let lic = m
+        .as_ref()
+        .filter(|m| m.license_key.is_some())
+        .map(|m| m.license_gen);
     let h = host.as_deref().unwrap_or("-");
-    info!("client {} boot menu - mac {mac} - ip {ip} - hostname {h}", host.as_deref().unwrap_or(&mac));
+    info!(
+        "client {} boot menu - mac {mac} - ip {ip} - hostname {h}",
+        host.as_deref().unwrap_or(&mac)
+    );
 
     // Clamp: menu_script does timeout_s * 1000 (would overflow / panic on a huge stored value).
-    let timeout_s: u64 = st.db.get_config("boot_timeout", "10").parse().unwrap_or(10).min(3600);
+    let timeout_s: u64 = st
+        .db
+        .get_config("boot_timeout", "10")
+        .parse()
+        .unwrap_or(10)
+        .min(3600);
     let images = menu_images(st.db.images().unwrap_or_default(), m.as_ref());
-    script(menu_script(&images, timeout_s, host.as_deref(), lic, m.is_some(), secure_boot(&st)))
+    script(menu_script(
+        &images,
+        timeout_s,
+        host.as_deref(),
+        lic,
+        m.is_some(),
+        secure_boot(&st),
+    ))
 }
 
 /// "Secure Boot clients" switch (Network page): clients run the official signed iPXE.
@@ -81,28 +119,52 @@ fn shim_line(st: &SharedState, img: &crate::db::Image) -> Option<String> {
         let now = crate::now_secs();
         let last = LAST_TRY.load(std::sync::atomic::Ordering::Relaxed);
         if now.saturating_sub(last) >= 600
-            && LAST_TRY.compare_exchange(last, now, std::sync::atomic::Ordering::Relaxed, std::sync::atomic::Ordering::Relaxed).is_ok()
+            && LAST_TRY
+                .compare_exchange(
+                    last,
+                    now,
+                    std::sync::atomic::Ordering::Relaxed,
+                    std::sync::atomic::Ordering::Relaxed,
+                )
+                .is_ok()
         {
             tokio::task::spawn_blocking(crate::publish::prepare_stage);
         }
-        warn!("image {}: no shim/shimx64.efi yet — fetching the stage bundle; Secure Boot clients can boot once it is in", img.name);
+        warn!(
+            "image {}: no shim/shimx64.efi yet — fetching the stage bundle; Secure Boot clients can boot once it is in",
+            img.name
+        );
         return None;
     }
-    Some(format!("shim http://{}/tftp/shim/shimx64.efi\n", st.db.get_config("dhcp_server_ip", "")))
+    Some(format!(
+        "shim http://{}/tftp/shim/shimx64.efi\n",
+        st.db.get_config("dhcp_server_ip", "")
+    ))
 }
 
 /// The images a machine of group `grp` may boot (each image's groups; none = every machine).
 fn allowed(images: Vec<crate::db::Image>, grp: Option<&str>) -> Vec<crate::db::Image> {
-    images.into_iter().filter(|i| crate::machines::for_group(&i.groups, grp)).collect()
+    images
+        .into_iter()
+        .filter(|i| crate::machines::for_group(&i.groups, grp))
+        .collect()
 }
 
 /// Menu entries = the images of the machine's group. Default: the machine's own image (Devices page), else the global
 /// one — whichever is on its menu; neither → no default (no countdown).
 fn menu_images(images: Vec<crate::db::Image>, m: Option<&Machine>) -> Vec<MenuImage> {
     let images = allowed(images, m.and_then(|m| m.grp.as_deref()));
-    let own = m.and_then(|m| m.image_id).filter(|id| images.iter().any(|i| i.id == *id));
+    let own = m
+        .and_then(|m| m.image_id)
+        .filter(|id| images.iter().any(|i| i.id == *id));
     let def = own.or_else(|| images.iter().find(|i| i.is_default).map(|i| i.id));
-    images.into_iter().map(|i| MenuImage { is_default: Some(i.id) == def, name: i.name }).collect()
+    images
+        .into_iter()
+        .map(|i| MenuImage {
+            is_default: Some(i.id) == def,
+            name: i.name,
+        })
+        .collect()
 }
 
 /// A menu choice: log the boot + hand over the image's boot script.
@@ -121,22 +183,37 @@ pub async fn start(
     let grp = m.as_ref().and_then(|m| m.grp.clone());
     let host = m.and_then(|m| m.hostname);
     // Image names are [A-Za-z0-9_-]; keep only those (the value is logged and echoed into the iPXE script).
-    let name: String = q.get("image").map_or("", String::as_str).chars().filter(|c| c.is_ascii_alphanumeric() || matches!(*c, '_' | '-')).take(64).collect();
+    let name: String = q
+        .get("image")
+        .map_or("", String::as_str)
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || matches!(*c, '_' | '-'))
+        .take(64)
+        .collect();
     let who = host.clone().unwrap_or_else(|| mac.clone());
     let h = host.as_deref().unwrap_or("-");
     // Only an image of the machine's group (as on its menu): a hand-typed choice of another group's image is refused.
     let mine = allowed(st.db.images().unwrap_or_default(), grp.as_deref());
     let img = mine.iter().find(|i| i.name == name);
     if img.is_none() && st.db.image_by_name(&name).ok().flatten().is_some() {
-        warn!("client {who} chose image {name:?} - mac {mac} - ip {ip}: not for its group ({}), back to the menu", grp.as_deref().unwrap_or("none"));
+        warn!(
+            "client {who} chose image {name:?} - mac {mac} - ip {ip}: not for its group ({}), back to the menu",
+            grp.as_deref().unwrap_or("none")
+        );
         return script(format!(
             "#!ipxe\necho Image '{name}' is not for this machine's group\nsleep 3\nchain /boot.ipxe?mac=${{net0/mac}}&ip=${{net0/ip}}\n"
         ));
     }
-    let boot = img.and_then(|i| i.boot_script.as_deref()).map(str::trim).filter(|s| !s.is_empty());
+    let boot = img
+        .and_then(|i| i.boot_script.as_deref())
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
     script(match (img, boot) {
         (Some(i), Some(bs)) => {
-            info!("client {who} started - mac {mac} - ip {ip} - hostname {h} - image {name} ({})", i.os);
+            info!(
+                "client {who} started - mac {mac} - ip {ip} - hostname {h} - image {name} ({})",
+                i.os
+            );
             if !mac.is_empty() {
                 crate::bench::boot_started(&mac, &name);
             }
@@ -144,9 +221,14 @@ pub async fn start(
             // SSD layout both OSes use (broom.lxgb= Linux share, broom.wbgb= writeback inside it). The Linux share:
             // the Linux goldens this machine may boot.
             let strict = st.db.get_config("strict_reset", "0") == "1";
-            let linux_sizes = mine.iter().filter(|i| i.os == "linux" && i.use_ssd && i.hash.is_some()).filter_map(|i| {
-                std::fs::metadata(crate::images_dir().join(&i.name).join("image.img")).ok().map(|m| m.len())
-            });
+            let linux_sizes = mine
+                .iter()
+                .filter(|i| i.os == "linux" && i.use_ssd && i.hash.is_some())
+                .filter_map(|i| {
+                    std::fs::metadata(crate::images_dir().join(&i.name).join("image.img"))
+                        .ok()
+                        .map(|m| m.len())
+                });
             format!(
                 "#!ipxe\nset broom-srv {}\nset broom-base {}\nset broom-strict {}\nset broom-lxgb {}\nset broom-wbgb {WB_GB}\nset broom-ssd {}\n{}{bs}\n",
                 // The server's address at boot time — boot scripts use ${broom-srv}, so changing the Server IP needs
@@ -160,7 +242,9 @@ pub async fn start(
             )
         }
         _ => {
-            warn!("client {who} chose image {name:?} - mac {mac} - ip {ip}: not published, back to the menu");
+            warn!(
+                "client {who} chose image {name:?} - mac {mac} - ip {ip}: not published, back to the menu"
+            );
             format!(
                 "#!ipxe\necho Image '{name}' is not published yet (no boot_script)\nsleep 3\n\
                  chain /boot.ipxe?mac=${{net0/mac}}&ip=${{net0/ip}}\n"
@@ -178,7 +262,11 @@ const WB_GB: u64 = 30;
 /// laid out, never to resize one.
 fn linux_share_gb(golden_sizes: impl Iterator<Item = u64>) -> u64 {
     let gb: Vec<u64> = golden_sizes.map(|b| b.div_ceil(1 << 30)).collect();
-    if gb.is_empty() { 0 } else { WB_GB + gb.iter().sum::<u64>() + 5 }
+    if gb.is_empty() {
+        0
+    } else {
+        WB_GB + gb.iter().sum::<u64>() + 5
+    }
 }
 
 struct MenuImage {
@@ -192,14 +280,25 @@ struct MenuImage {
 /// ESC → shell (technical).
 /// `sb` = clients run the official signed iPXE (Secure Boot): it has no menu-hint/menu-footer, so the same info is
 /// shown as non-selectable `item --gap` lines above the images instead (the cursor still starts on an image).
-fn menu_script(images: &[MenuImage], timeout_s: u64, host: Option<&str>, lic: Option<i64>, reg: bool, sb: bool) -> String {
+fn menu_script(
+    images: &[MenuImage],
+    timeout_s: u64,
+    host: Option<&str>,
+    lic: Option<i64>,
+    reg: bool,
+    sb: bool,
+) -> String {
     let mut items = String::new();
     let mut targets = String::new();
     let mut default = None;
     for (i, img) in images.iter().enumerate() {
         // By position, not by name: "win-11" and "win_11" would both become img_win_11 and boot the same target.
         let label = format!("img{}", i + 1);
-        let key = if i < 9 { format!("--key {} ", i + 1) } else { String::new() };
+        let key = if i < 9 {
+            format!("--key {} ", i + 1)
+        } else {
+            String::new()
+        };
         items.push_str(&format!("item {key}{label} [{}] {}\n", i + 1, img.name));
         // The server logs the boot and returns the image's script (image names are URL-safe: [A-Za-z0-9_-]).
         targets.push_str(&format!(
@@ -216,7 +315,9 @@ fn menu_script(images: &[MenuImage], timeout_s: u64, host: Option<&str>, lic: Op
         None => String::new(),
     };
     if images.is_empty() {
-        items.push_str("item --key s shell [S] iPXE shell (no image yet - upload one in the web admin)\n");
+        items.push_str(
+            "item --key s shell [S] iPXE shell (no image yet - upload one in the web admin)\n",
+        );
     }
     // Windows computer name (NetBIOS): letters/digits/'-', max 15 — also safe inside the iPXE script.
     // broom-host → stage cmdline (broom.host=) → Windows sets the name when base is created.
@@ -226,7 +327,11 @@ fn menu_script(images: &[MenuImage], timeout_s: u64, host: Option<&str>, lic: Op
         .filter(|c| c.is_ascii_alphanumeric() || *c == '-')
         .take(15)
         .collect();
-    let mut set_host = if host.is_empty() { String::new() } else { format!("set broom-host {host}\n") };
+    let mut set_host = if host.is_empty() {
+        String::new()
+    } else {
+        format!("set broom-host {host}\n")
+    };
     // broom-lic → stage cmdline (broom.lic=): license key set / re-armed → base rebuilt → broom-done fetches it.
     if let Some(g) = lic {
         set_host.push_str(&format!("set broom-lic {g}\n"));
@@ -235,7 +340,11 @@ fn menu_script(images: &[MenuImage], timeout_s: u64, host: Option<&str>, lic: Op
     if reg {
         set_host.push_str("set broom-reg 1\n");
     }
-    let host = if host.is_empty() { "not registered".into() } else { host };
+    let host = if host.is_empty() {
+        "not registered".into()
+    } else {
+        host
+    };
     // One short line per field: the menu box is as wide as its longest line, so this fits any console width.
     let header = if sb {
         format!(
@@ -270,37 +379,69 @@ fn menu_script(images: &[MenuImage], timeout_s: u64, host: Option<&str>, lic: Op
 
 #[cfg(test)]
 mod tests {
-    use super::{linux_share_gb, menu_script, MenuImage};
+    use super::{MenuImage, linux_share_gb, menu_script};
 
     #[test]
     fn linux_share() {
         const G: u64 = 1 << 30;
-        assert_eq!(linux_share_gb(std::iter::empty()), 0, "no Linux image → Windows gets the disk");
+        assert_eq!(
+            linux_share_gb(std::iter::empty()),
+            0,
+            "no Linux image → Windows gets the disk"
+        );
         assert_eq!(linux_share_gb([20 * G].into_iter()), 55);
-        assert_eq!(linux_share_gb([8 * G, 20 * G + 1].into_iter()), 64, "all of them cached: 8 + 21 (rounded up) + 35");
+        assert_eq!(
+            linux_share_gb([8 * G, 20 * G + 1].into_iter()),
+            64,
+            "all of them cached: 8 + 21 (rounded up) + 35"
+        );
     }
 
     fn img(name: &str, def: bool) -> MenuImage {
-        MenuImage { name: name.into(), is_default: def }
+        MenuImage {
+            name: name.into(),
+            is_default: def,
+        }
     }
 
     #[test]
     fn menu_default_keys_ascii() {
-        let s = menu_script(&[img("win-11", true), img("ubuntu", false)], 5, Some("FPS-43 $x|"), Some(3), true, false);
+        let s = menu_script(
+            &[img("win-11", true), img("ubuntu", false)],
+            5,
+            Some("FPS-43 $x|"),
+            Some(3),
+            true,
+            false,
+        );
         assert!(s.starts_with("#!ipxe\n"));
         assert!(s.is_ascii(), "the iPXE font is ASCII only");
         assert!(s.contains("item --key 1 img1 [1] win-11\n"));
         assert!(s.contains("item --key 2 img2 [2] ubuntu\n"));
         assert!(s.contains("choose --default img1 --timeout 5000 sel || goto shell"));
         // A choice goes through the server (boot log + the image's script).
-        assert!(s.contains(":img1\nchain /boot/start?image=win-11&mac=${net0/mac}&ip=${net0/ip} || goto start\n"));
+        assert!(s.contains(
+            ":img1\nchain /boot/start?image=win-11&mac=${net0/mac}&ip=${net0/ip} || goto start\n"
+        ));
         assert!(s.contains("set menu-footer Host: FPS-43x|IP: ${net0/ip}|MAC: ${net0/mac}\n"));
         assert!(s.contains("set broom-host FPS-43x\n"));
-        assert!(s.contains("set broom-lic 3\n"), "license generation, never the key");
-        assert!(s.contains("set broom-reg 1\n"), "registered machine → the stage may partition its disk");
+        assert!(
+            s.contains("set broom-lic 3\n"),
+            "license generation, never the key"
+        );
+        assert!(
+            s.contains("set broom-reg 1\n"),
+            "registered machine → the stage may partition its disk"
+        );
         // menu_ui.c draws the countdown in the last 32 columns of the hint row (from col 46 on 80x25).
-        let hint = s.lines().find_map(|l| l.strip_prefix("set menu-hint ")).unwrap();
-        assert!(2 + hint.len() <= 80 - 2 - 32, "menu-hint would be overwritten by the countdown");
+        let hint = s
+            .lines()
+            .find_map(|l| l.strip_prefix("set menu-hint "))
+            .unwrap();
+        assert!(
+            2 + hint.len() <= 80 - 2 - 32,
+            "menu-hint would be overwritten by the countdown"
+        );
     }
 
     /// The menu holds the images of the machine's group; its own image is the default when on it, else the global one.
@@ -320,21 +461,56 @@ mod tests {
             groups: groups.iter().map(|g| g.to_string()).collect(),
             preload: false,
         };
-        let images = || vec![img(1, "win11", true, &[]), img(2, "ubuntu", false, &[]), img(3, "stream", false, &["VIP"])];
+        let images = || {
+            vec![
+                img(1, "win11", true, &[]),
+                img(2, "ubuntu", false, &[]),
+                img(3, "stream", false, &["VIP"]),
+            ]
+        };
         let menu = |own: Option<i64>, grp: Option<&str>| {
-            let m = crate::db::Machine { image_id: own, grp: grp.map(Into::into), ..Default::default() };
+            let m = crate::db::Machine {
+                image_id: own,
+                grp: grp.map(Into::into),
+                ..Default::default()
+            };
             let items = super::menu_images(images(), Some(&m));
             let names: Vec<String> = items.iter().map(|i| i.name.clone()).collect();
-            (names, items.into_iter().filter(|i| i.is_default).map(|i| i.name).collect::<Vec<_>>())
+            (
+                names,
+                items
+                    .into_iter()
+                    .filter(|i| i.is_default)
+                    .map(|i| i.name)
+                    .collect::<Vec<_>>(),
+            )
         };
-        assert_eq!(menu(None, None), (vec!["win11".into(), "ubuntu".into()], vec!["win11".into()]));
+        assert_eq!(
+            menu(None, None),
+            (vec!["win11".into(), "ubuntu".into()], vec!["win11".into()])
+        );
         assert_eq!(menu(Some(2), None).1, ["ubuntu"]);
-        assert_eq!(menu(Some(9), None).1, ["win11"], "deleted image → global default");
-        assert_eq!(menu(Some(3), Some("vip")).0, ["win11", "ubuntu", "stream"], "VIP (any case) also gets its own image");
+        assert_eq!(
+            menu(Some(9), None).1,
+            ["win11"],
+            "deleted image → global default"
+        );
+        assert_eq!(
+            menu(Some(3), Some("vip")).0,
+            ["win11", "ubuntu", "stream"],
+            "VIP (any case) also gets its own image"
+        );
         assert_eq!(menu(Some(3), Some("vip")).1, ["stream"]);
-        assert_eq!(menu(Some(3), None).1, ["win11"], "own image not for its group → global default");
+        assert_eq!(
+            menu(Some(3), None).1,
+            ["win11"],
+            "own image not for its group → global default"
+        );
         let only_vip = super::menu_images(vec![img(3, "stream", false, &["VIP"])], None);
-        assert!(only_vip.is_empty(), "unregistered machine: only images for every machine");
+        assert!(
+            only_vip.is_empty(),
+            "unregistered machine: only images for every machine"
+        );
     }
 
     /// Open endpoints log mac/ip from the query: junk (a forged log line) must never get through.
@@ -342,10 +518,19 @@ mod tests {
     fn client_ids_validated() {
         let s = |x: &str| x.to_string();
         let q = |mac: &str, ip: &str| {
-            super::client_ids(&std::collections::HashMap::from([(s("mac"), s(mac)), (s("ip"), s(ip))]))
+            super::client_ids(&std::collections::HashMap::from([
+                (s("mac"), s(mac)),
+                (s("ip"), s(ip)),
+            ]))
         };
-        assert_eq!(q("34-5A-60-7B-2B-1D", "10.0.0.50"), (s("34:5a:60:7b:2b:1d"), s("10.0.0.50")));
-        assert_eq!(q("aa\nINFO client X started", "1.2.3.4\nfake"), (s(""), s("?")));
+        assert_eq!(
+            q("34-5A-60-7B-2B-1D", "10.0.0.50"),
+            (s("34:5a:60:7b:2b:1d"), s("10.0.0.50"))
+        );
+        assert_eq!(
+            q("aa\nINFO client X started", "1.2.3.4\nfake"),
+            (s(""), s("?"))
+        );
         assert_eq!(q("34:5a:60:7b:2b:1d\n", "999.1.1.1"), (s(""), s("?")));
         assert_eq!(super::client_ids(&Default::default()), (s(""), s("?")));
     }
@@ -355,7 +540,10 @@ mod tests {
         let s = menu_script(&[img("a", false)], 10, None, None, false, false);
         assert!(s.contains("choose  sel || goto shell"));
         assert!(s.contains("Host: not registered|"));
-        assert!(!s.contains("broom-host") && !s.contains("broom-lic") && !s.contains("broom-reg"), "unknown machine");
+        assert!(
+            !s.contains("broom-host") && !s.contains("broom-lic") && !s.contains("broom-reg"),
+            "unknown machine"
+        );
         let s = menu_script(&[], 10, None, None, false, false);
         assert!(s.contains("item --key s shell [S] iPXE shell (no image yet"));
     }
@@ -369,6 +557,8 @@ mod tests {
         let item = s.find("item --key 1 img1 ").unwrap();
         let head = s.find("item --gap Host : PC05\nitem --gap IP   : ${net0/ip}\nitem --gap MAC  : ${net0/mac}\n").unwrap();
         assert!(head < item && s.contains("item --gap Arrows/number to select, Enter to boot\n"));
-        assert!(!menu_script(&[img("a", false)], 5, None, None, false, false).contains("item --gap"));
+        assert!(
+            !menu_script(&[img("a", false)], 5, None, None, false, false).contains("item --gap")
+        );
     }
 }

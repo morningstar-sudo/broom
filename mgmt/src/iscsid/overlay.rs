@@ -3,11 +3,11 @@
 // block: from the overlay once written, else from what is under it. The first write to a block copies it from below
 // (read-modify-write), so a block in the set always holds its whole current content. The game update machine writes
 // into one; saved, it becomes a frozen layer of a games disk version (games.rs), later merged into the disk itself.
+use parking_lot::Mutex;
 use std::collections::HashSet;
 use std::fs::File;
 use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
 
 pub const BLOCK: u64 = 64 << 10;
 
@@ -27,25 +27,43 @@ type Base<'a> = &'a dyn Fn(u64, &mut [u8]) -> Result<(), String>;
 impl Overlay {
     /// The overlay at `path` with its block list `list`: reopened as it was, or new.
     pub fn open(path: &Path, list: &Path, size: u64) -> Result<Overlay, String> {
-        let file = std::fs::OpenOptions::new().read(true).write(true).create(true).truncate(false).open(path)
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(path)
             .map_err(|e| format!("{}: {e}", path.display()))?;
         if file.metadata().map_err(|e| e.to_string())?.len() < size {
-            file.set_len(size).map_err(|e| format!("{}: {e}", path.display()))?; // new, or the disk grew
+            file.set_len(size)
+                .map_err(|e| format!("{}: {e}", path.display()))?; // new, or the disk grew
         }
         let blocks: HashSet<u32> = std::fs::read(list)
-            .map(|b| b.chunks_exact(4).map(|c| u32::from_le_bytes(c.try_into().unwrap())).collect())
+            .map(|b| {
+                b.as_chunks::<4>()
+                    .0
+                    .iter()
+                    .map(|&c| u32::from_le_bytes(c))
+                    .collect()
+            })
             .unwrap_or_default();
         let n = blocks.len();
-        Ok(Overlay { file, size, blocks: Mutex::new(blocks), write: Mutex::new(n), list: list.into() })
+        Ok(Overlay {
+            file,
+            size,
+            blocks: Mutex::new(blocks),
+            write: Mutex::new(n),
+            list: list.into(),
+        })
     }
 
     /// Bytes held (written blocks).
     pub fn used(&self) -> u64 {
-        self.blocks.lock().unwrap().len() as u64 * BLOCK
+        self.blocks.lock().len() as u64 * BLOCK
     }
 
     fn has(&self, b: u32) -> bool {
-        self.blocks.lock().unwrap().contains(&b)
+        self.blocks.lock().contains(&b)
     }
 
     pub fn read_at(&self, base: Base, mut off: u64, mut buf: &mut [u8]) -> Result<(), String> {
@@ -53,7 +71,9 @@ impl Overlay {
             let b = (off / BLOCK) as u32;
             let n = ((BLOCK - off % BLOCK) as usize).min(buf.len());
             if self.has(b) {
-                self.file.read_exact_at(&mut buf[..n], off).map_err(|e| format!("overlay read: {e}"))?;
+                self.file
+                    .read_exact_at(&mut buf[..n], off)
+                    .map_err(|e| format!("overlay read: {e}"))?;
             } else {
                 base(off, &mut buf[..n])?;
             }
@@ -64,11 +84,14 @@ impl Overlay {
     }
 
     pub fn write_at(&self, base: Base, mut off: u64, mut data: &[u8]) -> Result<(), String> {
-        if off.checked_add(data.len() as u64).is_none_or(|end| end > self.size) {
+        if off
+            .checked_add(data.len() as u64)
+            .is_none_or(|end| end > self.size)
+        {
             return Err("write past the end of the disk".into());
         }
         let io = |e: std::io::Error| format!("overlay write: {e}");
-        let _w = self.write.lock().unwrap();
+        let _w = self.write.lock();
         while !data.is_empty() {
             let b = (off / BLOCK) as u32;
             let n = ((BLOCK - off % BLOCK) as usize).min(data.len());
@@ -77,9 +100,10 @@ impl Overlay {
                 let start = b as u64 * BLOCK;
                 let mut whole = vec![0u8; (BLOCK.min(self.size - start)) as usize];
                 base(start, &mut whole)?;
-                whole[(off - start) as usize..(off - start) as usize + n].copy_from_slice(&data[..n]);
+                whole[(off - start) as usize..(off - start) as usize + n]
+                    .copy_from_slice(&data[..n]);
                 self.file.write_all_at(&whole, start).map_err(io)?;
-                self.blocks.lock().unwrap().insert(b); // only now: readers see the disk until the block is complete
+                self.blocks.lock().insert(b); // only now: readers see the disk until the block is complete
             } else {
                 self.file.write_all_at(&data[..n], off).map_err(io)?;
             }
@@ -91,9 +115,11 @@ impl Overlay {
 
     /// On disk: data, then the block list naming it (rewritten whole when it grew; ~3 MB for 50 GB of update).
     pub fn flush(&self) -> Result<(), String> {
-        let mut saved = self.write.lock().unwrap();
-        self.file.sync_data().map_err(|e| format!("overlay sync: {e}"))?;
-        let mut v: Vec<u32> = self.blocks.lock().unwrap().iter().copied().collect();
+        let mut saved = self.write.lock();
+        self.file
+            .sync_data()
+            .map_err(|e| format!("overlay sync: {e}"))?;
+        let mut v: Vec<u32> = self.blocks.lock().iter().copied().collect();
         if v.len() == *saved {
             return Ok(());
         }
@@ -113,16 +139,20 @@ impl Overlay {
 
     /// Copy every written block into `base` (opened for writing), flushed. Safe to run again after a crash midway.
     pub fn merge_into(&self, base: &File) -> Result<usize, String> {
-        let mut v: Vec<u32> = self.blocks.lock().unwrap().iter().copied().collect();
+        let mut v: Vec<u32> = self.blocks.lock().iter().copied().collect();
         v.sort_unstable();
         let mut buf = vec![0u8; BLOCK as usize];
         for &b in &v {
             let start = b as u64 * BLOCK;
             let n = BLOCK.min(self.size - start) as usize;
-            self.file.read_exact_at(&mut buf[..n], start).map_err(|e| format!("overlay read: {e}"))?;
-            base.write_all_at(&buf[..n], start).map_err(|e| format!("games disk write: {e}"))?;
+            self.file
+                .read_exact_at(&mut buf[..n], start)
+                .map_err(|e| format!("overlay read: {e}"))?;
+            base.write_all_at(&buf[..n], start)
+                .map_err(|e| format!("games disk write: {e}"))?;
         }
-        base.sync_all().map_err(|e| format!("games disk sync: {e}"))?;
+        base.sync_all()
+            .map_err(|e| format!("games disk sync: {e}"))?;
         Ok(v.len())
     }
 }
@@ -181,11 +211,21 @@ mod tests {
         let mut buf = [0u8; 4];
         o.read_at(&base_of(&base), 2 * BLOCK + 5, &mut buf).unwrap();
         assert_eq!(&buf, b"game");
-        let f = std::fs::OpenOptions::new().write(true).open(&base_path).unwrap();
+        let f = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&base_path)
+            .unwrap();
         assert_eq!(o.merge_into(&f).unwrap(), 1);
         let merged = std::fs::read(&base_path).unwrap();
-        assert_eq!(&merged[(2 * BLOCK + 5) as usize..(2 * BLOCK + 9) as usize], b"game");
-        assert_eq!(merged.iter().filter(|&&x| x != 1).count(), 4, "only those bytes changed");
+        assert_eq!(
+            &merged[(2 * BLOCK + 5) as usize..(2 * BLOCK + 9) as usize],
+            b"game"
+        );
+        assert_eq!(
+            merged.iter().filter(|&&x| x != 1).count(),
+            4,
+            "only those bytes changed"
+        );
         let _ = std::fs::remove_dir_all(&d);
     }
 }

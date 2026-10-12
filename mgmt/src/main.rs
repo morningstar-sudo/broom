@@ -12,11 +12,11 @@ mod devices;
 mod dhcp;
 mod disk;
 mod drivers;
-mod games;
-mod groups;
 mod export;
+mod games;
 mod golden;
 mod goldenram;
+mod groups;
 mod hash;
 mod images;
 mod iscsi;
@@ -40,9 +40,10 @@ mod winstage;
 mod wol;
 
 use axum::response::sse::{Event, KeepAlive, Sse};
-use axum::{response::Html, routing::get, Router};
+use axum::{Router, response::Html, routing::get};
+use parking_lot::Mutex;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, OnceLock};
 use tower_http::services::ServeDir;
 use tracing::{error, info, warn};
 
@@ -67,7 +68,9 @@ pub fn home() -> &'static Path {
 /// Directory holding the images, one subfolder per image: `<images_dir>/<name>/image.img`.
 /// Default `<home>/images`; override with BOOTROM_IMAGES_DIR (e.g. a bigger disk).
 pub fn images_dir() -> PathBuf {
-    std::env::var("BOOTROM_IMAGES_DIR").map(PathBuf::from).unwrap_or_else(|_| home().join("images"))
+    std::env::var("BOOTROM_IMAGES_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| home().join("images"))
 }
 
 /// Boot files served over HTTP /tftp/... and TFTP: broom/<name> (Linux kernel/initrd),
@@ -114,7 +117,11 @@ fn migrate_old_layout() {
         let _ = std::fs::create_dir_all(new.parent().unwrap_or(home()));
         match std::fs::rename(&old, &new) {
             Ok(()) => info!("moved {} → {}", old.display(), new.display()),
-            Err(e) => warn!("could not move {} → {} ({e}): move it by hand", old.display(), new.display()),
+            Err(e) => warn!(
+                "could not move {} → {} ({e}): move it by hand",
+                old.display(),
+                new.display()
+            ),
         }
     }
 }
@@ -123,7 +130,11 @@ fn migrate_old_layout() {
 /// every one of them is a leftover: removed before anything else (they can be GBs).
 fn clean_leftovers() {
     let rm = |p: &Path| {
-        let r = if p.is_dir() { std::fs::remove_dir_all(p) } else { std::fs::remove_file(p) };
+        let r = if p.is_dir() {
+            std::fs::remove_dir_all(p)
+        } else {
+            std::fs::remove_file(p)
+        };
         if r.is_ok() {
             info!("removed leftover {}", p.display());
         }
@@ -137,20 +148,35 @@ fn clean_leftovers() {
     };
     // images/<name>/image.img.new (convert), tftp/broom-win/<name>/golden.vhdx.tmp (publish).
     // (upload/ itself is kept: an upload refused by its publish waits there for a retry; its unzip/ is a convert temp.)
-    for e in std::fs::read_dir(images_dir()).into_iter().flatten().flatten() {
+    for e in std::fs::read_dir(images_dir())
+        .into_iter()
+        .flatten()
+        .flatten()
+    {
         rm(&e.path().join("image.img.new"));
         rm(&e.path().join("upload").join("unzip"));
     }
     each(&tftp_dir().join("broom-drivers"), &|n| !n.ends_with(".tmp")); // driver archive being written
-    for e in std::fs::read_dir(tftp_dir().join("broom-win")).into_iter().flatten().flatten() {
+    for e in std::fs::read_dir(tftp_dir().join("broom-win"))
+        .into_iter()
+        .flatten()
+        .flatten()
+    {
         rm(&e.path().join("golden.vhdx.tmp"));
     }
     // tftp/broom/<name>.new|.old (Linux publish swap); tftp/broom-stage.new-*|.old-* (stage bundle install).
-    each(&tftp_dir().join("broom"), &|n| !(n.ends_with(".new") || n.ends_with(".old")));
-    each(tftp_dir(), &|n| !(n.starts_with("broom-stage.new") || n.starts_with("broom-stage.old")));
+    each(&tftp_dir().join("broom"), &|n| {
+        !(n.ends_with(".new") || n.ends_with(".old"))
+    });
+    each(tftp_dir(), &|n| {
+        !(n.starts_with("broom-stage.new") || n.starts_with("broom-stage.old"))
+    });
     // work/: bundle downloads, driver upload/extract dirs, the stage build's initramfs config, half-built exports.
     each(&work_dir(), &|n| {
-        !((n.starts_with("broom-stage-") && n.ends_with(".tar.gz")) || n.starts_with("drvup.") || n.starts_with("drvex.") || n == "stage-conf")
+        !((n.starts_with("broom-stage-") && n.ends_with(".tar.gz"))
+            || n.starts_with("drvup.")
+            || n.starts_with("drvex.")
+            || n == "stage-conf")
     });
     each(&work_dir().join("export"), &|n| !n.ends_with(".new"));
 }
@@ -164,19 +190,37 @@ async fn index() -> Html<String> {
     Html(assets::text("static/index.html").replace("__VERSION__", VERSION))
 }
 async fn app_js() -> impl axum::response::IntoResponse {
-    ([(axum::http::header::CONTENT_TYPE, "text/javascript; charset=utf-8")], assets::text("static/app.js"))
+    (
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "text/javascript; charset=utf-8",
+        )],
+        assets::text("static/app.js"),
+    )
 }
 async fn app_css() -> impl axum::response::IntoResponse {
-    ([(axum::http::header::CONTENT_TYPE, "text/css; charset=utf-8")], assets::text("static/app.css"))
+    (
+        [(axum::http::header::CONTENT_TYPE, "text/css; charset=utf-8")],
+        assets::text("static/app.css"),
+    )
 }
 async fn icons() -> impl axum::response::IntoResponse {
-    ([(axum::http::header::CONTENT_TYPE, "image/svg+xml")], assets::text("static/icons.svg"))
+    (
+        [(axum::http::header::CONTENT_TYPE, "image/svg+xml")],
+        assets::text("static/icons.svg"),
+    )
 }
 async fn login_page() -> Html<&'static str> {
     Html(assets::text("static/login.html"))
 }
 async fn login_js() -> impl axum::response::IntoResponse {
-    ([(axum::http::header::CONTENT_TYPE, "text/javascript; charset=utf-8")], assets::text("static/login.js"))
+    (
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "text/javascript; charset=utf-8",
+        )],
+        assets::text("static/login.js"),
+    )
 }
 
 /// Server events (SSE): "ping" on connect + every 5 s (keep-alive) for the sidebar dot — the browser marks
@@ -201,7 +245,7 @@ async fn events(
         }
     });
     // "res": the server's resources every 2 s (sysmon.rs) — the alert banner + the Benchmark page; the last one at once.
-    let latest = sysmon::LATEST.lock().unwrap().clone();
+    let latest = sysmon::LATEST.lock().clone();
     let first = (!latest.is_empty()).then(|| Ok(Event::default().event("res").data(latest)));
     let res = stream::unfold(sysmon::RES.subscribe(), |mut rx| async move {
         loop {
@@ -212,14 +256,23 @@ async fn events(
             }
         }
     });
-    Sse::new(stream::once(async move { Ok(ping()) }).chain(stream::iter(first)).chain(stream::select(jobs, res)))
-        .keep_alive(KeepAlive::new().interval(std::time::Duration::from_secs(5)).event(ping()))
+    Sse::new(
+        stream::once(async move { Ok(ping()) })
+            .chain(stream::iter(first))
+            .chain(stream::select(jobs, res)),
+    )
+    .keep_alive(
+        KeepAlive::new()
+            .interval(std::time::Duration::from_secs(5))
+            .event(ping()),
+    )
 }
 
 // Per-tab fragments — loaded on demand via /ui/<page> (the web only fetches the tab being viewed).
 async fn ui_page(axum::extract::Path(p): axum::extract::Path<String>) -> Html<&'static str> {
     Html(match p.as_str() {
-        "machines" | "images" | "network" | "system" | "drivers" | "devices" | "groups" | "benchmark" => assets::text(&format!("static/page-{p}.html")),
+        "machines" | "images" | "network" | "system" | "drivers" | "devices" | "groups"
+        | "benchmark" => assets::text(&format!("static/page-{p}.html")),
         _ => "",
     })
 }
@@ -251,7 +304,9 @@ pub struct AppState {
 }
 
 pub fn now_secs() -> u64 {
-    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs())
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
 }
 pub type SharedState = Arc<AppState>;
 
@@ -265,28 +320,29 @@ impl AppState {
     /// both callers are public endpoints, so the map must not grow with every MAC someone makes up.
     pub fn saw_pxe(&self, mac: &str, ip: Option<&str>) {
         let now = now_secs();
-        let mut seen = self.pxe_seen.lock().unwrap();
+        let mut seen = self.pxe_seen.lock();
         seen.retain(|_, t| now.saturating_sub(*t) <= PXE_MEMORY_S);
         // Bounded: both callers are public, a flood of made-up MACs must not grow it (and every scan of it) for 30 min.
-        if seen.len() >= PXE_MAX && !seen.contains_key(mac) {
-            if let Some(oldest) = seen.iter().min_by_key(|(_, t)| **t).map(|(m, _)| m.clone()) {
-                seen.remove(&oldest);
-            }
+        if seen.len() >= PXE_MAX
+            && !seen.contains_key(mac)
+            && let Some(oldest) = seen.iter().min_by_key(|(_, t)| **t).map(|(m, _)| m.clone())
+        {
+            seen.remove(&oldest);
         }
         seen.insert(mac.to_string(), now);
-        let mut ips = self.pxe_ip.lock().unwrap();
+        let mut ips = self.pxe_ip.lock();
         ips.retain(|m, _| seen.contains_key(m));
         if let Some(ip) = ip {
             ips.insert(mac.to_string(), ip.to_string());
         }
         drop((seen, ips));
-        self.not_reset.lock().unwrap().remove(mac);
-        self.ssd_low.lock().unwrap().remove(mac);
+        self.not_reset.lock().remove(mac);
+        self.ssd_low.lock().remove(mac);
     }
 
     /// Record an image job status + push it to open web tabs.
     pub fn set_job(&self, name: &str, status: String) {
-        self.jobs.lock().unwrap().insert(name.to_string(), status.clone());
+        self.jobs.lock().insert(name.to_string(), status.clone());
         let _ = self.job_tx.send((name.to_string(), status)); // Err = no tab listening
     }
 }
@@ -299,8 +355,8 @@ async fn main() {
     match args.get(1).map(String::as_str) {
         Some("install-service") => setup::install_service(&args),
         Some("build-stage") => winstage::build_bundle(&args), // CI: the Windows stage bundle
-        Some("iscsid") => iscsid::run(&args).await,            // the iSCSI target daemon (started by iscsi.rs)
-        Some("pack-assets") => assets::pack(&args),            // CI: broom-assets.zip for the release binary
+        Some("iscsid") => iscsid::run(&args).await, // the iSCSI target daemon (started by iscsi.rs)
+        Some("pack-assets") => assets::pack(&args), // CI: broom-assets.zip for the release binary
         _ => {}
     }
 
@@ -314,28 +370,40 @@ async fn main() {
     // Bind HTTP FIRST: the UDP listeners use SO_REUSEPORT (hot Apply), so a second instance started by mistake would
     // happily share :67/:69 — it must die here, before it stops services, touches the DB or rebuilds iSCSI targets.
     let addr = format!("0.0.0.0:{port}");
-    let listener = tokio::net::TcpListener::bind(&addr).await.unwrap_or_else(|e| {
-        error!("bind http {addr}: {e} (another bootrom-mgmt already running?)");
-        std::process::exit(1)
-    });
+    let listener = tokio::net::TcpListener::bind(&addr)
+        .await
+        .unwrap_or_else(|e| {
+            error!("bind http {addr}: {e} (another bootrom-mgmt already running?)");
+            std::process::exit(1)
+        });
 
     migrate_old_layout();
     info!("data in {}", home().display());
     // One instance per data directory: a second one on another --port gets past the HTTP bind above, and would then
     // delete the running one's temp files and share :67/:69 with it (SO_REUSEPORT). The kernel drops the lock when the
     // process dies, so a crash never leaves it stuck.
-    let lock = std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(home().join("bootrom.lock"));
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(home().join("bootrom.lock"));
     // SAFETY: flock on a valid open fd.
     let locked = lock.as_ref().is_ok_and(|f| unsafe { libc::flock(std::os::fd::AsRawFd::as_raw_fd(f), libc::LOCK_EX | libc::LOCK_NB) } == 0);
     if !locked {
-        error!("another bootrom-mgmt is already running on {} — stop it first", home().display());
+        error!(
+            "another bootrom-mgmt is already running on {} — stop it first",
+            home().display()
+        );
         std::process::exit(1);
     }
     std::mem::forget(lock); // held for the life of the process
     clean_leftovers(); // no other instance (and so no job) can be running
     // Web UI, iPXE, scripts: a release binary loads (first start: downloads) its broom-assets.zip. Without them clients
     // would get no iPXE → refuse to start, saying how to fix it.
-    match tokio::task::spawn_blocking(assets::init).await.unwrap_or_else(|e| Err(e.to_string())) {
+    match tokio::task::spawn_blocking(assets::init)
+        .await
+        .unwrap_or_else(|e| Err(e.to_string()))
+    {
         Ok(s) => info!("{s}"),
         Err(e) => {
             error!("{e}");
@@ -406,7 +474,9 @@ async fn main() {
         tokio::spawn(async move {
             loop {
                 tokio::time::sleep(std::time::Duration::from_secs(600)).await;
-                let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs()) as i64;
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_or(0, |d| d.as_secs()) as i64;
                 match st.db.prune_leases(now) {
                     Ok(n) if n > 0 => info!("pruned {n} expired DHCP lease(s)"),
                     Err(e) => warn!("lease prune: {e}"),
@@ -428,8 +498,18 @@ async fn main() {
                 let _ = tokio::task::spawn_blocking(move || {
                     iscsi::upgrade_if_idle();
                     let _ = games::sync(&st); // logs its own errors
-                    for img in st.db.images().unwrap_or_default().into_iter().filter(|i| i.os == "linux") {
-                        let busy = st.jobs.lock().unwrap().get(&img.name).is_some_and(|s| s.starts_with('⏳'));
+                    for img in st
+                        .db
+                        .images()
+                        .unwrap_or_default()
+                        .into_iter()
+                        .filter(|i| i.os == "linux")
+                    {
+                        let busy = st
+                            .jobs
+                            .lock()
+                            .get(&img.name)
+                            .is_some_and(|s| s.starts_with('⏳'));
                         if !busy {
                             publish::gc_superseded(&st, &img.name);
                         }
@@ -480,13 +560,21 @@ async fn main() {
         .route("/tftp/broom-win/{name}/golden.vhdx", get(goldenram::get))
         .nest_service("/tftp", ServeDir::new(tftp_dir()))
         // Guard EVERYTHING: Host check + a session for non-public routes (auth.rs::is_public lists the open ones).
-        .layer(axum::middleware::from_fn_with_state(state.clone(), auth::guard))
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            auth::guard,
+        ))
         .layer(axum::middleware::from_fn(auth::security_headers)) // outermost: also on the guard's redirects / 401s
         .with_state(state);
 
     info!("bootrom-mgmt v{VERSION} serving on http://{addr}");
     // ConnectInfo: /api/license and /api/booted identify the machine by the peer IP (license.rs).
-    if let Err(e) = axum::serve(listener, app.into_make_service_with_connect_info::<std::net::SocketAddr>()).await {
+    if let Err(e) = axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .await
+    {
         error!("http server stopped: {e}");
     }
 }
@@ -503,7 +591,11 @@ fn init_logging() {
         .unwrap_or(tracing_subscriber::filter::LevelFilter::INFO);
     tracing_subscriber::fmt()
         .with_max_level(level)
-        .with_writer(std::io::stderr.with_max_level(tracing::Level::WARN).or_else(std::io::stdout))
+        .with_writer(
+            std::io::stderr
+                .with_max_level(tracing::Level::WARN)
+                .or_else(std::io::stdout),
+        )
         .with_ansi(std::io::stdout().is_terminal())
         .with_target(false)
         .init();

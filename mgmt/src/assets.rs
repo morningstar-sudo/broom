@@ -60,7 +60,10 @@ pub fn bytes(name: &str) -> &'static [u8] {
     if let Some(i) = NAMES.iter().position(|n| *n == name) {
         return EMBEDDED[i];
     }
-    LOADED.get().and_then(|m| m.get(name).copied()).unwrap_or_else(|| panic!("asset {name} not loaded"))
+    LOADED
+        .get()
+        .and_then(|m| m.get(name).copied())
+        .unwrap_or_else(|| panic!("asset {name} not loaded"))
 }
 
 /// A text asset (UTF-8 by construction: they are this repo's own files).
@@ -75,18 +78,23 @@ pub fn init() -> Result<String, String> {
     return Ok("assets embedded (local build)".into());
     #[cfg(feature = "external-assets")]
     {
-        let (want, url) = parse_pin(PIN).ok_or("release build without assets.pin — CI must write it before building")?;
+        let (want, url) = parse_pin(PIN)
+            .ok_or("release build without assets.pin — CI must write it before building")?;
         let local = crate::home().join("broom-assets.zip");
         let mut how = "kept";
         if crate::hash::file_hash(&local.to_string_lossy()).as_deref() != Some(want) {
             let url = url.ok_or("assets.pin has no URL")?;
             tracing::info!("downloading the web UI / iPXE / scripts of this release: {url}");
             let tmp = local.with_extension("zip.tmp");
-            let r = crate::winstage::download(url, &tmp, MAX)
-                .and_then(|()| match crate::hash::file_hash(&tmp.to_string_lossy()) {
-                    Some(h) if h == want => std::fs::rename(&tmp, &local).map_err(|e| e.to_string()),
-                    h => Err(format!("{url}: sha256 {h:?}, this binary expects {want}")),
-                });
+            let r =
+                crate::winstage::download(url, &tmp, MAX).and_then(
+                    |()| match crate::hash::file_hash(&tmp.to_string_lossy()) {
+                        Some(h) if h == want => {
+                            std::fs::rename(&tmp, &local).map_err(|e| e.to_string())
+                        }
+                        h => Err(format!("{url}: sha256 {h:?}, this binary expects {want}")),
+                    },
+                );
             if let Err(e) = r {
                 let _ = std::fs::remove_file(&tmp);
                 return Err(format!(
@@ -105,8 +113,13 @@ pub fn init() -> Result<String, String> {
 /// (sha256, URL) from assets.pin; None without a valid sha256.
 #[cfg_attr(not(feature = "external-assets"), allow(dead_code))]
 fn parse_pin(pin: &str) -> Option<(&str, Option<&str>)> {
-    let mut lines = pin.lines().map(str::trim).filter(|l| !l.is_empty() && !l.starts_with('#'));
-    let sha = lines.next().filter(|s| s.len() == 64 && s.chars().all(|c| c.is_ascii_hexdigit()))?;
+    let mut lines = pin
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.starts_with('#'));
+    let sha = lines
+        .next()
+        .filter(|s| s.len() == 64 && s.chars().all(|c| c.is_ascii_hexdigit()))?;
     Some((sha, lines.next()))
 }
 
@@ -114,12 +127,16 @@ fn parse_pin(pin: &str) -> Option<(&str, Option<&str>)> {
 #[cfg_attr(not(feature = "external-assets"), allow(dead_code))]
 fn unzip(data: &[u8]) -> Result<HashMap<String, &'static [u8]>, String> {
     use std::io::Read;
-    let mut z = zip::ZipArchive::new(std::io::Cursor::new(data)).map_err(|e| format!("broom-assets.zip: {e}"))?;
+    let mut z = zip::ZipArchive::new(std::io::Cursor::new(data))
+        .map_err(|e| format!("broom-assets.zip: {e}"))?;
     let mut map = HashMap::new();
     for name in NAMES {
-        let mut f = z.by_name(name).map_err(|_| format!("broom-assets.zip has no {name} (another release?)"))?;
+        let mut f = z
+            .by_name(name)
+            .map_err(|_| format!("broom-assets.zip has no {name} (another release?)"))?;
         let mut v = Vec::new();
-        f.read_to_end(&mut v).map_err(|e| format!("broom-assets.zip {name}: {e}"))?;
+        f.read_to_end(&mut v)
+            .map_err(|e| format!("broom-assets.zip {name}: {e}"))?;
         map.insert(name.to_string(), &*Box::leak(v.into_boxed_slice()));
     }
     Ok(map)
@@ -128,10 +145,13 @@ fn unzip(data: &[u8]) -> Result<HashMap<String, &'static [u8]>, String> {
 /// `bootrom-mgmt pack-assets <file.zip>` (CI, with the local build): every asset into the zip a release binary pins.
 pub fn pack(args: &[String]) -> ! {
     let r = (|| -> Result<String, String> {
-        let out = args.get(2).ok_or("usage: bootrom-mgmt pack-assets <file.zip>")?;
+        let out = args
+            .get(2)
+            .ok_or("usage: bootrom-mgmt pack-assets <file.zip>")?;
         let f = std::fs::File::create(out).map_err(|e| format!("{out}: {e}"))?;
         let mut z = zip::ZipWriter::new(f);
-        let opt = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+        let opt = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Deflated);
         for name in NAMES {
             z.start_file(*name, opt).map_err(|e| e.to_string())?;
             std::io::Write::write_all(&mut z, bytes(name)).map_err(|e| e.to_string())?;
@@ -163,14 +183,19 @@ mod tests {
         let p = std::env::temp_dir().join("broom_test_assets.zip");
         let mut z = zip::ZipWriter::new(std::fs::File::create(&p).unwrap());
         for n in NAMES {
-            z.start_file(*n, zip::write::SimpleFileOptions::default()).unwrap();
+            z.start_file(*n, zip::write::SimpleFileOptions::default())
+                .unwrap();
             std::io::Write::write_all(&mut z, bytes(n)).unwrap();
         }
         z.finish().unwrap();
         let m = unzip(&std::fs::read(&p).unwrap()).unwrap();
         assert!(NAMES.iter().all(|n| m[*n] == bytes(n)));
         assert!(unzip(b"not a zip").is_err());
-        assert_eq!(parse_pin(PIN), None, "committed assets.pin = local build, no pin");
+        assert_eq!(
+            parse_pin(PIN),
+            None,
+            "committed assets.pin = local build, no pin"
+        );
         let _ = std::fs::remove_file(p);
     }
 }

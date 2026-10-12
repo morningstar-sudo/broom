@@ -34,6 +34,7 @@ argon2 = { version = "0.5.3", features = ["std"] }   # admin password hashing (a
 # crates.io version once one after 0.4.0 is out.
 ntfs = { git = "https://github.com/ColinFinck/ntfs", rev = "47ae0168f6c607208b27c61ed89b4ffac9a3c99a" }
 zstd = "0.14.0"   # RAM cache mode of Linux goldens: 16 KB blocks compressed in the iSCSI daemon (iscsid/ramimg.rs)
+parking_lot = "0.12.5"   # Mutex without poisoning: a panicking handler must not take every later request down with it
 mimalloc = "0.1.52"   # global allocator: musl's malloc serializes threads (iSCSI daemon QD32 reads: 2× slower with it)
 
 [features]

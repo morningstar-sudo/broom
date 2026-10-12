@@ -41,7 +41,8 @@ struct Header {
 
 fn rd(f: &File, off: u64, len: usize) -> Result<Vec<u8>, String> {
     let mut b = vec![0u8; len];
-    f.read_exact_at(&mut b, off).map_err(|e| format!("read VMDK at {off}: {e}"))?;
+    f.read_exact_at(&mut b, off)
+        .map_err(|e| format!("read VMDK at {off}: {e}"))?;
     Ok(b)
 }
 fn u32le(b: &[u8], o: usize) -> u32 {
@@ -71,7 +72,8 @@ fn sparse_header(f: &File) -> Result<Header, String> {
         return Ok(h);
     }
     let len = f.metadata().map_err(|e| e.to_string())?.len();
-    header(&rd(f, len.checked_sub(1024).ok_or("truncated VMDK")?, 512)?).ok_or_else(|| "streamOptimized VMDK without its footer".into())
+    header(&rd(f, len.checked_sub(1024).ok_or("truncated VMDK")?, 512)?)
+        .ok_or_else(|| "streamOptimized VMDK without its footer".into())
 }
 
 /// The descriptor text of the disk `path` (a descriptor file, or a monolithic sparse file with one inside).
@@ -81,9 +83,18 @@ fn descriptor(path: &Path) -> Result<String, String> {
     let first = rd(&f, 0, len.min(512) as usize)?;
     let text = if let Some(h) = header(&first) {
         if h.desc_off == 0 || h.desc_size == 0 || h.desc_size > 2048 {
-            return Err(format!("{} is a data extent, not the disk — upload the .vmdk descriptor (or the whole VM folder)", path.display()));
+            return Err(format!(
+                "{} is a data extent, not the disk — upload the .vmdk descriptor (or the whole VM folder)",
+                path.display()
+            ));
         }
-        rd(&f, h.desc_off.checked_mul(SECTOR).ok_or("corrupt VMDK header")?, (h.desc_size * SECTOR) as usize)?
+        rd(
+            &f,
+            h.desc_off
+                .checked_mul(SECTOR)
+                .ok_or("corrupt VMDK header")?,
+            (h.desc_size * SECTOR) as usize,
+        )?
     } else if len <= 64 * 1024 {
         rd(&f, 0, len as usize)?
     } else {
@@ -96,7 +107,10 @@ fn descriptor(path: &Path) -> Result<String, String> {
 fn parse(text: &str, dir: &Path) -> Result<Vec<Extent>, String> {
     let mut out = Vec::new();
     for l in text.lines().map(str::trim) {
-        if let Some(v) = l.strip_prefix("parentCID").and_then(|r| r.trim_start().strip_prefix('=')) {
+        if let Some(v) = l
+            .strip_prefix("parentCID")
+            .and_then(|r| r.trim_start().strip_prefix('='))
+        {
             if !v.trim().eq_ignore_ascii_case("ffffffff") {
                 return Err("this VMDK is a snapshot or linked clone (it has a parent disk) — delete the VM's snapshots \
                             or make a full clone, then upload"
@@ -104,12 +118,17 @@ fn parse(text: &str, dir: &Path) -> Result<Vec<Extent>, String> {
             }
             continue;
         }
-        let Some((access, rest)) = l.split_once(char::is_whitespace) else { continue };
+        let Some((access, rest)) = l.split_once(char::is_whitespace) else {
+            continue;
+        };
         if !matches!(access, "RW" | "RDONLY" | "NOACCESS") {
             continue;
         }
         let mut it = rest.trim_start().splitn(2, char::is_whitespace);
-        let sectors: u64 = it.next().and_then(|s| s.parse().ok()).ok_or_else(|| format!("bad extent line: {l}"))?;
+        let sectors: u64 = it
+            .next()
+            .and_then(|s| s.parse().ok())
+            .ok_or_else(|| format!("bad extent line: {l}"))?;
         let rest = it.next().unwrap_or("").trim_start();
         let (ty, rest) = rest.split_once(char::is_whitespace).unwrap_or((rest, ""));
         let (name, after) = match (rest.find('"'), rest.rfind('"')) {
@@ -119,7 +138,9 @@ fn parse(text: &str, dir: &Path) -> Result<Vec<Extent>, String> {
         let file = || -> Result<Option<PathBuf>, String> {
             // Plain name next to the descriptor only — never a path (an upload naming /dev/sda or a server file).
             if name.is_empty() || name.contains(['/', '\\']) || name == "." || name == ".." {
-                return Err(format!("VMDK extent {name:?} must be a file name in the same folder"));
+                return Err(format!(
+                    "VMDK extent {name:?} must be a file name in the same folder"
+                ));
             }
             Ok(Some(dir.join(name)))
         };
@@ -127,9 +148,17 @@ fn parse(text: &str, dir: &Path) -> Result<Vec<Extent>, String> {
             "SPARSE" => (Kind::Sparse, file()?),
             "FLAT" | "VMFS" => (Kind::Flat(after.parse().unwrap_or(0)), file()?),
             "ZERO" => (Kind::Zero, None),
-            other => return Err(format!("VMDK extent type {other} is not supported (snapshot or SE sparse disk?)")),
+            other => {
+                return Err(format!(
+                    "VMDK extent type {other} is not supported (snapshot or SE sparse disk?)"
+                ));
+            }
         };
-        out.push(Extent { sectors, kind, file });
+        out.push(Extent {
+            sectors,
+            kind,
+            file,
+        });
     }
     if out.is_empty() {
         return Err("VMDK descriptor lists no extents".into());
@@ -143,30 +172,44 @@ fn extents(path: &Path) -> Result<Vec<Extent>, String> {
 
 /// Virtual disk size in bytes (replaces `qemu-img info`).
 pub fn virtual_size(path: &Path) -> Result<u64, String> {
-    extents(path)?.iter().try_fold(0u64, |a, e| a.checked_add(e.sectors.checked_mul(SECTOR)?)).ok_or_else(|| "VMDK size overflows".into())
+    extents(path)?
+        .iter()
+        .try_fold(0u64, |a, e| a.checked_add(e.sectors.checked_mul(SECTOR)?))
+        .ok_or_else(|| "VMDK size overflows".into())
 }
 
 /// VMDK (descriptor at `path`) → sparse raw disk at `dest` (replaces `qemu-img convert -O raw`).
 pub fn to_raw(path: &Path, dest: &Path) -> Result<(), String> {
     let exts = extents(path)?;
     let out = File::create(dest).map_err(|e| format!("{}: {e}", dest.display()))?;
-    out.set_len(virtual_size(path)?).map_err(|e| e.to_string())?;
+    out.set_len(virtual_size(path)?)
+        .map_err(|e| e.to_string())?;
     let mut base = 0u64;
     for e in &exts {
         let n = e.sectors * SECTOR;
         match (&e.kind, &e.file) {
             (Kind::Sparse, Some(p)) => sparse_to(p, n, &out, base)?,
-            (Kind::Flat(start), Some(p)) => flat_to(p, start.checked_mul(SECTOR).ok_or("VMDK extent offset overflows")?, n, &out, base)?,
+            (Kind::Flat(start), Some(p)) => flat_to(
+                p,
+                start
+                    .checked_mul(SECTOR)
+                    .ok_or("VMDK extent offset overflows")?,
+                n,
+                &out,
+                base,
+            )?,
             _ => {} // ZERO: stays a hole
         }
         base += n;
     }
-    out.sync_all().map_err(|e| format!("{}: {e}", dest.display()))
+    out.sync_all()
+        .map_err(|e| format!("{}: {e}", dest.display()))
 }
 
 fn write_nonzero(out: &File, data: &[u8], at: u64) -> Result<(), String> {
     if data.iter().any(|&b| b != 0) {
-        out.write_all_at(data, at).map_err(|e| format!("write raw: {e}"))?;
+        out.write_all_at(data, at)
+            .map_err(|e| format!("write raw: {e}"))?;
     }
     Ok(())
 }
@@ -178,7 +221,11 @@ fn flat_to(p: &Path, start: u64, n: u64, out: &File, base: u64) -> Result<(), St
     let src = Source::new(&[(p, start, Some(n))])?;
     let mut pieces = Vec::new();
     for (a, b) in src.data_ranges() {
-        pieces.extend((a..b).step_by(PIECE as usize).map(|o| (o, (b - o).min(PIECE))));
+        pieces.extend(
+            (a..b)
+                .step_by(PIECE as usize)
+                .map(|o| (o, (b - o).min(PIECE))),
+        );
     }
     crate::disk::par_map(&pieces, |&(o, len)| {
         let mut buf = vec![0u8; len as usize];
@@ -209,8 +256,16 @@ fn sparse_to(p: &Path, n: u64, out: &File, base: u64) -> Result<(), String> {
     let gd_len = ngt
         .checked_mul(4)
         .filter(|&l| l <= flen && l <= 16 << 20)
-        .ok_or_else(|| format!("{}: corrupt VMDK (grain directory larger than the file or 16 MiB)", p.display()))?;
-    let gd_at = h.gd_off.checked_mul(SECTOR).ok_or_else(|| format!("{}: corrupt VMDK header", p.display()))?;
+        .ok_or_else(|| {
+            format!(
+                "{}: corrupt VMDK (grain directory larger than the file or 16 MiB)",
+                p.display()
+            )
+        })?;
+    let gd_at = h
+        .gd_off
+        .checked_mul(SECTOR)
+        .ok_or_else(|| format!("{}: corrupt VMDK header", p.display()))?;
     let gd = rd(&f, gd_at, gd_len as usize)?;
     let compressed = h.flags & COMPRESSED_GRAINS != 0;
 
@@ -234,7 +289,10 @@ fn sparse_to(p: &Path, n: u64, out: &File, base: u64) -> Result<(), String> {
                 // 0 = not allocated, 1 = zero grain. Each real grain has its own place in the file: more of them than
                 // the file can hold (tables pointing at the same data) is a corrupt / crafted file, not a RAM bill.
                 if grains.len() as u64 >= (flen / SECTOR).min(32 << 20) || vg > u32::MAX as u64 {
-                    return Err(format!("{}: corrupt VMDK (more grains than the file holds)", p.display()));
+                    return Err(format!(
+                        "{}: corrupt VMDK (more grains than the file holds)",
+                        p.display()
+                    ));
                 }
                 grains.push((e, vg as u32));
             }
@@ -253,9 +311,19 @@ fn sparse_to(p: &Path, n: u64, out: &File, base: u64) -> Result<(), String> {
             while k < vs.len() && vs[k] == vs[k - 1] + 1 {
                 k += 1;
             }
-            let (off, end) = (vs[i] as u64 * gbytes, ((vs[k - 1] as u64 + 1) * gbytes).min(cap));
+            let (off, end) = (
+                vs[i] as u64 * gbytes,
+                ((vs[k - 1] as u64 + 1) * gbytes).min(cap),
+            );
             // SAFETY: fallocate on a valid fd; plain integers.
-            let r = unsafe { libc::fallocate(out.as_raw_fd(), 0, (base + off) as libc::off_t, (end - off) as libc::off_t) };
+            let r = unsafe {
+                libc::fallocate(
+                    out.as_raw_fd(),
+                    0,
+                    (base + off) as libc::off_t,
+                    (end - off) as libc::off_t,
+                )
+            };
             if r != 0 {
                 break;
             }
@@ -265,7 +333,11 @@ fn sparse_to(p: &Path, n: u64, out: &File, base: u64) -> Result<(), String> {
     grains.sort_unstable();
     // Runs of grains close together in the file, read with one call each (up to 16 MB; a gap over 1 MB starts a new run).
     const RUN: u64 = 16 << 20;
-    let slot = if compressed { 2 * gbytes + 4096 + 12 } else { gbytes }; // the most one grain can take in the file
+    let slot = if compressed {
+        2 * gbytes + 4096 + 12
+    } else {
+        gbytes
+    }; // the most one grain can take in the file
     let mut runs: Vec<&[(u32, u32)]> = Vec::new();
     let mut i = 0;
     while i < grains.len() {
@@ -284,13 +356,18 @@ fn sparse_to(p: &Path, n: u64, out: &File, base: u64) -> Result<(), String> {
     crate::disk::par_map(&runs, |run| {
         let start = run[0].0 as u64 * SECTOR;
         let end = (run[run.len() - 1].0 as u64 * SECTOR + slot).min(flen);
-        let buf = rd(&f, start, end.checked_sub(start).ok_or("corrupt VMDK grain table")? as usize)?;
+        let buf = rd(
+            &f,
+            start,
+            end.checked_sub(start).ok_or("corrupt VMDK grain table")? as usize,
+        )?;
         let corrupt = || format!("{}: corrupt grain", p.display());
         // Grains next to each other on the virtual disk too are written with one call.
         let mut pending: (u64, Vec<u8>) = (0, Vec::new());
         let flush = |p: &mut (u64, Vec<u8>)| -> Result<(), String> {
             if !p.1.is_empty() {
-                out.write_all_at(&p.1, base + p.0).map_err(|e| format!("write raw: {e}"))?;
+                out.write_all_at(&p.1, base + p.0)
+                    .map_err(|e| format!("write raw: {e}"))?;
                 p.1.clear();
             }
             Ok(())
@@ -306,7 +383,8 @@ fn sparse_to(p: &Path, n: u64, out: &File, base: u64) -> Result<(), String> {
                 let z = buf.get(at + 12..at + 12 + size).ok_or_else(corrupt)?;
                 grain.fill(0);
                 let mut d = &mut grain[..];
-                std::io::copy(&mut ZlibDecoder::new(z).take(gbytes), &mut d).map_err(|e| format!("{}: grain: {e}", p.display()))?;
+                std::io::copy(&mut ZlibDecoder::new(z).take(gbytes), &mut d)
+                    .map_err(|e| format!("{}: grain: {e}", p.display()))?;
             } else {
                 grain.copy_from_slice(buf.get(at..at + gbytes as usize).ok_or_else(corrupt)?);
             }
@@ -359,11 +437,13 @@ pub fn write_sparse(src: &Source, path: &Path) -> Result<(), String> {
     // A window of spans is read in parallel (each also listing its non-zero grains), the grains placed in disk
     // order, then each span's grains written by one thread. Buffers reused (RAM: workers × 32 MB).
     let w = crate::disk::workers();
-    let bufs: Vec<std::sync::Mutex<Vec<u8>>> = (0..w).map(|_| std::sync::Mutex::new(vec![0u8; span as usize])).collect();
+    let bufs: Vec<parking_lot::Mutex<Vec<u8>>> = (0..w)
+        .map(|_| parking_lot::Mutex::new(vec![0u8; span as usize]))
+        .collect();
     for win in spans.chunks(w) {
         let slots: Vec<usize> = (0..win.len()).collect();
         let nonzero = crate::disk::par_map(&slots, |&k| {
-            let mut b = bufs[k].lock().unwrap();
+            let mut b = bufs[k].lock();
             src.read_at(win[k] * span, &mut b)?;
             Ok(b.chunks(gbytes as usize)
                 .enumerate()
@@ -376,17 +456,19 @@ pub fn write_sparse(src: &Source, path: &Path) -> Result<(), String> {
             let mut placed = Vec::new();
             for j in js {
                 let g = win[k] * GTES + j as u64;
-                table[g as usize * 4..g as usize * 4 + 4].copy_from_slice(&(next as u32).to_le_bytes());
+                table[g as usize * 4..g as usize * 4 + 4]
+                    .copy_from_slice(&(next as u32).to_le_bytes());
                 placed.push((j, next));
                 next += GRAIN;
             }
             jobs.push((k, placed));
         }
         crate::disk::par_map(&jobs, |(k, placed)| {
-            let b = bufs[*k].lock().unwrap();
+            let b = bufs[*k].lock();
             for &(j, at) in placed {
                 let g = &b[j * gbytes as usize..(j + 1) * gbytes as usize];
-                f.write_all_at(g, at * SECTOR).map_err(|e| format!("write {}: {e}", path.display()))?;
+                f.write_all_at(g, at * SECTOR)
+                    .map_err(|e| format!("write {}: {e}", path.display()))?;
             }
             Ok(())
         })?;
@@ -397,12 +479,23 @@ pub fn write_sparse(src: &Source, path: &Path) -> Result<(), String> {
     for (off, v) in [(4usize, 1u64), (8, 3)] {
         h[off..off + 4].copy_from_slice(&(v as u32).to_le_bytes()); // version 1; flags: newline test + redundant GT
     }
-    for (off, v) in [(12usize, cap), (20, GRAIN), (28, 1), (36, DESC), (48, rgd), (56, gd), (64, overhead)] {
+    for (off, v) in [
+        (12usize, cap),
+        (20, GRAIN),
+        (28, 1),
+        (36, DESC),
+        (48, rgd),
+        (56, gd),
+        (64, overhead),
+    ] {
         h[off..off + 8].copy_from_slice(&v.to_le_bytes());
     }
     h[44..48].copy_from_slice(&(GTES as u32).to_le_bytes());
     h[73..77].copy_from_slice(b"\n \r\n");
-    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
     let cyl = (cap / (16 * 63)).min(16383);
     let desc = format!(
         "# Disk DescriptorFile\nversion=1\nCID={:08x}\nparentCID=ffffffff\ncreateType=\"monolithicSparse\"\n\n\
@@ -413,8 +506,15 @@ pub fn write_sparse(src: &Source, path: &Path) -> Result<(), String> {
     );
     let mut dbuf = desc.into_bytes();
     dbuf.resize((DESC * SECTOR) as usize, 0);
-    let dir = |gt0: u64| -> Vec<u8> { (0..ngt).flat_map(|i| ((gt0 + i * GTES * 4 / SECTOR) as u32).to_le_bytes()).collect() };
-    let w = |off: u64, b: &[u8]| f.write_all_at(b, off * SECTOR).map_err(|e| format!("write {}: {e}", path.display()));
+    let dir = |gt0: u64| -> Vec<u8> {
+        (0..ngt)
+            .flat_map(|i| ((gt0 + i * GTES * 4 / SECTOR) as u32).to_le_bytes())
+            .collect()
+    };
+    let w = |off: u64, b: &[u8]| {
+        f.write_all_at(b, off * SECTOR)
+            .map_err(|e| format!("write {}: {e}", path.display()))
+    };
     w(0, &h)?;
     w(1, &dbuf)?;
     w(rgd, &dir(rgt))?;
@@ -431,7 +531,14 @@ mod tests {
     use std::process::Command;
 
     fn qemu(args: &[&str]) {
-        assert!(Command::new("qemu-img").args(args).status().unwrap().success(), "qemu-img {args:?}");
+        assert!(
+            Command::new("qemu-img")
+                .args(args)
+                .status()
+                .unwrap()
+                .success(),
+            "qemu-img {args:?}"
+        );
     }
 
     /// A 70 MB raw disk with data in a few places, holes elsewhere and a length that is no grain multiple.
@@ -442,7 +549,14 @@ mod tests {
         f.set_len(len).unwrap();
         let mut seed = 0x9e37_79b9u32;
         let mut noise = |n: usize| -> Vec<u8> {
-            (0..n).map(|_| { seed ^= seed << 13; seed ^= seed >> 17; seed ^= seed << 5; seed as u8 }).collect()
+            (0..n)
+                .map(|_| {
+                    seed ^= seed << 13;
+                    seed ^= seed >> 17;
+                    seed ^= seed << 5;
+                    seed as u8
+                })
+                .collect()
         };
         f.write_all_at(&noise(1000), 0).unwrap();
         f.write_all_at(&noise(3 << 20), 20 << 20).unwrap();
@@ -475,7 +589,11 @@ mod tests {
         h[12..20].copy_from_slice(&8u64.to_le_bytes());
         h[56..64].copy_from_slice(&u64::MAX.to_le_bytes());
         std::fs::write(d.join("x.vmdk"), &h).unwrap();
-        assert!(super::sparse_to(&d.join("x.vmdk"), 4096, &out, 0).unwrap_err().contains("corrupt VMDK header"));
+        assert!(
+            super::sparse_to(&d.join("x.vmdk"), 4096, &out, 0)
+                .unwrap_err()
+                .contains("corrupt VMDK header")
+        );
         let _ = std::fs::remove_dir_all(&d);
     }
 
@@ -485,11 +603,27 @@ mod tests {
         let d = dir("read");
         let raw = sample(&d);
         let want = std::fs::read(&raw).unwrap();
-        for sub in ["monolithicSparse", "monolithicFlat", "twoGbMaxExtentSparse", "twoGbMaxExtentFlat", "streamOptimized"] {
+        for sub in [
+            "monolithicSparse",
+            "monolithicFlat",
+            "twoGbMaxExtentSparse",
+            "twoGbMaxExtentFlat",
+            "streamOptimized",
+        ] {
             let sd = d.join(sub);
             std::fs::create_dir_all(&sd).unwrap();
             let v = sd.join("disk.vmdk");
-            qemu(&["convert", "-f", "raw", "-O", "vmdk", "-o", &format!("subformat={sub}"), raw.to_str().unwrap(), v.to_str().unwrap()]);
+            qemu(&[
+                "convert",
+                "-f",
+                "raw",
+                "-O",
+                "vmdk",
+                "-o",
+                &format!("subformat={sub}"),
+                raw.to_str().unwrap(),
+                v.to_str().unwrap(),
+            ]);
             assert_eq!(virtual_size(&v).unwrap(), want.len() as u64, "{sub}");
             let out = sd.join("back.raw");
             to_raw(&v, &out).unwrap();
@@ -504,9 +638,33 @@ mod tests {
     fn reads_out_of_order_grains() {
         let d = dir("order");
         let v = d.join("disk.vmdk");
-        qemu(&["create", "-q", "-f", "vmdk", "-o", "subformat=monolithicSparse", v.to_str().unwrap(), "8M"]);
-        let io = |cmd: &str| assert!(Command::new("qemu-io").args(["-f", "vmdk", "-c", cmd, v.to_str().unwrap()]).output().unwrap().status.success(), "{cmd}");
-        for (pat, off, len) in [(0x11, 6 << 20, 64 << 10), (0x22, 1 << 20, 192 << 10), (0x33, 3 << 20, 64 << 10), (0x00, 5 << 20, 64 << 10)] {
+        qemu(&[
+            "create",
+            "-q",
+            "-f",
+            "vmdk",
+            "-o",
+            "subformat=monolithicSparse",
+            v.to_str().unwrap(),
+            "8M",
+        ]);
+        let io = |cmd: &str| {
+            assert!(
+                Command::new("qemu-io")
+                    .args(["-f", "vmdk", "-c", cmd, v.to_str().unwrap()])
+                    .output()
+                    .unwrap()
+                    .status
+                    .success(),
+                "{cmd}"
+            )
+        };
+        for (pat, off, len) in [
+            (0x11, 6 << 20, 64 << 10),
+            (0x22, 1 << 20, 192 << 10),
+            (0x33, 3 << 20, 64 << 10),
+            (0x00, 5 << 20, 64 << 10),
+        ] {
             io(&format!("write -P {pat} {off} {len}"));
         }
         let out = d.join("back.raw");
@@ -518,7 +676,10 @@ mod tests {
         want[3 << 20..(3 << 20) + (64 << 10)].fill(0x33);
         assert!(got == want, "same bytes");
         use std::os::unix::fs::MetadataExt;
-        assert!(std::fs::metadata(&out).unwrap().blocks() * 512 <= 1 << 20, "zero grain + unallocated stay holes");
+        assert!(
+            std::fs::metadata(&out).unwrap().blocks() * 512 <= 1 << 20,
+            "zero grain + unallocated stay holes"
+        );
         let _ = std::fs::remove_dir_all(&d);
     }
 
@@ -526,7 +687,9 @@ mod tests {
     #[test]
     #[ignore]
     fn bench_to_raw() {
-        let (Ok(v), Ok(o)) = (std::env::var("BROOM_VMDK"), std::env::var("BROOM_OUT")) else { return };
+        let (Ok(v), Ok(o)) = (std::env::var("BROOM_VMDK"), std::env::var("BROOM_OUT")) else {
+            return;
+        };
         to_raw(Path::new(&v), Path::new(&o)).unwrap();
     }
 
@@ -535,17 +698,34 @@ mod tests {
         let d = dir("refuse");
         let desc = |body: &str| {
             let p = d.join("x.vmdk");
-            std::fs::write(&p, format!("# Disk DescriptorFile\nversion=1\nCID=12345678\n{body}")).unwrap();
+            std::fs::write(
+                &p,
+                format!("# Disk DescriptorFile\nversion=1\nCID=12345678\n{body}"),
+            )
+            .unwrap();
             p
         };
-        let e = virtual_size(&desc("parentCID=87654321\ncreateType=\"monolithicSparse\"\nRW 100 SPARSE \"x-s001.vmdk\"\n")).unwrap_err();
+        let e = virtual_size(&desc(
+            "parentCID=87654321\ncreateType=\"monolithicSparse\"\nRW 100 SPARSE \"x-s001.vmdk\"\n",
+        ))
+        .unwrap_err();
         assert!(e.contains("snapshot"), "{e}");
         for bad in ["/dev/sda", "../server.db", "sub/x.vmdk"] {
-            let e = virtual_size(&desc(&format!("parentCID=ffffffff\nRW 100 FLAT \"{bad}\" 0\n"))).unwrap_err();
+            let e = virtual_size(&desc(&format!(
+                "parentCID=ffffffff\nRW 100 FLAT \"{bad}\" 0\n"
+            )))
+            .unwrap_err();
             assert!(e.contains("file name"), "{bad}: {e}");
         }
-        assert!(virtual_size(&desc("parentCID=ffffffff\nRW 100 SESPARSE \"x.vmdk\"\n")).unwrap_err().contains("not supported"));
-        assert_eq!(virtual_size(&desc("parentCID=ffffffff\nRW 100 ZERO\n")).unwrap(), 51200);
+        assert!(
+            virtual_size(&desc("parentCID=ffffffff\nRW 100 SESPARSE \"x.vmdk\"\n"))
+                .unwrap_err()
+                .contains("not supported")
+        );
+        assert_eq!(
+            virtual_size(&desc("parentCID=ffffffff\nRW 100 ZERO\n")).unwrap(),
+            51200
+        );
         let _ = std::fs::remove_dir_all(&d);
     }
 
@@ -559,13 +739,27 @@ mod tests {
         write_sparse(&Source::file(&raw).unwrap(), &v).unwrap();
         qemu(&["check", "-q", "-f", "vmdk", v.to_str().unwrap()]);
         let back = d.join("back.raw");
-        qemu(&["convert", "-f", "vmdk", "-O", "raw", v.to_str().unwrap(), back.to_str().unwrap()]);
+        qemu(&[
+            "convert",
+            "-f",
+            "vmdk",
+            "-O",
+            "raw",
+            v.to_str().unwrap(),
+            back.to_str().unwrap(),
+        ]);
         let want = std::fs::read(&raw).unwrap();
-        assert!(std::fs::read(&back).unwrap() == want, "qemu-img reads it back");
+        assert!(
+            std::fs::read(&back).unwrap() == want,
+            "qemu-img reads it back"
+        );
         let mine = d.join("mine.raw");
         to_raw(&v, &mine).unwrap();
         assert!(std::fs::read(&mine).unwrap() == want, "our reader too");
-        assert!(std::fs::metadata(&v).unwrap().len() < 5 << 20, "only the written grains are stored");
+        assert!(
+            std::fs::metadata(&v).unwrap().len() < 5 << 20,
+            "only the written grains are stored"
+        );
         let _ = std::fs::remove_dir_all(&d);
     }
 }

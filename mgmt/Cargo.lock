@@ -162,6 +162,7 @@ dependencies = [
  "libc",
  "mimalloc",
  "ntfs",
+ "parking_lot",
  "rusqlite",
  "serde",
  "serde_json",

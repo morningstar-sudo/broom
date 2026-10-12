@@ -1,5 +1,5 @@
 // api.rs — what the JSON handlers share: the error type and its helpers.
-use axum::{http::StatusCode, Json};
+use axum::{Json, http::StatusCode};
 
 pub type ApiError = (StatusCode, String);
 

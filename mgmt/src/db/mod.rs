@@ -158,7 +158,14 @@ pub trait Db: Send + Sync {
     // --- driver packages ---
     fn drivers(&self) -> DbResult<Vec<Driver>>;
     /// Insert or replace the files of a package by name; a re-upload keeps its targets (all / groups).
-    fn put_driver(&self, name: &str, sha256: &str, size: u64, hwids: &[String], created: i64) -> DbResult<()>;
+    fn put_driver(
+        &self,
+        name: &str,
+        sha256: &str,
+        size: u64,
+        hwids: &[String],
+        created: i64,
+    ) -> DbResult<()>;
     fn set_driver_targets(&self, id: i64, all_machines: bool, groups: &[String]) -> DbResult<()>;
     fn delete_driver(&self, id: i64) -> DbResult<()>;
 
@@ -187,12 +194,19 @@ pub fn open(url: &str) -> DbResult<Box<dyn Db>> {
     match url.split_once("://") {
         None => Ok(Box::new(sqlite::Sqlite::open(url)?)),
         Some(("sqlite", path)) => Ok(Box::new(sqlite::Sqlite::open(path)?)),
-        Some((scheme, _)) => Err(format!("unsupported database '{scheme}://' (built-in drivers: sqlite)")),
+        Some((scheme, _)) => Err(format!(
+            "unsupported database '{scheme}://' (built-in drivers: sqlite)"
+        )),
     }
 }
 
 /// Database location: env BOOTROM_DB (e.g. `sqlite:///var/lib/bootrom/bootrom.db`), default
 /// `<home>/bootrom.db` (next to the binary).
 pub fn url() -> String {
-    std::env::var("BOOTROM_DB").unwrap_or_else(|_| crate::home().join("bootrom.db").to_string_lossy().into_owned())
+    std::env::var("BOOTROM_DB").unwrap_or_else(|_| {
+        crate::home()
+            .join("bootrom.db")
+            .to_string_lossy()
+            .into_owned()
+    })
 }

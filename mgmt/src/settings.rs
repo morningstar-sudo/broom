@@ -1,11 +1,16 @@
 // settings.rs — server settings on the web: boot menu countdown, zram reserve, DHCP (mode + parameters → restarts
 // the built-in DHCP/TFTP, dhcp.rs), and the Windows guest user baked into goldens.
-use axum::{extract::State, http::StatusCode, routing::{get, post}, Json, Router};
+use axum::{
+    Json, Router,
+    extract::State,
+    http::StatusCode,
+    routing::{get, post},
+};
 use serde::Deserialize;
 
+use crate::SharedState;
 use crate::api::{ise, ok};
 use crate::dhcp::{self, DhcpOpts};
-use crate::SharedState;
 
 pub fn routes() -> Router<SharedState> {
     Router::new()
@@ -33,11 +38,15 @@ async fn get_cafe_user(State(st): State<SharedState>) -> Json<serde_json::Value>
 /// Guest user/password go into the Windows unattend.xml (inside a PowerShell here-string). Only safe printable
 /// characters — this both keeps the XML/PowerShell valid and blocks injection. Keep in sync with the web page.
 pub(crate) fn cafe_user_ok(u: &str) -> bool {
-    (1..=20).contains(&u.chars().count()) && u.chars().all(|c| c.is_ascii_alphanumeric() || "-_.".contains(c))
+    (1..=20).contains(&u.chars().count())
+        && u.chars()
+            .all(|c| c.is_ascii_alphanumeric() || "-_.".contains(c))
 }
 
 pub(crate) fn cafe_pass_ok(p: &str) -> bool {
-    (1..=64).contains(&p.chars().count()) && p.chars().all(|c| c.is_ascii_graphic() && !"\"'`$<>&\\".contains(c))
+    (1..=64).contains(&p.chars().count())
+        && p.chars()
+            .all(|c| c.is_ascii_graphic() && !"\"'`$<>&\\".contains(c))
 }
 
 #[derive(Deserialize)]
@@ -53,15 +62,23 @@ async fn set_cafe_user(
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let user = b.user.trim();
     if !cafe_user_ok(user) {
-        return Err((StatusCode::BAD_REQUEST, "user: 1-20 letters/digits/-_. only".into()));
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "user: 1-20 letters/digits/-_. only".into(),
+        ));
     }
     st.db.set_config("ltsp_user", user).map_err(ise)?;
     // Password write-only: an empty value keeps the stored one (the web never sends it back).
     if !b.password.is_empty() {
         if !cafe_pass_ok(&b.password) {
-            return Err((StatusCode::BAD_REQUEST, "password: 1-64 printable characters, no \" ' ` $ < > & \\".into()));
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "password: 1-64 printable characters, no \" ' ` $ < > & \\".into(),
+            ));
         }
-        st.db.set_config("ltsp_password", &b.password).map_err(ise)?;
+        st.db
+            .set_config("ltsp_password", &b.password)
+            .map_err(ise)?;
     }
     tracing::info!("guest user set to {user}");
     Ok(ok())
@@ -84,8 +101,17 @@ async fn get_config(State(st): State<SharedState>) -> Json<serde_json::Value> {
 /// room at which the session watchdog (broom-watch.ps1) warns the guest / restarts the machine — before Windows itself
 /// would crash with its boot disk out of room.
 fn ssd_limits(st: &SharedState) -> (u64, u64, u64) {
-    let n = |k, d: u64| st.db.get_config(k, &d.to_string()).parse::<u64>().unwrap_or(d);
-    (n("ssd_room_gb", 20), n("ssd_warn_gb", 10), n("ssd_reboot_gb", 3))
+    let n = |k, d: u64| {
+        st.db
+            .get_config(k, &d.to_string())
+            .parse::<u64>()
+            .unwrap_or(d)
+    };
+    (
+        n("ssd_room_gb", 20),
+        n("ssd_warn_gb", 10),
+        n("ssd_reboot_gb", 3),
+    )
 }
 
 /// GET /api/client-config (public: the Windows stage + watchdog) → "<room GB> <warn GB> <reboot GB>".
@@ -102,14 +128,34 @@ struct SsdLimits {
 }
 
 /// POST /api/config/ssd {room_gb, warn_gb, reboot_gb} — read by the clients at each boot.
-async fn set_ssd(State(st): State<SharedState>, Json(b): Json<SsdLimits>) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    if !(5..=2000).contains(&b.room_gb) || !(1..=b.room_gb).contains(&b.warn_gb) || !(1..b.warn_gb).contains(&b.reboot_gb) {
-        return Err((StatusCode::BAD_REQUEST, "need 5 ≤ room ≤ 2000, 1 ≤ warn ≤ room, 1 ≤ restart < warn (GB)".into()));
+async fn set_ssd(
+    State(st): State<SharedState>,
+    Json(b): Json<SsdLimits>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    if !(5..=2000).contains(&b.room_gb)
+        || !(1..=b.room_gb).contains(&b.warn_gb)
+        || !(1..b.warn_gb).contains(&b.reboot_gb)
+    {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "need 5 ≤ room ≤ 2000, 1 ≤ warn ≤ room, 1 ≤ restart < warn (GB)".into(),
+        ));
     }
-    st.db.set_config("ssd_room_gb", &b.room_gb.to_string()).map_err(ise)?;
-    st.db.set_config("ssd_warn_gb", &b.warn_gb.to_string()).map_err(ise)?;
-    st.db.set_config("ssd_reboot_gb", &b.reboot_gb.to_string()).map_err(ise)?;
-    tracing::info!("SSD: {} GB kept free per session, warn below {} GB, restart below {} GB", b.room_gb, b.warn_gb, b.reboot_gb);
+    st.db
+        .set_config("ssd_room_gb", &b.room_gb.to_string())
+        .map_err(ise)?;
+    st.db
+        .set_config("ssd_warn_gb", &b.warn_gb.to_string())
+        .map_err(ise)?;
+    st.db
+        .set_config("ssd_reboot_gb", &b.reboot_gb.to_string())
+        .map_err(ise)?;
+    tracing::info!(
+        "SSD: {} GB kept free per session, warn below {} GB, restart below {} GB",
+        b.room_gb,
+        b.warn_gb,
+        b.reboot_gb
+    );
     Ok(ok())
 }
 
@@ -123,7 +169,9 @@ async fn set_timeout(
     Json(b): Json<Timeout>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let secs = b.seconds.min(3600); // used as timeout_s * 1000 in the iPXE menu
-    st.db.set_config("boot_timeout", &secs.to_string()).map_err(ise)?;
+    st.db
+        .set_config("boot_timeout", &secs.to_string())
+        .map_err(ise)?;
     tracing::info!("boot menu countdown set to {secs} s");
     Ok(ok())
 }
@@ -135,11 +183,16 @@ struct Alert {
 
 /// Server resource alert threshold (%): a banner on every page while CPU / RAM / network / the image disk stays at or
 /// above it (sysmon.rs). POST /api/config/alert {pct}
-async fn set_alert(State(st): State<SharedState>, Json(b): Json<Alert>) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+async fn set_alert(
+    State(st): State<SharedState>,
+    Json(b): Json<Alert>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     if !(50..=99).contains(&b.pct) {
         return Err(crate::api::bad("alert threshold: 50–99 %"));
     }
-    st.db.set_config("alert_pct", &b.pct.to_string()).map_err(ise)?;
+    st.db
+        .set_config("alert_pct", &b.pct.to_string())
+        .map_err(ise)?;
     tracing::info!("server resource alert threshold set to {}%", b.pct);
     Ok(ok())
 }
@@ -155,7 +208,9 @@ async fn set_zram_reserve(
     Json(b): Json<ZramReserve>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let mb = b.mb.min(1 << 30); // reserve * 1024 * 1024 later; cap well below u64 overflow
-    st.db.set_config("zram_reserve_mb", &mb.to_string()).map_err(ise)?;
+    st.db
+        .set_config("zram_reserve_mb", &mb.to_string())
+        .map_err(ise)?;
     tracing::info!("zram RAM reserve set to {mb} MB");
     Ok(ok())
 }
@@ -190,8 +245,14 @@ const MAX_DNS: usize = 8;
 /// (= the clients' order of preference), at most MAX_DNS.
 fn normalize_dns(v: &str) -> Result<String, String> {
     let mut out: Vec<std::net::Ipv4Addr> = Vec::new();
-    for p in v.split([',', ' ', ';']).map(str::trim).filter(|p| !p.is_empty()) {
-        let ip = p.parse().map_err(|_| format!("dns: {p:?} is not an IPv4 address"))?;
+    for p in v
+        .split([',', ' ', ';'])
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+    {
+        let ip = p
+            .parse()
+            .map_err(|_| format!("dns: {p:?} is not an IPv4 address"))?;
         if !out.contains(&ip) {
             out.push(ip);
         }
@@ -199,7 +260,11 @@ fn normalize_dns(v: &str) -> Result<String, String> {
     if out.len() > MAX_DNS {
         return Err(format!("dns: at most {MAX_DNS} servers"));
     }
-    Ok(out.iter().map(|ip| ip.to_string()).collect::<Vec<_>>().join(","))
+    Ok(out
+        .iter()
+        .map(|ip| ip.to_string())
+        .collect::<Vec<_>>()
+        .join(","))
 }
 
 #[derive(Deserialize)]
@@ -231,30 +296,62 @@ fn dhcp_field_ok(key: &str, v: &str) -> Result<(), String> {
     let ipv4 = |s: &str| s.parse::<Ipv4Addr>().is_ok();
     let ok = match key {
         "dhcp_mode" => v == "full" || v == "off",
-        "dhcp_iface" => v.is_empty() || (v.len() <= 15 && v.chars().all(|c| c.is_ascii_alphanumeric() || ".-_@".contains(c))),
+        "dhcp_iface" => {
+            v.is_empty()
+                || (v.len() <= 15
+                    && v.chars()
+                        .all(|c| c.is_ascii_alphanumeric() || ".-_@".contains(c)))
+        }
         "dhcp_server_ip" => ipv4(v),
         // Only the DHCP server uses these (full mode checks them in set_dhcp) → blank is fine while it is off.
-        "dhcp_subnet" | "dhcp_netmask" | "dhcp_range_start" | "dhcp_range_end" | "dhcp_gateway" => v.is_empty() || ipv4(v),
+        "dhcp_subnet" | "dhcp_netmask" | "dhcp_range_start" | "dhcp_range_end" | "dhcp_gateway" => {
+            v.is_empty() || ipv4(v)
+        }
         "dhcp_dns" => v.is_empty() || v.split(',').all(|p| ipv4(p.trim())),
         "dhcp_lease" => dhcp::parse_lease(v).is_some(),
-        "ipxe_signed" | "strict_reset" | "dhcp_rapid_commit" | "dhcp_ipxe_fast" | "dhcp_authoritative"
-        | "dhcp_send_hostname" => v == "0" || v == "1",
+        "ipxe_signed" | "strict_reset" | "dhcp_rapid_commit" | "dhcp_ipxe_fast"
+        | "dhcp_authoritative" | "dhcp_send_hostname" => v == "0" || v == "1",
         _ => true,
     };
-    if ok { Ok(()) } else { Err(format!("{}: invalid value {v:?}", key.trim_start_matches("dhcp_"))) }
+    if ok {
+        Ok(())
+    } else {
+        Err(format!(
+            "{}: invalid value {v:?}",
+            key.trim_start_matches("dhcp_")
+        ))
+    }
 }
 
 /// The DHCP range: both ends set, start ≤ end, both in the server's subnet (server IP + netmask).
 fn range_ok(start: &str, end: &str, server: &str, mask: &str) -> Result<(), String> {
     use std::net::Ipv4Addr;
-    let ip = |s: &str, what: &str| s.trim().parse::<Ipv4Addr>().map(u32::from).map_err(|_| format!("the DHCP server needs a valid {what}"));
-    let (s, e, srv) = (ip(start, "range start")?, ip(end, "range end")?, ip(server, "server IP")?);
-    let m = ip(if mask.trim().is_empty() { "255.255.255.0" } else { mask }, "netmask")?;
+    let ip = |s: &str, what: &str| {
+        s.trim()
+            .parse::<Ipv4Addr>()
+            .map(u32::from)
+            .map_err(|_| format!("the DHCP server needs a valid {what}"))
+    };
+    let (s, e, srv) = (
+        ip(start, "range start")?,
+        ip(end, "range end")?,
+        ip(server, "server IP")?,
+    );
+    let m = ip(
+        if mask.trim().is_empty() {
+            "255.255.255.0"
+        } else {
+            mask
+        },
+        "netmask",
+    )?;
     if s > e {
         return Err(format!("range start {start} is after range end {end}"));
     }
     if s & m != srv & m || e & m != srv & m {
-        return Err(format!("range {start}-{end} is not in the server's subnet ({server} / {mask})"));
+        return Err(format!(
+            "range {start}-{end} is not in the server's subnet ({server} / {mask})"
+        ));
     }
     Ok(())
 }
@@ -265,7 +362,12 @@ async fn set_dhcp(
     State(st): State<SharedState>,
     Json(b): Json<DhcpBody>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let dns = b.dns.as_deref().map(normalize_dns).transpose().map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+    let dns = b
+        .dns
+        .as_deref()
+        .map(normalize_dns)
+        .transpose()
+        .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
     let fields = [
         ("dhcp_mode", &b.mode),
         ("dhcp_iface", &b.iface),
@@ -291,30 +393,62 @@ async fn set_dhcp(
     }
     // When the DHCP server is on, it needs a bound interface (empty = all interfaces → a rogue DHCP server on a
     // WAN/VPN link). "off" needs nothing.
-    let mode = b.mode.as_deref().unwrap_or(&st.db.get_config("dhcp_mode", "off")).to_string();
-    let iface = b.iface.clone().unwrap_or_else(|| st.db.get_config("dhcp_iface", ""));
+    let mode = b
+        .mode
+        .as_deref()
+        .unwrap_or(&st.db.get_config("dhcp_mode", "off"))
+        .to_string();
+    let iface = b
+        .iface
+        .clone()
+        .unwrap_or_else(|| st.db.get_config("dhcp_iface", ""));
     // A typo would be saved and take DHCP/TFTP down at the next start (binds fail): only interfaces this host has.
-    if !iface.trim().is_empty() && !std::path::Path::new("/sys/class/net").join(iface.trim()).exists() {
-        return Err((StatusCode::BAD_REQUEST, format!("interface {:?} does not exist on this server", iface.trim())));
+    if !iface.trim().is_empty()
+        && !std::path::Path::new("/sys/class/net")
+            .join(iface.trim())
+            .exists()
+    {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!("interface {:?} does not exist on this server", iface.trim()),
+        ));
     }
     if mode == "full" && iface.trim().is_empty() {
-        return Err((StatusCode::BAD_REQUEST, "the DHCP server needs a specific interface (leaving it blank binds every interface)".into()));
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "the DHCP server needs a specific interface (leaving it blank binds every interface)"
+                .into(),
+        ));
     }
     // A lease without gateway/DNS takes every machine that gets it off the internet.
     let cur = |v: &Option<String>, k: &str| v.clone().unwrap_or_else(|| st.db.get_config(k, ""));
-    if mode == "full" && (cur(&b.gateway, "dhcp_gateway").trim().is_empty() || cur(&dns, "dhcp_dns").trim().is_empty()) {
-        return Err((StatusCode::BAD_REQUEST, "the DHCP server needs a gateway and DNS (clients would get no internet)".into()));
+    if mode == "full"
+        && (cur(&b.gateway, "dhcp_gateway").trim().is_empty()
+            || cur(&dns, "dhcp_dns").trim().is_empty())
+    {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "the DHCP server needs a gateway and DNS (clients would get no internet)".into(),
+        ));
     }
     let server = cur(&b.server_ip, "dhcp_server_ip");
     if mode == "full" {
         let mask = cur(&b.netmask, "dhcp_netmask");
-        range_ok(&cur(&b.range_start, "dhcp_range_start"), &cur(&b.range_end, "dhcp_range_end"), &server, &mask)
-            .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+        range_ok(
+            &cur(&b.range_start, "dhcp_range_start"),
+            &cur(&b.range_end, "dhcp_range_end"),
+            &server,
+            &mask,
+        )
+        .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
     }
     // Boot scripts, the Host check (auth.rs) and DHCP option 54 all use it: an address this machine doesn't have
     // breaks every boot. Binding to it only works when it is ours.
     if b.server_ip.is_some() && std::net::UdpSocket::bind((server.trim(), 0)).is_err() {
-        return Err((StatusCode::BAD_REQUEST, format!("server IP {server} is not an address of this server")));
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!("server IP {server} is not an address of this server"),
+        ));
     }
     for (k, v) in &fields {
         if let Some(val) = v {
@@ -334,7 +468,9 @@ async fn restart(st: &SharedState) -> Result<Json<serde_json::Value>, (StatusCod
         (StatusCode::INTERNAL_SERVER_ERROR, e)
     })?;
     tracing::info!("network settings applied: {status}");
-    Ok(Json(serde_json::json!({"ok": true, "reloaded": true, "status": status})))
+    Ok(Json(
+        serde_json::json!({"ok": true, "reloaded": true, "status": status}),
+    ))
 }
 
 #[cfg(test)]
@@ -343,36 +479,77 @@ fn dhcp_field_validation() {
     assert!(dhcp_field_ok("dhcp_server_ip", "10.0.0.12").is_ok());
     assert!(dhcp_field_ok("dhcp_server_ip", "10.0.0.999").is_err());
     assert!(dhcp_field_ok("dhcp_server_ip", "10.0.0.12\nfoo").is_err()); // newline injection into scripts
-    assert!(dhcp_field_ok("dhcp_mode", "full").is_ok() && dhcp_field_ok("dhcp_mode", "off").is_ok());
-    assert!(dhcp_field_ok("dhcp_mode", "proxy").is_err() && dhcp_field_ok("dhcp_mode", "rogue").is_err());
-    assert!(dhcp_field_ok("dhcp_dns", "8.8.8.8, 1.1.1.1").is_ok() && dhcp_field_ok("dhcp_dns", "").is_ok());
+    assert!(
+        dhcp_field_ok("dhcp_mode", "full").is_ok() && dhcp_field_ok("dhcp_mode", "off").is_ok()
+    );
+    assert!(
+        dhcp_field_ok("dhcp_mode", "proxy").is_err()
+            && dhcp_field_ok("dhcp_mode", "rogue").is_err()
+    );
+    assert!(
+        dhcp_field_ok("dhcp_dns", "8.8.8.8, 1.1.1.1").is_ok()
+            && dhcp_field_ok("dhcp_dns", "").is_ok()
+    );
     assert!(dhcp_field_ok("dhcp_dns", "8.8.8.8,notip").is_err());
-    assert!(dhcp_field_ok("dhcp_iface", "eth0").is_ok() && dhcp_field_ok("dhcp_iface", "eth 0;rm").is_err());
-    assert!(dhcp_field_ok("dhcp_lease", "12h").is_ok() && dhcp_field_ok("dhcp_lease", "3600").is_ok());
+    assert!(
+        dhcp_field_ok("dhcp_iface", "eth0").is_ok()
+            && dhcp_field_ok("dhcp_iface", "eth 0;rm").is_err()
+    );
+    assert!(
+        dhcp_field_ok("dhcp_lease", "12h").is_ok() && dhcp_field_ok("dhcp_lease", "3600").is_ok()
+    );
     assert!(dhcp_field_ok("dhcp_lease", "1d").is_ok() && dhcp_field_ok("dhcp_lease", "h").is_err());
     // DHCP server off (fresh install): the range fields are blank and must not block Apply.
-    assert!(dhcp_field_ok("dhcp_range_start", "").is_ok() && dhcp_field_ok("dhcp_subnet", "").is_ok());
+    assert!(
+        dhcp_field_ok("dhcp_range_start", "").is_ok() && dhcp_field_ok("dhcp_subnet", "").is_ok()
+    );
     assert!(dhcp_field_ok("dhcp_range_end", "10.0.0.x").is_err());
     // Option 3 carries one router; a list would be silently dropped.
-    assert!(dhcp_field_ok("dhcp_gateway", "10.0.0.1").is_ok() && dhcp_field_ok("dhcp_gateway", "10.0.0.1,10.0.0.2").is_err());
+    assert!(
+        dhcp_field_ok("dhcp_gateway", "10.0.0.1").is_ok()
+            && dhcp_field_ok("dhcp_gateway", "10.0.0.1,10.0.0.2").is_err()
+    );
 }
 
 #[cfg(test)]
 #[test]
 fn dhcp_range_checked() {
     assert!(range_ok("10.0.0.100", "10.0.0.200", "10.0.0.12", "255.255.255.0").is_ok());
-    assert!(range_ok("10.0.1.100", "10.0.1.200", "10.0.0.12", "255.255.254.0").is_ok(), "/23");
-    assert!(range_ok("10.0.0.200", "10.0.0.100", "10.0.0.12", "").is_err(), "start after end");
-    assert!(range_ok("10.0.1.100", "10.0.1.200", "10.0.0.12", "").is_err(), "outside the /24");
-    assert!(range_ok("", "10.0.0.200", "10.0.0.12", "").is_err(), "blank start in full mode");
+    assert!(
+        range_ok("10.0.1.100", "10.0.1.200", "10.0.0.12", "255.255.254.0").is_ok(),
+        "/23"
+    );
+    assert!(
+        range_ok("10.0.0.200", "10.0.0.100", "10.0.0.12", "").is_err(),
+        "start after end"
+    );
+    assert!(
+        range_ok("10.0.1.100", "10.0.1.200", "10.0.0.12", "").is_err(),
+        "outside the /24"
+    );
+    assert!(
+        range_ok("", "10.0.0.200", "10.0.0.12", "").is_err(),
+        "blank start in full mode"
+    );
 }
 
 #[cfg(test)]
 #[test]
 fn dns_list_normalized() {
-    assert_eq!(normalize_dns("8.8.8.8 1.1.1.1, 8.8.8.8;9.9.9.9").unwrap(), "8.8.8.8,1.1.1.1,9.9.9.9");
+    assert_eq!(
+        normalize_dns("8.8.8.8 1.1.1.1, 8.8.8.8;9.9.9.9").unwrap(),
+        "8.8.8.8,1.1.1.1,9.9.9.9"
+    );
     assert_eq!(normalize_dns("  ").unwrap(), "");
-    assert!(normalize_dns("8.8.8.8, dns.google").unwrap_err().contains("dns.google"));
+    assert!(
+        normalize_dns("8.8.8.8, dns.google")
+            .unwrap_err()
+            .contains("dns.google")
+    );
     let nine: Vec<String> = (1..=9).map(|i| format!("10.0.0.{i}")).collect();
-    assert!(normalize_dns(&nine.join(",")).unwrap_err().contains("at most 8"));
+    assert!(
+        normalize_dns(&nine.join(","))
+            .unwrap_err()
+            .contains("at most 8")
+    );
 }

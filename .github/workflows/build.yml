@@ -19,6 +19,19 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # RustSec advisories for the locked dependencies. Its own job: a new advisory turns the run red without holding back
+  # the release of an unrelated push.
+  audit:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit
+      - name: cargo audit
+        working-directory: mgmt
+        run: cargo audit
+
   build:
     runs-on: ubuntu-24.04
     permissions:
@@ -38,6 +51,9 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq build-essential perl liblzma-dev musl-tools busybox-initramfs qemu-utils
+          # Integration tests (mgmt/tests/) run the server as root in their own user + network namespaces, which
+          # Ubuntu 24.04 blocks for unprivileged users by default.
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
 
       # rustup reads mgmt/rust-toolchain.toml → latest stable + the musl target.
       - name: Rust toolchain
@@ -47,6 +63,11 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: mgmt -> target
+
+      # rustfmt's defaults, before the long build.
+      - name: rustfmt
+        working-directory: mgmt
+        run: cargo fmt --check
 
       # Release tag = the push time, ISO 8601 in UTC with "-" for ":" (git refuses ":" in a tag), e.g. 2026-09-19T17-05-25Z:
       # the same on a re-run of that push, so a re-run updates its release instead of making another. Manual runs / pull
@@ -68,6 +89,11 @@ jobs:
       # `bash`, not ./build.sh: committed from Windows the script has no exec bit (mode 100644).
       - name: Build iPXE + bootrom-mgmt (debug) + unit tests
         run: bash build.sh --ipxe --dev
+
+      # No clippy warning, tests included. After the build: the embedded snponly.efi only exists once iPXE is built.
+      - name: clippy
+        working-directory: mgmt
+        run: cargo clippy --all-targets -- -D warnings
 
       # The Windows stage (kernel + initrd + shim) is built HERE, on Ubuntu's Canonical-signed generic kernel + its
       # Microsoft-signed shim: servers then install no packages for it and Secure Boot works whatever kernel they run.

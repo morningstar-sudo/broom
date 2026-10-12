@@ -6,17 +6,18 @@
 // The golden being served keeps image.img open: a new upload / rollback renamed over it changes nothing until the
 // publish that installs the new golden. An image published by an older version (a real golden.vhdx file, no
 // golden.id) is served from that file until it is published again.
+use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::{Arc, LazyLock, Mutex};
+use std::sync::{Arc, LazyLock};
 
 use axum::body::Body;
 use axum::extract::{Path, Request};
-use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
+use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 
-use crate::iscsid::ramimg::RamImage;
 use crate::SharedState;
+use crate::iscsid::ramimg::RamImage;
 
 /// The golden an image serves right now.
 pub struct Golden {
@@ -41,7 +42,7 @@ impl Golden {
 static SERVED: LazyLock<Mutex<HashMap<String, Arc<Golden>>>> = LazyLock::new(Default::default);
 
 fn served(name: &str) -> Option<Arc<Golden>> {
-    SERVED.lock().unwrap().get(name).cloned()
+    SERVED.lock().get(name).cloned()
 }
 
 /// Id of the golden an image serves (None: none built by this version yet).
@@ -51,7 +52,14 @@ pub fn served_id(name: &str) -> Option<String> {
 
 /// Serve this golden from now on (publish, start); no RAM copy yet (set_ram).
 pub fn install(name: &str, id: &str, vhdx: crate::vhdx::Virtual) {
-    SERVED.lock().unwrap().insert(name.to_string(), Arc::new(Golden { id: id.to_string(), vhdx: Arc::new(vhdx), ram: None }));
+    SERVED.lock().insert(
+        name.to_string(),
+        Arc::new(Golden {
+            id: id.to_string(),
+            vhdx: Arc::new(vhdx),
+            ram: None,
+        }),
+    );
 }
 
 /// Make the served golden's RAM copy follow the cache mode: `ram` → loaded (kept if there), else dropped. Blocking
@@ -64,21 +72,34 @@ pub fn set_ram(st: &SharedState, name: &str, ram: bool) -> Result<(), String> {
     let copy = if ram {
         let v = g.vhdx.clone();
         let blocks = v.len().div_ceil(crate::iscsid::ramimg::BLOCK as u64);
-        Some(Arc::new(RamImage::load_with(name, v.len(), blocks, crate::publish::ram_reserve(st), |off, buf| v.read_at(off, buf))?))
+        Some(Arc::new(RamImage::load_with(
+            name,
+            v.len(),
+            blocks,
+            crate::publish::ram_reserve(st),
+            |off, buf| v.read_at(off, buf),
+        )?))
     } else {
         None
     };
-    let mut s = SERVED.lock().unwrap();
+    let mut s = SERVED.lock();
     // Only onto the golden it was made from (jobs of an image never overlap, so it is still that one).
     if s.get(name).is_some_and(|cur| cur.id == g.id) {
-        s.insert(name.to_string(), Arc::new(Golden { id: g.id.clone(), vhdx: g.vhdx.clone(), ram: copy }));
+        s.insert(
+            name.to_string(),
+            Arc::new(Golden {
+                id: g.id.clone(),
+                vhdx: g.vhdx.clone(),
+                ram: copy,
+            }),
+        );
     }
     Ok(())
 }
 
 /// The image is gone.
 pub fn forget(name: &str) {
-    SERVED.lock().unwrap().remove(name);
+    SERVED.lock().remove(name);
 }
 
 fn dir(name: &str) -> PathBuf {
@@ -94,8 +115,15 @@ pub fn restore_all(st: &SharedState) {
             continue;
         }
         let raw = crate::images_dir().join(&img.name).join("image.img");
-        let Some(id) = crate::hash::stamp(&raw) else { continue };
-        if std::fs::read_to_string(dir(&img.name).join("golden.id")).ok().as_deref().map(str::trim) != Some(id.as_str()) {
+        let Some(id) = crate::hash::stamp(&raw) else {
+            continue;
+        };
+        if std::fs::read_to_string(dir(&img.name).join("golden.id"))
+            .ok()
+            .as_deref()
+            .map(str::trim)
+            != Some(id.as_str())
+        {
             continue; // published by an older version (golden.vhdx file) or image.img changed since
         }
         match crate::vhdx::Virtual::open(&raw, &id) {
@@ -109,7 +137,10 @@ pub fn restore_all(st: &SharedState) {
             match set_ram(st, &img.name, true) {
                 Ok(()) => tracing::info!("image {}: golden.vhdx in RAM", img.name),
                 Err(e) => {
-                    tracing::warn!("image {}: golden not loaded into RAM ({e}) → cache_mode=disk", img.name);
+                    tracing::warn!(
+                        "image {}: golden not loaded into RAM ({e}) → cache_mode=disk",
+                        img.name
+                    );
                     let _ = st.db.set_cache_mode(img.id, "disk");
                 }
             }
@@ -120,15 +151,24 @@ pub fn restore_all(st: &SharedState) {
 /// One byte range of `Range: bytes=...` → (first, last) inclusive. None = no / multi / unsupported range → whole file.
 /// Err = not satisfiable (416).
 fn range(h: Option<&HeaderValue>, size: u64) -> Result<Option<(u64, u64)>, ()> {
-    let Some(spec) = h.and_then(|v| v.to_str().ok()).and_then(|s| s.strip_prefix("bytes=")) else { return Ok(None) };
+    let Some(spec) = h
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.strip_prefix("bytes="))
+    else {
+        return Ok(None);
+    };
     if spec.contains(',') {
         return Ok(None);
     }
-    let Some((a, b)) = spec.trim().split_once('-') else { return Ok(None) };
+    let Some((a, b)) = spec.trim().split_once('-') else {
+        return Ok(None);
+    };
     let (first, last) = match (a.parse::<u64>().ok(), b.parse::<u64>().ok()) {
         (Some(a), Some(b)) => (a, b.min(size.saturating_sub(1))),
         (Some(a), None) if b.is_empty() => (a, size.saturating_sub(1)),
-        (None, Some(n)) if a.is_empty() && n > 0 => (size.saturating_sub(n), size.saturating_sub(1)),
+        (None, Some(n)) if a.is_empty() && n > 0 => {
+            (size.saturating_sub(n), size.saturating_sub(1))
+        }
         _ => return Ok(None),
     };
     if first >= size || first > last {
@@ -140,9 +180,15 @@ fn range(h: Option<&HeaderValue>, size: u64) -> Result<Option<(u64, u64)>, ()> {
 /// GET /tftp/broom-win/{name}/golden.vhdx — the served golden (RAM copy or made from image.img); an image published
 /// by an older version: its golden.vhdx file.
 pub async fn get(Path(name): Path<String>, req: Request) -> Response {
-    let Some(g) = crate::images::valid_name(&name).then(|| served(&name)).flatten() else {
+    let Some(g) = crate::images::valid_name(&name)
+        .then(|| served(&name))
+        .flatten()
+    else {
         use tower::ServiceExt;
-        return match tower_http::services::ServeFile::new(dir(&name).join("golden.vhdx")).oneshot(req).await {
+        return match tower_http::services::ServeFile::new(dir(&name).join("golden.vhdx"))
+            .oneshot(req)
+            .await
+        {
             Ok(r) => r.into_response(),
             Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
         };
@@ -156,7 +202,11 @@ fn serve(img: Arc<Golden>, headers: &HeaderMap) -> Response {
         Ok(Some((a, b))) => (StatusCode::PARTIAL_CONTENT, a, b),
         Ok(None) => (StatusCode::OK, 0, size.saturating_sub(1)),
         Err(()) => {
-            return (StatusCode::RANGE_NOT_SATISFIABLE, [(header::CONTENT_RANGE, format!("bytes */{size}"))]).into_response();
+            return (
+                StatusCode::RANGE_NOT_SATISFIABLE,
+                [(header::CONTENT_RANGE, format!("bytes */{size}"))],
+            )
+                .into_response();
         }
     };
     let len = if size == 0 { 0 } else { last - first + 1 };
@@ -183,11 +233,17 @@ fn serve(img: Arc<Golden>, headers: &HeaderMap) -> Response {
     let mut r = Response::new(Body::from_stream(body));
     *r.status_mut() = status;
     let h = r.headers_mut();
-    h.insert(header::CONTENT_TYPE, HeaderValue::from_static("application/octet-stream"));
+    h.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/octet-stream"),
+    );
     h.insert(header::ACCEPT_RANGES, HeaderValue::from_static("bytes"));
     h.insert(header::CONTENT_LENGTH, HeaderValue::from(len));
     if status == StatusCode::PARTIAL_CONTENT {
-        h.insert(header::CONTENT_RANGE, HeaderValue::from_str(&format!("bytes {first}-{last}/{size}")).unwrap());
+        h.insert(
+            header::CONTENT_RANGE,
+            HeaderValue::from_str(&format!("bytes {first}-{last}/{size}")).unwrap(),
+        );
     }
     r
 }
@@ -214,7 +270,10 @@ mod tests {
     #[test]
     fn route_beside_serve_dir() {
         let _: axum::Router = axum::Router::new()
-            .route("/tftp/broom-win/{name}/golden.vhdx", axum::routing::get(get))
+            .route(
+                "/tftp/broom-win/{name}/golden.vhdx",
+                axum::routing::get(get),
+            )
             .nest_service("/tftp", tower_http::services::ServeDir::new("."));
     }
 }
