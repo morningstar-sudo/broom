@@ -1,7 +1,7 @@
-# Build iPXE (snponly.efi = upstream at mgmt/ipxe/IPXE_COMMIT + mgmt/ipxe/patches) + the mgmt binary (static musl, iPXE +
-# web UI + scripts embedded), run the unit tests, build the Windows stage bundle and the assets bundle (web UI, iPXE,
-# scripts), then a final binary pinned to both and without the assets inside; keep binary + bundles + snponly.efi as
-# artifacts. Every push to main also tags the commit v<Cargo.toml version>-<short sha> (e.g. v0.5.3-a1b2c3d) and
+# Build iPXE (snponly.efi = upstream at mgmt/ipxe/IPXE_COMMIT + mgmt/ipxe/patches) + a debug mgmt binary (iPXE + web UI +
+# scripts embedded), run the unit tests, build the Windows stage bundle and the assets bundle (web UI, iPXE, scripts) with
+# it, then the release binary (static musl) pinned to both and without the assets inside; keep binary + bundles +
+# snponly.efi as artifacts. Every push to main also tags the commit v<Cargo.toml version>-<short sha> (e.g. v0.5.3-a1b2c3d) and
 # publishes a release with those files.
 name: build
 
@@ -56,9 +56,11 @@ jobs:
           echo "name=v$v-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
 
       # --ipxe: always fetch + patch + build snponly.efi from source (it is not in git).
+      # --dev: this binary only makes the bundles below → a debug build sharing cargo test's dependencies. The release
+      # build (fat LTO, one codegen unit: one core for a minute) runs once, for the shipped binary.
       # `bash`, not ./build.sh: committed from Windows the script has no exec bit (mode 100644).
-      - name: Build iPXE + bootrom-mgmt + unit tests
-        run: bash build.sh --ipxe
+      - name: Build iPXE + bootrom-mgmt (debug) + unit tests
+        run: bash build.sh --ipxe --dev
 
       # The Windows stage (kernel + initrd + shim) is built HERE, on Ubuntu's Canonical-signed generic kernel + its
       # Microsoft-signed shim: servers then install no packages for it and Secure Boot works whatever kernel they run.
@@ -81,8 +83,8 @@ jobs:
           echo "broom-assets.zip sha256 $sha"
           echo "sha=$sha" >> "$GITHUB_OUTPUT"
 
-      # The same binary again, now pinned to both bundles (mgmt/stage.pin + mgmt/assets.pin, embedded at build time)
-      # and without the assets inside (build.sh sees the pin): it downloads them from this release — the assets on its
+      # The release binary, pinned to both bundles (mgmt/stage.pin + mgmt/assets.pin, embedded at build time) and
+      # without the assets inside (build.sh sees the pin): it downloads them from this release — the assets on its
       # first start, the stage on the first Windows publish — and accepts nothing else.
       - name: Pin the bundles in the binary
         run: |

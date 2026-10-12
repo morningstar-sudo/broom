@@ -4,6 +4,7 @@
 #   2. mgmt release binary (embeds snponly.efi + web UI + scripts) + unit tests (skip with --no-test);
 #      --live also runs the root-only live tests (NTFS via ntfs-3g / ping / LVM, asks for sudo)
 #   3. copy to mgmt/dist/bootrom-mgmt  → deploy that single file to the server
+#   --dev: a debug build instead (not static, not for a server): CI only runs it to make the bundles
 # Windows: double-click build.cmd (runs this script in WSL).
 # Needs: Rust stable via rustup (https://rustup.rs), musl-tools, git, gcc, make, perl, liblzma-dev (iPXE).
 # Output: a STATIC binary (musl) → runs on any x86_64 Linux server. Cargo output → ~/broom-target
@@ -20,13 +21,14 @@ fi
 [ -f "$HOME/.cargo/env" ] && . "$HOME/.cargo/env"
 root=$(pwd)
 
-force_ipxe=0; test=1; live=0
+force_ipxe=0; test=1; live=0; dev=0
 for a in "$@"; do
   case "$a" in
     --ipxe) force_ipxe=1 ;;
     --no-test) test=0 ;;
     --live) live=1 ;;
-    -h|--help) sed -n '2,9p' "$0"; exit 0 ;;
+    --dev) dev=1 ;;
+    -h|--help) sed -n '2,10p' "$0"; exit 0 ;;
     *) echo "unknown option: $a (see --help)" >&2; exit 2 ;;
   esac
 done
@@ -56,8 +58,16 @@ command -v musl-gcc >/dev/null || { echo "missing musl-gcc: sudo apt install mus
 # assets.pin holds a pin (CI's release build) → web UI / iPXE / scripts come from broom-assets.zip, not embedded.
 features=""
 grep -qE '^[0-9a-f]{64}$' assets.pin && features="--features external-assets"
-echo "== [2/3] mgmt (cargo build --release --target $target $features → $CARGO_TARGET_DIR)"
-cargo build --release --target $target $features
+if [ "$dev" = 1 ]; then
+  # Same host target + profile as cargo test below → its dependencies are built once for both.
+  echo "== [2/3] mgmt (cargo build, debug → $CARGO_TARGET_DIR) — for CI's bundle steps, not for a server"
+  cargo build $features
+  bin="$CARGO_TARGET_DIR/debug/bootrom-mgmt"
+else
+  echo "== [2/3] mgmt (cargo build --release --target $target $features → $CARGO_TARGET_DIR)"
+  cargo build --release --target $target $features
+  bin="$CARGO_TARGET_DIR/$target/release/bootrom-mgmt"
+fi
 if [ "$test" = 1 ]; then
   echo "== cargo test"
   cargo test
@@ -72,8 +82,7 @@ if [ "$live" = 1 ]; then
 fi
 
 # 3. dist
-bin="$CARGO_TARGET_DIR/$target/release/bootrom-mgmt"
-if readelf -l "$bin" | grep -q INTERP; then
+if [ "$dev" = 0 ] && readelf -l "$bin" | grep -q INTERP; then
   echo "ERROR: $bin is dynamically linked (expected static musl)" >&2; exit 1
 fi
 mkdir -p dist

@@ -41,6 +41,11 @@ mimalloc = "0.1.52"   # global allocator: musl's malloc serializes threads (iSCS
 # build.sh turns it on by itself when assets.pin holds a pin.
 external-assets = []
 
+# Debug builds (tests; CI's bundle steps run a debug binary, build.sh --dev) with optimized dependencies: gzip, sha256,
+# zstd at release speed, only this crate stays quick to compile.
+[profile.dev.package."*"]
+opt-level = 3
+
 [profile.release]
 strip = true
 lto = true
