@@ -85,24 +85,66 @@ fn net_bytes(iface: &str) -> Option<(u64, u64)> {
     Some((*f.first()?, *f.get(8)?))
 }
 
-/// Link speed in Mbit/s; None for a virtual NIC that doesn't say (then only MB/s is shown, no %).
+/// Link speed in Mbit/s; None when the NIC doesn't say.
 fn link_mbit(iface: &str) -> Option<u64> {
     std::fs::read_to_string(format!("/sys/class/net/{iface}/speed")).ok()?.trim().parse::<i64>().ok().filter(|s| *s > 0).map(|s| s as u64)
 }
 
-/// The block device holding `path` (name, ms spent doing I/O so far). None on a filesystem without one (zfs, tmpfs).
-fn disk_ticks(path: &Path) -> Option<(String, u64)> {
+/// The hypervisor this server runs under (DMI), None on bare metal.
+fn hypervisor() -> Option<&'static str> {
+    static H: LazyLock<Option<&'static str>> = LazyLock::new(|| {
+        let r = |f: &str| std::fs::read_to_string(format!("/sys/class/dmi/id/{f}")).unwrap_or_default();
+        let (vendor, product) = (r("sys_vendor"), r("product_name"));
+        let s = format!("{vendor} {product}");
+        [("VMware", "VMware"), ("QEMU", "QEMU/KVM"), ("KVM", "QEMU/KVM"), ("VirtualBox", "VirtualBox"), ("innotek", "VirtualBox"), ("Xen", "Xen")]
+            .into_iter()
+            .find(|(k, _)| s.contains(k))
+            .map(|(_, h)| h)
+            .or_else(|| (vendor.contains("Microsoft") && product.contains("Virtual Machine")).then_some("Hyper-V"))
+    });
+    *H
+}
+
+/// A virtual NIC → "VMware vmxnet3": its link speed is made up (vmxnet3 always says 10 Gbit), the host's real port is
+/// invisible from inside. Paravirtual drivers always are; emulated real chips (e1000…) are inside a VM. A real card
+/// passed through to the VM keeps its own driver and its true speed.
+fn virtual_nic(iface: &str) -> Option<String> {
+    let drv = std::fs::read_link(format!("/sys/class/net/{iface}/device/driver")).ok()?.file_name()?.to_string_lossy().into_owned();
+    let paravirtual = ["vmxnet3", "virtio_net", "hv_netvsc", "vif", "xen_netfront"].contains(&drv.as_str());
+    let emulated = ["e1000", "e1000e", "8139cp", "8139too", "pcnet32", "ne2k-pci"].contains(&drv.as_str());
+    // No DMI (WSL, some clouds) → the paravirtual driver names its hypervisor.
+    let by_driver = match drv.as_str() {
+        "vmxnet3" => "VMware",
+        "virtio_net" => "QEMU/KVM",
+        "hv_netvsc" => "Hyper-V",
+        _ => "Xen",
+    };
+    (paravirtual || (emulated && hypervisor().is_some())).then(|| format!("{} {drv}", hypervisor().unwrap_or(by_driver)))
+}
+
+/// Counters of the block device holding a path, so far.
+struct DiskStat {
+    name: String,
+    /// ms spent doing I/O (busy time).
+    busy_ms: u64,
+    read: u64,
+    written: u64,
+}
+
+/// The block device holding `path`. None on a filesystem without one (zfs, tmpfs).
+fn disk_stat(path: &Path) -> Option<DiskStat> {
     use std::os::unix::fs::MetadataExt;
     let d = std::fs::metadata(path).ok()?.dev();
     let sys = format!("/sys/dev/block/{}:{}", libc::major(d), libc::minor(d));
     let name = std::fs::read_link(&sys).ok()?.file_name()?.to_string_lossy().into_owned();
-    // stat: reads, merges, sectors, ms, writes, merges, sectors, ms, in flight, io_ticks (ms busy), …
-    let io = std::fs::read_to_string(format!("{sys}/stat")).ok()?.split_whitespace().nth(9)?.parse().ok()?;
-    Some((name, io))
+    // stat: reads, merges, sectors read, ms, writes, merges, sectors written, ms, in flight, io_ticks (ms busy), …
+    // Sectors are 512 bytes whatever the disk's own sector size.
+    let f: Vec<u64> = std::fs::read_to_string(format!("{sys}/stat")).ok()?.split_whitespace().filter_map(|x| x.parse().ok()).collect();
+    Some(DiskStat { name, busy_ms: *f.get(9)?, read: f.get(2)? * 512, written: f.get(6)? * 512 })
 }
 
-/// % of the filesystem holding `path` in use.
-fn space_used(path: &Path) -> Option<f64> {
+/// (used, total) bytes of the filesystem holding `path`, counted like `df` (used + available = what can be used).
+fn space(path: &Path) -> Option<(u64, u64)> {
     use std::os::unix::ffi::OsStrExt;
     let c = std::ffi::CString::new(path.as_os_str().as_bytes()).ok()?;
     // SAFETY: c is a valid NUL-terminated path; s is written by statvfs before it is read.
@@ -110,7 +152,8 @@ fn space_used(path: &Path) -> Option<f64> {
     if unsafe { libc::statvfs(c.as_ptr(), &mut s) } != 0 || s.f_blocks == 0 {
         return None;
     }
-    Some(100.0 * (s.f_blocks - s.f_bavail) as f64 / s.f_blocks as f64)
+    let used = (s.f_blocks - s.f_bfree) * s.f_frsize;
+    Some((used, used + s.f_bavail * s.f_frsize))
 }
 
 /// The resources at or above `limit` % for STREAK samples in a row ("CPU 92%"), in the order given. `streak` carries
@@ -129,7 +172,8 @@ fn alerts(vals: &[(&'static str, Option<f64>)], limit: f64, streak: &mut HashMap
 
 /// Sample forever (mgmt's lifetime): push each to the open pages, log when an alert starts / ends.
 pub async fn run(st: SharedState) {
-    let (mut cpu0, mut net0, mut io0, mut t0) = (cpu_times(), None::<(u64, u64)>, None::<u64>, Instant::now());
+    let (mut cpu0, mut net0, mut io0, mut t0) = (cpu_times(), None::<(u64, u64)>, None::<DiskStat>, Instant::now());
+    let cores = std::thread::available_parallelism().map_or(1, |n| n.get());
     let mut streak = HashMap::new();
     let mut shown: Vec<String> = Vec::new();
     loop {
@@ -145,8 +189,15 @@ pub async fn run(st: SharedState) {
         let cpu = (total > 0).then(|| 100.0 * (total - cpu1.1.saturating_sub(cpu0.1).min(total)) as f64 / total as f64);
         cpu0 = cpu1;
 
+        // 1-minute load average: runnable tasks, next to the core count.
+        let load = std::fs::read_to_string("/proc/loadavg").ok().and_then(|s| s.split_whitespace().next()?.parse::<f64>().ok());
+
+        // Used = what programs hold (total − available, like `free`'s "used"); page cache counted apart: the kernel
+        // gives it back whenever programs need it.
         let (mt, ma) = (mem_total(), meminfo("MemAvailable:"));
-        let ram = (mt > 0).then(|| 100.0 * mt.saturating_sub(ma) as f64 / mt as f64);
+        let ram_used = mt.saturating_sub(ma);
+        let ram = (mt > 0).then(|| 100.0 * ram_used as f64 / mt as f64);
+        let cache = meminfo("Cached:") + meminfo("Buffers:");
 
         let net1 = iface.as_deref().and_then(net_bytes);
         let (rx, tx) = match (net0, net1) {
@@ -154,16 +205,24 @@ pub async fn run(st: SharedState) {
             _ => (0.0, 0.0),
         };
         net0 = net1;
-        let link = iface.as_deref().and_then(link_mbit);
+        // A virtual NIC's speed is made up → no % (and no alert) rather than a % of a number that isn't the limit.
+        let virt = iface.as_deref().and_then(virtual_nic);
+        let link = iface.as_deref().and_then(link_mbit).filter(|_| virt.is_none());
         let net_pct = link.map(|l| 100.0 * rx.max(tx) * 8.0 / (l as f64 * 1e6));
 
-        let disk = disk_ticks(&images);
-        let busy = match (io0, &disk) {
-            (Some(a), Some((_, b))) => Some((100.0 * b.saturating_sub(a) as f64 / (secs * 1000.0)).min(100.0)),
-            _ => None,
+        let disk = disk_stat(&images);
+        let (busy, rd, wr) = match (&io0, &disk) {
+            (Some(a), Some(b)) => (
+                Some((100.0 * b.busy_ms.saturating_sub(a.busy_ms) as f64 / (secs * 1000.0)).min(100.0)),
+                b.read.saturating_sub(a.read) as f64 / secs,
+                b.written.saturating_sub(a.written) as f64 / secs,
+            ),
+            _ => (None, 0.0, 0.0),
         };
-        io0 = disk.as_ref().map(|d| d.1);
-        let used = space_used(&images);
+        let dev = disk.as_ref().map(|d| d.name.clone());
+        io0 = disk;
+        let sp = space(&images);
+        let used = sp.map(|(u, t)| 100.0 * u as f64 / t.max(1) as f64);
 
         let now = alerts(&[("CPU", cpu), ("RAM", ram), ("Network", net_pct), ("Disk busy", busy), ("Disk space", used)], limit, &mut streak);
         let names = |v: &[String]| v.iter().map(|a| a.split(' ').next().unwrap_or("").to_string()).collect::<Vec<_>>();
@@ -175,10 +234,13 @@ pub async fn run(st: SharedState) {
             }
         }
         shown = now;
+        // Bytes as measured; a % only where the whole is known (none for a virtual NIC's link).
         let data = serde_json::json!({
-            "cpu": cpu, "ram": ram,
-            "net": {"iface": iface, "rx": rx / 1e6, "tx": tx / 1e6, "link": link, "pct": net_pct},
-            "disk": {"dev": disk.map(|d| d.0), "busy": busy, "used": used},
+            "cpu": {"pct": cpu, "cores": cores, "load": load},
+            "ram": {"pct": ram, "used": ram_used, "total": mt, "cache": cache},
+            "net": {"iface": iface, "rx": rx, "tx": tx, "link": link, "pct": net_pct, "virtual": virt},
+            "disk": {"dev": dev, "busy": busy, "read": rd, "write": wr},
+            "space": {"pct": used, "used": sp.map(|s| s.0), "total": sp.map(|s| s.1)},
             "limit": limit, "alerts": shown,
         })
         .to_string();
@@ -207,7 +269,8 @@ mod tests {
         let (total, idle) = cpu_times();
         assert!(total >= idle && total > 0);
         assert!(net_bytes("lo").is_some(), "loopback is in /proc/net/dev");
-        assert!(space_used(Path::new("/")).is_some_and(|u| (0.0..=100.0).contains(&u)));
+        assert!(space(Path::new("/")).is_some_and(|(used, total)| total > 0 && used <= total));
+        assert!(disk_stat(Path::new("/")).is_none_or(|d| !d.name.is_empty()), "a block device, or none (overlay / tmpfs root)");
         assert!(ram_share(10, 1 << 20, 7) >= 7);
     }
 }

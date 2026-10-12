@@ -29,7 +29,7 @@ async function showPage(p){
   curPage=p;
   if(loaders[p])loaders[p]();
 }
-// Page from the URL (/machines, /images, ...); "/" or unknown → machines.
+// Page from the URL (/machines, /images, ...); "/" or unknown â†’ machines.
 const pageFromPath=()=>{const p=location.pathname.slice(1);return loaders[p]?p:'machines';};
 document.querySelectorAll('nav a').forEach(a=>a.onclick=e=>{
   if(e.ctrlKey||e.metaKey||e.shiftKey||e.button!==0)return;   // new tab/window: let the browser handle it
@@ -66,10 +66,10 @@ function renderMachines(){
   const page=rows.slice((mPage-1)*M_PAGE,mPage*M_PAGE);
   document.querySelector('#machines tbody').innerHTML=page.map(m=>
     `<tr>
-       <td>${m.hostname?esc(m.hostname):'<span class="mono">—</span>'} ${m.registered?'':'<span class="pill new">new</span>'}</td>
-       <td class="mono">${m.grp?esc(m.grp):'—'}</td>
+       <td>${m.hostname?esc(m.hostname):'<span class="mono">â€”</span>'} ${m.registered?'':'<span class="pill new">new</span>'}</td>
+       <td class="mono">${m.grp?esc(m.grp):'â€”'}</td>
        <td class="mono">${esc(m.ip)}</td><td class="mono">${esc(m.mac)}</td>
-       <td><span class="led ${m.online?'on':'off'}">${m.online?'ON':'OFF'}</span>${m.not_reset?' <span class="pill" style="background:var(--off,#c33);color:#fff" title="Windows started from the SSD without a PXE boot at '+new Date(m.not_reset*1000).toLocaleString()+' — this session was NOT reset (cable out, server down, boot order changed?). Cleared by the next PXE boot.">not reset</span>':''}${m.ssd_low?' <span class="pill" style="background:var(--off,#c33);color:#fff" title="SSD almost full during the session: '+gbs(m.ssd_low[0])+' free at '+new Date(m.ssd_low[1]*1000).toLocaleString()+' (the guest wrote a lot; Settings → SSD room). Cleared by the next PXE boot.">SSD full</span>':''}</td>
+       <td><span class="led ${m.online?'on':'off'}">${m.online?'ON':'OFF'}</span>${m.not_reset?' <span class="pill" style="background:var(--off,#c33);color:#fff" title="Windows started from the SSD without a PXE boot at '+new Date(m.not_reset*1000).toLocaleString()+' â€” this session was NOT reset (cable out, server down, boot order changed?). Cleared by the next PXE boot.">not reset</span>':''}${m.ssd_low?' <span class="pill" style="background:var(--off,#c33);color:#fff" title="SSD almost full during the session: '+gbs(m.ssd_low[0])+' free at '+new Date(m.ssd_low[1]*1000).toLocaleString()+' (the guest wrote a lot; Settings â†’ SSD room). Cleared by the next PXE boot.">SSD full</span>':''}</td>
        <td class="mono" title="${esc(m.license_result||'')}">${licCell(m)}</td>
        <td class="row">${m.registered
           ? `<button class="ghost" ${act('wake',m.mac)}>Wake</button>
@@ -93,7 +93,7 @@ async function regMachine(mac,ip,host){
 }
 // Whichever machine page is open reloads after a change (Machines = quick dashboard, Devices = management).
 function refreshMachines(){return curPage==='devices'?loadDevices():loadStatus();}
-// Machines → Devices page with this machine's detail open.
+// Machines â†’ Devices page with this machine's detail open.
 function manage(id){dvPending=id;history.pushState(null,'','/devices');showPage('devices');}
 async function wake(mac){await j('/api/wake',mk({mac}));toast('WOL sent to '+mac)}
 // Windows license key: handed out ONCE to the machine's IP when its base is rebuilt (next boot). The full key +
@@ -102,12 +102,12 @@ const KEY_RULE='License key: 25 letters/digits as XXXXX-XXXXX-XXXXX-XXXXX-XXXXX 
 const keyOk=k=>/^[A-Z0-9]{5}(-[A-Z0-9]{5}){4}$/.test(k);
 // Compact by default (lists): state + masked key tail + badge, full result on hover (title). full=true (detail
 // page only): whole key + the full activation result inline.
-function licCell(m,full){if(!m.license_tail)return '—';
+function licCell(m,full){if(!m.license_tail)return 'â€”';
   const ok=/activated successfully/i.test(m.license_result||'');
-  const badge=ok?' <span class="ok">✓</span>':licErr(m)?' <span class="pill new">error</span>':'';
-  if(!full)return `${esc(m.license_state||'')} …${esc(m.license_tail)}${badge}`;
+  const badge=ok?' <span class="ok">âœ“</span>':licErr(m)?' <span class="pill new">error</span>':'';
+  if(!full)return `${esc(m.license_state||'')} â€¦${esc(m.license_tail)}${badge}`;
   const res=m.license_result?`<div class="mono" style="white-space:pre-wrap;color:var(--muted);margin-top:4px">${esc(m.license_result)}</div>`:'';
-  return `${esc(m.license_state||'')} ${esc(m.license_key||('…'+m.license_tail))}${badge}${res}`;}
+  return `${esc(m.license_state||'')} ${esc(m.license_key||('â€¦'+m.license_tail))}${badge}${res}`;}
 async function setKey(id,who){
   let k='';
   do{k=prompt('Windows license key for '+who+(k===''||keyOk(k)?'':'\n'+KEY_RULE)+':',k);if(k===null)return;k=k.trim().toUpperCase();}
@@ -141,10 +141,10 @@ function dvRender(){
   const rows=dvFiltered(), tb=document.querySelector('#devices tbody'); if(!tb)return;
   tb.innerHTML=rows.map(m=>`<tr class="${dvOpenId&&m.id===dvOpenId?'sel':''}" ${m.registered?`${act('dvOpen',m.id)} style="cursor:pointer"`:''}>
       <td data-click="noop"><input type="checkbox" ${dvSel.has(dvKey(m))?'checked':''} data-change="dvToggle" data-args="${esc(JSON.stringify([dvKey(m)]))}"></td>
-      <td>${m.hostname?esc(m.hostname):'<span class="mono">—</span>'} ${m.registered?'':'<span class="pill new">new</span>'}</td>
-      <td class="mono">${esc(m.grp||'—')}</td><td class="mono">${esc(m.ip)}</td><td class="mono">${esc(m.mac)}</td>
+      <td>${m.hostname?esc(m.hostname):'<span class="mono">â€”</span>'} ${m.registered?'':'<span class="pill new">new</span>'}</td>
+      <td class="mono">${esc(m.grp||'â€”')}</td><td class="mono">${esc(m.ip)}</td><td class="mono">${esc(m.mac)}</td>
       <td><span class="led ${m.online?'on':'off'}">${m.online?'ON':'OFF'}</span></td>
-      <td class="mono">${esc(imgName(m.image_id)||'—')}</td>
+      <td class="mono">${esc(imgName(m.image_id)||'â€”')}</td>
       <td class="mono" title="${esc(m.license_result||'')}">${licCell(m)}</td>
       <td style="white-space:normal">${esc(m.notes||'')}</td></tr>`).join('')
     ||'<tr><td colspan=9 class="mono">no matching machines</td></tr>';
@@ -162,31 +162,31 @@ async function dvBulk(action){
   if(action==='group'){value=v('dv_bulk_grp');if(value&&!/^[A-Za-z0-9_-]{1,32}$/.test(value)){toast('Group: letters/digits/_/-, max 32',true);return;}}
   if(action==='image')value=document.getElementById('dv_bulk_img').value;
   if(action==='delete'&&!confirm('Delete '+reg.length+' machine(s)? Their DHCP binding and license key go too.'))return;
-  try{const r=await j('/api/machines/bulk',mk({ids:reg.map(m=>m.id),action,value}));dvMsg('✓ '+action+': '+r.count+' machine(s)');
+  try{const r=await j('/api/machines/bulk',mk({ids:reg.map(m=>m.id),action,value}));dvMsg('âœ“ '+action+': '+r.count+' machine(s)');
     if(action==='delete'){dvSel.clear();dvClose();}loadDevices();}
-  catch(e){dvMsg('✗ '+e.message);}
+  catch(e){dvMsg('âœ— '+e.message);}
 }
 async function dvRegister(){
   const macs=dvPicked().filter(m=>!m.registered).map(m=>m.mac);
   if(!macs.length){toast('Select NEW machines (not registered yet)',true);return;}
   try{const r=await j('/api/machines/register-bulk',mk({macs,prefix:v('dv_prefix'),start:+v('dv_start')||1,digits:+document.getElementById('dv_digits').value}));
-    dvMsg('✓ registered: '+r.registered.map(x=>x.hostname+' ('+x.mac+')').join(', ')+'\nReboot them to get their IP/name.');dvSel.clear();loadDevices();}
-  catch(e){dvMsg('✗ '+e.message);}
+    dvMsg('âœ“ registered: '+r.registered.map(x=>x.hostname+' ('+x.mac+')').join(', ')+'\nReboot them to get their IP/name.');dvSel.clear();loadDevices();}
+  catch(e){dvMsg('âœ— '+e.message);}
 }
 async function dvImport(input){
   const f=input.files[0];input.value='';if(!f)return;
   try{const r=await fetch('/api/machines/import',{method:'POST',headers:{'content-type':'text/csv'},body:await f.text()});
     const t=await r.text();
-    if(!r.ok){dvMsg('✗ import refused, nothing was written:\n'+t);return;}
-    const o=JSON.parse(t);dvMsg('✓ import: '+o.added+' added, '+o.updated+' updated, '+o.keys+' license key(s) set');loadDevices();}
-  catch(e){dvMsg('✗ '+e.message);}
+    if(!r.ok){dvMsg('âœ— import refused, nothing was written:\n'+t);return;}
+    const o=JSON.parse(t);dvMsg('âœ“ import: '+o.added+' added, '+o.updated+' updated, '+o.keys+' license key(s) set');loadDevices();}
+  catch(e){dvMsg('âœ— '+e.message);}
 }
 async function dvAdd(){
   const mac=v('dv_add_mac'),ip=v('dv_add_ip')||null,hostname=v('dv_add_host')||null;
   if(!mac){toast('Enter a MAC',true);return;}
-  if(hostname&&!hostOk(hostname)){dvMsg('✗ '+HOST_RULE);return;}
-  try{await j('/api/machines',mk({mac,ip,hostname}));dvMsg('✓ added');['dv_add_mac','dv_add_ip','dv_add_host'].forEach(i=>document.getElementById(i).value='');loadDevices();}
-  catch(e){dvMsg('✗ '+e.message);}
+  if(hostname&&!hostOk(hostname)){dvMsg('âœ— '+HOST_RULE);return;}
+  try{await j('/api/machines',mk({mac,ip,hostname}));dvMsg('âœ“ added');['dv_add_mac','dv_add_ip','dv_add_host'].forEach(i=>document.getElementById(i).value='');loadDevices();}
+  catch(e){dvMsg('âœ— '+e.message);}
 }
 async function dvOpen(id){
   const box=document.getElementById('dv_detail'); if(!box)return;
@@ -195,7 +195,7 @@ async function dvOpen(id){
   const m=d.machine; m.license_key=d.license_key; // key is skip-serialized on machine; detail returns it separately
   const name=m.hostname||m.mac, who=esc(name), st=dvAll.find(x=>x.id===id)||{};
   const opt=dvImages.map(i=>`<option value="${i.id}" ${i.id===m.image_id?'selected':''}>${esc(i.name)}</option>`).join('');
-  const lease=d.lease?esc(d.lease.ip||'—')+' · '+esc(d.lease.source)+' · '+(d.lease.expires_in>0?'expires in '+Math.round(d.lease.expires_in/60)+' min':'expired'):'—';
+  const lease=d.lease?esc(d.lease.ip||'â€”')+' Â· '+esc(d.lease.source)+' Â· '+(d.lease.expires_in>0?'expires in '+Math.round(d.lease.expires_in/60)+' min':'expired'):'â€”';
   box.hidden=false;
   box.innerHTML=`<h2>${who} &nbsp;<span class="led ${st.online?'on':'off'}">${st.online?'ON':'OFF'}</span></h2>
     <div class="row">
@@ -218,10 +218,10 @@ async function dvOpen(id){
     <table style="margin-top:12px"><tbody>
       <tr><td class="mono">Lease</td><td class="mono">${lease}</td></tr>
       <tr><td class="mono">License</td><td class="mono" style="white-space:normal">${licCell(m,true)}</td></tr>
-      <tr><td class="mono">Driver packages</td><td class="mono">${d.drivers.length?esc(d.drivers.join(', ')):'—'}</td></tr>
+      <tr><td class="mono">Driver packages</td><td class="mono">${d.drivers.length?esc(d.drivers.join(', ')):'â€”'}</td></tr>
       <tr><td class="mono">Hardware (${d.hwids.length})</td><td class="mono" style="white-space:normal">${d.hwids.length
         ?`<details><summary>IDs its stage reported at the last boot</summary>${d.hwids.map(esc).join('<br>')}</details>`
-        :'— (no Windows boot since this was added)'}</td></tr>
+        :'â€” (no Windows boot since this was added)'}</td></tr>
     </tbody></table>`;
   dvRender();
 }
@@ -229,9 +229,9 @@ function dvClose(){dvOpenId=null;const b=document.getElementById('dv_detail');if
 async function dvSave(id){
   const img=document.getElementById('dd_img').value, msg=document.getElementById('dd_msg');
   const body={id,mac:v('dd_mac'),ip:v('dd_ip')||null,hostname:v('dd_host')||null,grp:v('dd_grp')||null,notes:v('dd_notes')||null,image_id:img?+img:null};
-  if(body.hostname&&!hostOk(body.hostname)){msg.textContent=' ✗ '+HOST_RULE;return;}
-  try{await j('/api/machines/update',mk(body));msg.textContent=' ✓ saved';loadDevices();}
-  catch(e){msg.textContent=' ✗ '+e.message;}
+  if(body.hostname&&!hostOk(body.hostname)){msg.textContent=' âœ— '+HOST_RULE;return;}
+  try{await j('/api/machines/update',mk(body));msg.textContent=' âœ“ saved';loadDevices();}
+  catch(e){msg.textContent=' âœ— '+e.message;}
 }
 async function dvDelete(id,who){if(!confirm('Delete '+who+'? Its DHCP binding and license key go too.'))return;
   try{await j('/api/machines/delete',mk({ids:[id]}));dvClose();loadDevices();}catch(e){toast(e.message,true);}}
@@ -242,17 +242,17 @@ let imgRows=[];
 async function loadImages(){
   const rows=imgRows=await j('/api/images');
   document.querySelector('#images tbody').innerHTML=rows.map(i=>
-    `<tr><td>${esc(i.name)}${i.export?`<div class="mono" style="font-size:12px" title="exported ${i.export.created?new Date(i.export.created*1000).toLocaleString():''} — save both into one folder, open the .vmx in VMware">⬇ <a href="/api/images/export-file?id=${i.id}&f=vmx">.vmx</a> · <a href="/api/images/export-file?id=${i.id}&f=vmdk">.vmdk ${gbs(i.export.size)}</a> (${esc(i.export.version)})</div>`:''}</td><td><span class="pill ${i.os}">${esc(i.os)}</span></td>
+    `<tr><td>${esc(i.name)}${i.export?`<div class="mono" style="font-size:12px" title="exported ${i.export.created?new Date(i.export.created*1000).toLocaleString():''} â€” save both into one folder, open the .vmx in VMware">â¬‡ <a href="/api/images/export-file?id=${i.id}&f=vmx">.vmx</a> Â· <a href="/api/images/export-file?id=${i.id}&f=vmdk">.vmdk ${gbs(i.export.size)}</a> (${esc(i.export.version)})</div>`:''}</td><td><span class="pill ${i.os}">${esc(i.os)}</span></td>
        <td><a href="#" ${act('editImgGroups',i.id,i.name,i.groups)} title="machine groups that get it in their boot menu">${i.groups.length?esc(i.groups.join(', ')):'all'}</a></td>
        <td class="mono">${i.cache_mode==='zram'?'RAM':'disk'}</td>
-       <td>${i.is_default?'<span class="ok">✓</span>':''}</td>
-       <td>${i.boot_script?'<span class="ok">✓</span>':'<span class="mono">no</span>'}</td>
-       <td class="mono" title="used on disk / virtual disk">${i.size==null?'—':gbs(i.used)+' / '+gbs(i.size)}${i.active_version?' <span class="pill linux">'+esc(i.active_version)+'</span>':''}</td>
-       <td class="mono" title="${esc(i.hash||'')}">${i.hash?esc(i.hash).slice(0,10):'—'}</td>
+       <td>${i.is_default?'<span class="ok">âœ“</span>':''}</td>
+       <td>${i.boot_script?'<span class="ok">âœ“</span>':'<span class="mono">no</span>'}</td>
+       <td class="mono" title="used on disk / virtual disk">${i.size==null?'â€”':gbs(i.used)+' / '+gbs(i.size)}${i.active_version?' <span class="pill linux">'+esc(i.active_version)+'</span>':''}</td>
+       <td class="mono" title="${esc(i.hash||'')}">${i.hash?esc(i.hash).slice(0,10):'â€”'}</td>
        <td class="row">
          <button class="ghost" ${act('setDefault',i.id)}>Default</button>
-         <button class="ghost" ${act('toggleCache',i.id,i.cache_mode||'disk',i.name)}>${(i.cache_mode==='zram')?'→disk':'→RAM'}</button>
-         ${i.os==='windows'?`<button class="ghost" ${act('toggleBase',i.id,!i.base_mode)} title="BASE MODE: the first logon on each machine waits for a technician to set up apps, then restart (saved for every boot). Off: base is saved by itself.">${i.base_mode?'Base mode: ON':'Base mode: off'}</button>`:`<button class="ghost" ${act('toggleSsd',i.id,!i.use_ssd)} title="On: the golden is cached and the session's writes go to the machine's SSD (reset every boot). Off (one-time): nothing touches the SSD — golden over the network, writes in RAM, gone at power-off.">${i.use_ssd?'SSD: on':'SSD: off (one-time)'}</button>`}
+         <button class="ghost" ${act('toggleCache',i.id,i.cache_mode||'disk',i.name)}>${(i.cache_mode==='zram')?'â†’disk':'â†’RAM'}</button>
+         ${i.os==='windows'?`<button class="ghost" ${act('toggleBase',i.id,!i.base_mode)} title="BASE MODE: the first logon on each machine waits for a technician to set up apps, then restart (saved for every boot). Off: base is saved by itself.">${i.base_mode?'Base mode: ON':'Base mode: off'}</button>`:`<button class="ghost" ${act('toggleSsd',i.id,!i.use_ssd)} title="On: the golden is cached and the session's writes go to the machine's SSD (reset every boot). Off (one-time): nothing touches the SSD â€” golden over the network, writes in RAM, gone at power-off.">${i.use_ssd?'SSD: on':'SSD: off (one-time)'}</button>`}
          ${i.os==='windows'?`<button class="ghost" ${act('togglePreload',i.id,!i.preload)} title="On: every machine that may boot it keeps it on its SSD ahead of use (fetched while another image boots: that boot takes longer once), so choosing it needs no download (its base is still built on its first boot). Off: fetched the first time it is chosen.">${i.preload?'Preload: on':'Preload: off'}</button>`:''}
          <button class="ghost" ${act('republish',i.id,i.name)}>Republish</button>
          <button class="ghost" ${act('showVersions',i.id,i.name,i.os)}>Versions</button>
@@ -260,43 +260,43 @@ async function loadImages(){
          <button class="ghost" ${act('editBoot',i.id)}>Boot</button>
          <button class="ghost danger" ${act('delImage',i.id,i.name)}>Delete</button>
        </td></tr>`).join('') || '<tr><td colspan=9 class="mono">no images yet</td></tr>';
-  // A job still running that this tab doesn't follow (page reloaded / opened meanwhile) → follow it on the status line.
-  for(const i of rows)if(i.job&&i.job.startsWith('⏳')&&!jobWatch[i.name])watchJob(i.name,document.getElementById('img_status'));
-  // srvhost inside the images fragment → set after it is injected.
+  // A job still running that this tab doesn't follow (page reloaded / opened meanwhile) â†’ follow it on the status line.
+  for(const i of rows)if(i.job&&i.job.startsWith('â³')&&!jobWatch[i.name])watchJob(i.name,document.getElementById('img_status'));
+  // srvhost inside the images fragment â†’ set after it is injected.
   for(const id of ['srvhost2','srvhost3']){const e=document.getElementById(id);if(e)e.textContent=location.host;}
 }
 async function toggleCache(id,cur,name){const mode=cur==='zram'?'disk':'zram';
   if(!confirm('Switch image cache to "'+(mode==='zram'?'RAM':'disk')+'"? (republish; RAM keeps a compressed copy of the golden in memory and serves clients from it)'))return;
   const el=document.getElementById('img_status');
-  try{await j('/api/images/cache-mode',mk({id,mode}));watchJob(name,el);}catch(e){el.textContent=' ✗ '+e.message;}}
+  try{await j('/api/images/cache-mode',mk({id,mode}));watchJob(name,el);}catch(e){el.textContent=' âœ— '+e.message;}}
 async function toggleBase(id,on){
-  if(on&&!confirm('BASE MODE: every machine that builds its base (first boot, new golden, rename, drivers) will wait on the desktop until someone restarts it — whatever is done before that restart is kept for good. Turn on?'))return;
+  if(on&&!confirm('BASE MODE: every machine that builds its base (first boot, new golden, rename, drivers) will wait on the desktop until someone restarts it â€” whatever is done before that restart is kept for good. Turn on?'))return;
   const el=document.getElementById('img_status');
-  try{await j('/api/images/base-mode',mk({id,on}));loadImages();}catch(e){el.textContent=' ✗ '+e.message;}}
+  try{await j('/api/images/base-mode',mk({id,on}));loadImages();}catch(e){el.textContent=' âœ— '+e.message;}}
 async function toggleSsd(id,on){
   const el=document.getElementById('img_status');
-  try{await j('/api/images/ssd',mk({id,on}));loadImages();}catch(e){el.textContent=' ✗ '+e.message;}}
+  try{await j('/api/images/ssd',mk({id,on}));loadImages();}catch(e){el.textContent=' âœ— '+e.message;}}
 async function togglePreload(id,on){
   const el=document.getElementById('img_status');
-  try{await j('/api/images/preload',mk({id,on}));loadImages();}catch(e){el.textContent=' ✗ '+e.message;}}
+  try{await j('/api/images/preload',mk({id,on}));loadImages();}catch(e){el.textContent=' âœ— '+e.message;}}
 async function editImgGroups(id,name,groups,el,e){e.preventDefault();
   const g=prompt('Machine groups that get '+name+' in their boot menu, comma-separated (Devices page groups). Empty = every machine:',groups.join(', '));
   if(g===null)return;const st=document.getElementById('img_status');
-  try{await j('/api/images/groups',mk({id,groups:[g]}));loadImages();}catch(err){st.textContent=' ✗ '+err.message;}}
+  try{await j('/api/images/groups',mk({id,groups:[g]}));loadImages();}catch(err){st.textContent=' âœ— '+err.message;}}
 async function setDefault(id){await j('/api/images/default',mk({id}));loadImages()}
-// Job status by image name, pushed over SSE (/api/events "job") → text of el until ✓/✗.
+// Job status by image name, pushed over SSE (/api/events "job") â†’ text of el until âœ“/âœ—.
 // done(): optional, called when the job finishes (e.g. refresh the versions list).
 const jobWatch={};
 function showJob(name,s){const w=jobWatch[name];if(!w||!s)return;
   // The page may have been rebuilt since the watch started (tab switch): then the Images page's status line.
   const el=w.el.isConnected?w.el:document.getElementById(name.startsWith('bench:')?'bench_msg':'img_status');
   if(el)el.textContent=' '+(el===w.el?'':name+': ')+s;
-  if(s.startsWith('✓')||s.startsWith('✗')){delete jobWatch[name];
-    if(curPage==='images')loadImages().then(()=>{   // an open Versions panel of this image follows too (new v1, rollback…)
+  if(s.startsWith('âœ“')||s.startsWith('âœ—')){delete jobWatch[name];
+    if(curPage==='images')loadImages().then(()=>{   // an open Versions panel of this image follows too (new v1, rollbackâ€¦)
       const r=imgRows.find(x=>x.name===name);if(r&&verImg&&verImg.name===name)showVersions(r.id,r.name,r.os);}).catch(()=>{});
     if(w.done)w.done();}}
 function watchJob(name,el,done){
-  el.textContent=' ⏳ working...';jobWatch[name]={el,done};
+  el.textContent=' â³ working...';jobWatch[name]={el,done};
   // catch up once: the job may have moved on (or finished) before this tab started watching
   j('/api/images/job?name='+encodeURIComponent(name)).then(r=>showJob(name,r.status)).catch(()=>{});
 }
@@ -304,38 +304,38 @@ function watchJob(name,el,done){
 let verImg=null;
 async function showVersions(id,name,os){verImg={id,name,os};
   const el=document.getElementById('img_versions');
-  el.innerHTML=`<h2>Versions — ${esc(name)}</h2><p class="mono">⏳ loading...</p>`;
+  el.innerHTML=`<h2>Versions â€” ${esc(name)}</h2><p class="mono">â³ loading...</p>`;
   const r=await j('/api/images/snapshots?id='+id);
-  el.innerHTML=`<h2>Versions — ${esc(name)} <button class="ghost" ${act('snapshotImage')}>+ Snapshot now</button></h2>
+  el.innerHTML=`<h2>Versions â€” ${esc(name)} <button class="ghost" ${act('snapshotImage')}>+ Snapshot now</button></h2>
     <div class="scroll"><table><thead><tr><th>Version</th><th>Label</th><th>Created</th><th title="same = this version is the golden being served now">vs current golden</th><th></th></tr></thead><tbody>${
     r.versions.map(v=>`<tr><td class="mono">${esc(v.version)} ${v.version===r.active?'<span class="pill linux">active</span>':''}</td>
-      <td>${esc(v.label)}</td><td class="mono">${new Date(v.created*1000).toLocaleString()}</td><td class="mono" title="disk size ${gbs(v.size)}">${v.diff==null?'<span title="another golden than the one served now">—</span>':v.diff?'Δ '+gbs(v.diff):'same'}</td>
+      <td>${esc(v.label)}</td><td class="mono">${new Date(v.created*1000).toLocaleString()}</td><td class="mono" title="disk size ${gbs(v.size)}">${v.diff==null?'<span title="another golden than the one served now">â€”</span>':v.diff?'Î” '+gbs(v.diff):'same'}</td>
       <td class="row"><button class="ghost" ${act('rollbackImage',v.version)}>Rollback</button>
         <button class="ghost" ${act('exportImage',id,name,v.version)}>Export</button>
-        <button class="ghost" ${act('versionToImage',v.version)} title="add this version as a new image on the list">→ New image</button>
+        <button class="ghost" ${act('versionToImage',v.version)} title="add this version as a new image on the list">â†’ New image</button>
         <button class="ghost danger" ${act('deleteVersion',v.version)}>Delete</button></td></tr>`).join('')
-    || '<tr><td colspan=5 class="mono">no versions yet — Snapshot now saves the current golden</td></tr>'}</tbody></table></div>`;}
+    || '<tr><td colspan=5 class="mono">no versions yet â€” Snapshot now saves the current golden</td></tr>'}</tbody></table></div>`;}
 async function snapshotImage(){const label=prompt('Label for this version (optional):','');if(label===null)return;
   const el=document.getElementById('img_status');
-  try{await j('/api/images/snapshot',mk({id:verImg.id,label}));watchJob(verImg.name,el,()=>showVersions(verImg.id,verImg.name,verImg.os));}catch(e){el.textContent=' ✗ '+e.message;}}
+  try{await j('/api/images/snapshot',mk({id:verImg.id,label}));watchJob(verImg.name,el,()=>showVersions(verImg.id,verImg.name,verImg.os));}catch(e){el.textContent=' âœ— '+e.message;}}
 async function rollbackImage(version){
   if(!confirm('Roll '+verImg.name+' back to '+version+'?'+(verImg.os==='windows'?' Every client will download the golden again.':' Running clients lose their iSCSI disk until publish finishes.')))return;
   const el=document.getElementById('img_status');
-  try{await j('/api/images/rollback',mk({id:verImg.id,version}));watchJob(verImg.name,el,()=>showVersions(verImg.id,verImg.name,verImg.os));}catch(e){el.textContent=' ✗ '+e.message;}}
+  try{await j('/api/images/rollback',mk({id:verImg.id,version}));watchJob(verImg.name,el,()=>showVersions(verImg.id,verImg.name,verImg.os));}catch(e){el.textContent=' âœ— '+e.message;}}
 async function deleteVersion(version){if(!confirm('Delete version '+version+' of '+verImg.name+'?'))return;
   try{await j('/api/images/version-delete',mk({id:verImg.id,version}));}catch(e){toast(e.message,true);}
   showVersions(verImg.id,verImg.name,verImg.os);}
 async function exportImage(id,name,version){
-  if(!confirm('Export '+name+(version?' '+version:' (current golden)')+' as a VMware VM (.vmx + .vmdk)?\nNeeds free disk space on the server ≈ the golden size; replaces the previous export of this image.'))return;
+  if(!confirm('Export '+name+(version?' '+version:' (current golden)')+' as a VMware VM (.vmx + .vmdk)?\nNeeds free disk space on the server â‰ˆ the golden size; replaces the previous export of this image.'))return;
   const el=document.getElementById('img_status');
-  try{await j('/api/images/export',mk({id,version}));watchJob(name,el);}catch(e){el.textContent=' ✗ '+e.message;}}
+  try{await j('/api/images/export',mk({id,version}));watchJob(name,el);}catch(e){el.textContent=' âœ— '+e.message;}}
 async function versionToImage(version){
   const name=prompt('New image name for '+verImg.name+' '+version+' (letters, digits, _ -):',verImg.name+'-'+version);
   if(!name)return;
   const el=document.getElementById('img_status');
-  try{await j('/api/images/from-version',mk({id:verImg.id,version,name}));loadImages();watchJob(name,el);}catch(e){el.textContent=' ✗ '+e.message;}}
+  try{await j('/api/images/from-version',mk({id:verImg.id,version,name}));loadImages();watchJob(name,el);}catch(e){el.textContent=' âœ— '+e.message;}}
 async function republish(id,name){const el=document.getElementById('img_status');
-  try{await j('/api/images/publish',mk({id}));watchJob(name,el);}catch(e){el.textContent=' ✗ '+e.message;}}
+  try{await j('/api/images/publish',mk({id}));watchJob(name,el);}catch(e){el.textContent=' âœ— '+e.message;}}
 async function editBoot(id){const cur=(imgRows.find(i=>i.id===id)||{}).boot_script||'';const s=prompt('iPXE boot script:',cur);if(s===null)return;
   await j('/api/images/boot-script',mk({id,boot_script:s}));loadImages();}
 async function delImage(id,name){if(!confirm('Delete image "'+name+'"?'))return;
@@ -359,11 +359,11 @@ async function uploadFiles(api,name,files,prog,msg){
   const total=files.reduce((s,f)=>s+f.size,0)||1,t0=Date.now();let done=0;
   prog.style.display='';prog.value=0;
   const lane=async()=>{while(q.length){const [f,o]=q.shift();
-    try{await putChunk(api,name,f,o);}catch(e){q.length=0;throw e;}   // one piece failed for good → stop all lanes
+    try{await putChunk(api,name,f,o);}catch(e){q.length=0;throw e;}   // one piece failed for good â†’ stop all lanes
     done+=Math.min(CHUNK,f.size-o);prog.value=done/total*100;
-    msg.textContent=' upload '+Math.round(done/total*100)+'% · '+(done/1e6/Math.max(1,(Date.now()-t0)/1000)).toFixed(0)+' MB/s';}};
+    msg.textContent=' upload '+Math.round(done/total*100)+'% Â· '+(done/1e6/Math.max(1,(Date.now()-t0)/1000)).toFixed(0)+' MB/s';}};
   await Promise.all(Array.from({length:LANES},lane));
-  msg.textContent=' upload 100% — finishing on the server…';   // driver packages: unzip + read .inf + pack
+  msg.textContent=' upload 100% â€” finishing on the serverâ€¦';   // driver packages: unzip + read .inf + pack
   return j(api+'/upload-done',mk({name}));
 }
 async function addImage(){
@@ -374,17 +374,17 @@ async function addImage(){
   const os=document.getElementById('up_os').value;
   try{await j('/api/images',mk({name,os,cache_mode:cache}));}catch(e){}
   try{await uploadFiles('/api/images',name,files,document.getElementById('up_prog'),msg);}
-  catch(e){msg.textContent=' ✗ '+e.message;return;}
-  msg.textContent=' ✓ upload done';loadImages();watchJob(name,msg);   // convert + publish run in the background → SSE
+  catch(e){msg.textContent=' âœ— '+e.message;return;}
+  msg.textContent=' âœ“ upload done';loadImages();watchJob(name,msg);   // convert + publish run in the background â†’ SSE
 }
 
-// ---- driver packages (drivers.rs): .zip of an extracted driver folder → installed into base by broom-done ----
+// ---- driver packages (drivers.rs): .zip of an extracted driver folder â†’ installed into base by broom-done ----
 async function loadDrivers(){
   const rows=await j('/api/drivers');
   document.querySelector('#drivers tbody').innerHTML=rows.map(d=>
     `<tr><td>${esc(d.name)}</td><td class="mono">${gbs(d.size)}</td>
-       <td class="mono" title="${esc(d.hwids.slice(0,40).join('\n'))}${d.hwids.length>40?'\n…':''}">${d.hwids.length}</td>
-       <td class="mono" style="white-space:normal">${d.machines.length?esc(d.machines.join(', ')):'—'}</td>
+       <td class="mono" title="${esc(d.hwids.slice(0,40).join('\n'))}${d.hwids.length>40?'\nâ€¦':''}">${d.hwids.length}</td>
+       <td class="mono" style="white-space:normal">${d.machines.length?esc(d.machines.join(', ')):'â€”'}</td>
        <td><input type="checkbox" id="drv_all_${d.id}" ${d.all_machines?'checked':''}></td>
        <td><input id="drv_grp_${d.id}" value="${esc(d.groups.join(', '))}" placeholder="VIP, Pro" size="12"></td>
        <td class="row"><button class="ghost" ${act('saveDrvTargets',d.id)}>Save</button>
@@ -396,8 +396,8 @@ async function uploadDriver(){
   const name=v('drv_name')||(f?f.name.replace(/\.zip$/i,'').replace(/[^A-Za-z0-9_-]/g,'-'):'');
   if(!f){toast('Choose the .zip of an extracted driver folder',true);return;}
   try{const r=await uploadFiles('/api/drivers',name,[f],document.getElementById('drv_prog'),msg);
-    msg.textContent=' ✓ '+name+': '+r.infs+' .inf, '+r.hwids+' hardware IDs';loadDrivers();}
-  catch(e){msg.textContent=' ✗ '+e.message;}
+    msg.textContent=' âœ“ '+name+': '+r.infs+' .inf, '+r.hwids+' hardware IDs';loadDrivers();}
+  catch(e){msg.textContent=' âœ— '+e.message;}
 }
 async function saveDrvTargets(id){
   const all_machines=document.getElementById('drv_all_'+id).checked, groups=document.getElementById('drv_grp_'+id).value;
@@ -409,7 +409,7 @@ async function delDriver(id,name){if(!confirm('Delete driver package "'+name+'"?
 // DNS servers: one box each (order = preference), up to 8; sent to the server as one comma-separated list.
 const DNS_MAX=8;
 function dnsBox(v){const w=document.createElement('span');w.style.cssText='display:inline-flex;gap:2px';
-  w.innerHTML='<input class="dns" size="14" placeholder="e.g. 1.1.1.1"><button type="button" class="ghost" title="remove">×</button>';
+  w.innerHTML='<input class="dns" size="14" placeholder="e.g. 1.1.1.1"><button type="button" class="ghost" title="remove">Ã—</button>';
   w.querySelector('input').value=v||'';w.querySelector('button').onclick=()=>{w.remove();dnsButton();};return w;}
 function dnsButton(){const l=document.getElementById('dns_list');if(!l)return;let b=document.getElementById('dns_add');
   if(!b){b=document.createElement('button');b.id='dns_add';b.type='button';b.className='ghost';b.textContent='+ DNS';
@@ -430,27 +430,27 @@ async function applyDhcp(){const b={};['mode','iface','server_ip','subnet','netm
   for(const k of ['ipxe_signed','strict_reset','rapid_commit','ipxe_fast','authoritative','send_hostname']){const e=document.getElementById('dhcp_'+k);if(e)b[k]=e.checked?'1':'0';}
   b.dns=getDns();
   const m=document.getElementById('dhcp_msg');
-  try{const r=await j('/api/dhcp',mk(b));m.textContent=' ✓ '+(r.status||'applied');}catch(e){m.textContent=' ✗ '+e.message;}}
+  try{const r=await j('/api/dhcp',mk(b));m.textContent=' âœ“ '+(r.status||'applied');}catch(e){m.textContent=' âœ— '+e.message;}}
 
 // ---- games disks (Images page) ----
 let gmDisks=[];
 async function loadGames(){const g=await j('/api/games');const tb=document.querySelector('#games tbody');if(!tb)return;
   gmDisks=g.disks;
   document.getElementById('gm_grouplist').innerHTML=g.groups.map(x=>`<option value="${esc(x)}">`).join('');
-  const opts=sel=>'<option value="">— none —</option>'+g.machines.map(m=>
+  const opts=sel=>'<option value="">â€” none â€”</option>'+g.machines.map(m=>
     `<option value="${m.id}"${m.id===sel?' selected':''}>${esc(m.name)}${m.grp?' ('+esc(m.grp)+')':''}</option>`).join('');
   tb.innerHTML=g.disks.map(x=>{const d=x.disk,s=x.status;
     return `<tr><td>${esc(d.name)}</td><td class="mono">${esc(d.letter)}:</td><td class="mono">${d.size_gb} GB</td>
       <td>${d.groups.length?esc(d.groups.join(', ')):'<span class="mono">all</span>'}</td>
-      <td class="mono">${s?'g'+s.ver+(s.layers?` <span title="versions not merged into the disk yet (${gbs(s.layer_bytes)})">+${s.layers} ${s.merging?'merging…':'to merge'}</span>`:''):'<span class="no">not served</span>'}</td>
+      <td class="mono">${s?'g'+s.ver+(s.layers?` <span title="versions not merged into the disk yet (${gbs(s.layer_bytes)})">+${s.layers} ${s.merging?'mergingâ€¦':'to merge'}</span>`:''):'<span class="no">not served</span>'}</td>
       <td class="mono">${s?s.sessions+(s.old_sessions?` <span title="still on an older version until they reboot">(${s.old_sessions} older)</span>`:''):''}</td>
-      <td><select data-change="setGamesUpdate" data-args="${esc(JSON.stringify([d.name]))}">${opts(d.update)}</select>${d.update!=null&&!x.update_ip?' <span class="no" title="no fixed IP or lease known">no IP</span>':''}${s&&s.update_connected?' <span class="ok">● writable</span>':''}</td>
-      <td class="mono">${s&&s.update_bytes?gbs(s.update_bytes)+` <button ${act('saveGamesUpdate',d.name)}>Save</button> <button class="ghost" ${act('discardGamesUpdate',d.name)}>Discard</button>`:'—'}</td>
+      <td><select data-change="setGamesUpdate" data-args="${esc(JSON.stringify([d.name]))}">${opts(d.update)}</select>${d.update!=null&&!x.update_ip?' <span class="no" title="no fixed IP or lease known">no IP</span>':''}${s&&s.update_connected?' <span class="ok">â— writable</span>':''}</td>
+      <td class="mono">${s&&s.update_bytes?gbs(s.update_bytes)+` <button ${act('saveGamesUpdate',d.name)}>Save</button> <button class="ghost" ${act('discardGamesUpdate',d.name)}>Discard</button>`:'â€”'}</td>
       <td><button class="ghost" ${act('editGames',d.name)}>Edit</button> <button class="ghost" ${act('delGames',d.name)}>Delete</button></td></tr>`;}).join('')
     ||'<tr><td colspan="9" class="hint">no games disk yet</td></tr>';
-  const m=document.getElementById('gm_msg');if(m&&g.error)m.textContent=' ✗ not served: '+g.error;}
+  const m=document.getElementById('gm_msg');if(m&&g.error)m.textContent=' âœ— not served: '+g.error;}
 async function gamesCall(url,body,ask){if(ask&&!confirm(ask))return;const m=document.getElementById('gm_msg');
-  try{const r=await j(url,mk(body));m.textContent=' ✓ '+(r.status||'saved');}catch(e){m.textContent=' ✗ '+e.message;}loadGames();}
+  try{const r=await j(url,mk(body));m.textContent=' âœ“ '+(r.status||'saved');}catch(e){m.textContent=' âœ— '+e.message;}loadGames();}
 const saveGames=()=>gamesCall('/api/games/disk',{name:v('gm_name'),letter:v('gm_letter'),size_gb:+v('gm_size'),groups:[v('gm_groups')]});
 const setGamesUpdate=(name,el)=>gamesCall('/api/games/update',{name,id:el.value?+el.value:null});
 const saveGamesUpdate=name=>gamesCall('/api/games/save',{name},'Save the update of '+name+' as its new version? Its update machine must be shut down. Each machine gets it at its next boot.');
@@ -462,7 +462,7 @@ function editGames(name){const d=gmDisks.find(x=>x.disk.name===name).disk;
 // ---- groups (Groups page) ----
 let grData=null,grCur=null;
 const grIn=(x,n)=>x.groups.some(y=>y.toLowerCase()===n.toLowerCase());
-const grNames=l=>l.length?l.map(x=>esc(x.name)+(x.letter?' ('+esc(x.letter)+':)':'')).join(', '):'—';
+const grNames=l=>l.length?l.map(x=>esc(x.name)+(x.letter?' ('+esc(x.letter)+':)':'')).join(', '):'â€”';
 async function loadGroups(){const g=grData=await j('/api/groups');const tb=document.querySelector('#groups tbody');if(!tb)return;
   const cnt=n=>g.machines.filter(m=>(m.grp||'').toLowerCase()===n.toLowerCase()).length;
   tb.innerHTML=g.groups.map(n=>`<tr><td><b>${esc(n)}</b></td><td class="mono">${cnt(n)}</td>
@@ -474,26 +474,26 @@ async function loadGroups(){const g=grData=await j('/api/groups');const tb=docum
 function editGroup(n){if(!grData)return;grCur=n;const g=grData,lc=n.toLowerCase();
   document.getElementById('gr_edit').style.display='';document.getElementById('gr_title').textContent='Group '+n;document.getElementById('gr_emsg').textContent='';
   const box=(v,on,label,off,title)=>`<label style="display:block;white-space:nowrap"${title?` title="${esc(title)}"`:''}><input type="checkbox" data-v="${esc(String(v))}"${on?' checked':''}${off?' disabled':''}> ${label}</label>`;
-  const all=' <span class="mono">(every machine)</span>',allT='for every machine — limit it to groups on its own page';
+  const all=' <span class="mono">(every machine)</span>',allT='for every machine â€” limit it to groups on its own page';
   document.getElementById('gr_machines').innerHTML=g.machines.map(m=>box(m.id,(m.grp||'').toLowerCase()===lc,
-    esc(m.name)+(m.grp&&m.grp.toLowerCase()!==lc?` <span class="mono">(${esc(m.grp)})</span>`:''))).join('')||'—';
+    esc(m.name)+(m.grp&&m.grp.toLowerCase()!==lc?` <span class="mono">(${esc(m.grp)})</span>`:''))).join('')||'â€”';
   document.getElementById('gr_images').innerHTML=g.images.map(i=>box(i.id,!i.groups.length||grIn(i,n),
-    esc(i.name)+` <span class="pill ${esc(i.os)}">${esc(i.os)}</span>`+(i.groups.length?'':all),!i.groups.length,i.groups.length?'':allT)).join('')||'—';
+    esc(i.name)+` <span class="pill ${esc(i.os)}">${esc(i.os)}</span>`+(i.groups.length?'':all),!i.groups.length,i.groups.length?'':allT)).join('')||'â€”';
   document.getElementById('gr_disks').innerHTML=g.disks.map(d=>box(d.name,!d.groups.length||grIn(d,n),
-    esc(d.name)+' ('+esc(d.letter)+':)'+(d.groups.length?'':all),!d.groups.length,d.groups.length?'':allT)).join('')||'—';
+    esc(d.name)+' ('+esc(d.letter)+':)'+(d.groups.length?'':all),!d.groups.length,d.groups.length?'':allT)).join('')||'â€”';
   document.getElementById('gr_drivers').innerHTML=g.drivers.map(d=>box(d.id,d.all||grIn(d,n),
-    esc(d.name)+(d.all?all:''),d.all,d.all?'for every machine — change it on the Drivers page':'')).join('')||'—';}
+    esc(d.name)+(d.all?all:''),d.all,d.all?'for every machine â€” change it on the Drivers page':'')).join('')||'â€”';}
 function closeGroup(){grCur=null;const e=document.getElementById('gr_edit');if(e)e.style.display='none';}
 async function saveGroup(){const m=document.getElementById('gr_emsg');
   const ids=(id,num)=>[...document.querySelectorAll('#'+id+' input:checked:not(:disabled)')].map(e=>num?+e.dataset.v:e.dataset.v);
   const body={name:grCur,machines:ids('gr_machines',1),images:ids('gr_images',1),disks:ids('gr_disks',0),drivers:ids('gr_drivers',1)};
-  try{await j('/api/groups/set',mk(body));m.textContent=' ✓ saved';}
+  try{await j('/api/groups/set',mk(body));m.textContent=' âœ“ saved';}
   catch(e){if(/EVERY machine/.test(e.message)&&confirm(e.message+'.\n\nSave anyway?')){
-      try{await j('/api/groups/set',mk({...body,allow_all:true}));m.textContent=' ✓ saved';}catch(e2){m.textContent=' ✗ '+e2.message;}}
-    else m.textContent=' ✗ '+e.message;}
+      try{await j('/api/groups/set',mk({...body,allow_all:true}));m.textContent=' âœ“ saved';}catch(e2){m.textContent=' âœ— '+e2.message;}}
+    else m.textContent=' âœ— '+e.message;}
   loadGroups();}
 async function grCall(url,body,el){const m=document.getElementById(el||'gr_msg');
-  try{await j(url,mk(body));m.textContent=' ✓ done';}catch(e){m.textContent=' ✗ '+e.message;}loadGroups();}
+  try{await j(url,mk(body));m.textContent=' âœ“ done';}catch(e){m.textContent=' âœ— '+e.message;}loadGroups();}
 const createGroup=()=>{const n=v('gr_new');if(n)grCall('/api/groups/create',{name:n}).then(()=>{document.getElementById('gr_new').value='';});};
 function renameGroup(n){const to=prompt('New name for group '+n+' (an existing name merges the two):',n);
   if(to&&to!==n){if(grCur===n)grCur=to.trim();grCall('/api/groups/rename',{from:n,to});}}
@@ -511,25 +511,25 @@ async function loadCafe(){
 async function saveCafe(){const m=document.getElementById('cafe_msg');
   // Password is write-only: send it only when the field is filled (blank = keep the stored one).
   const body={user:v('cafe_user')},pw=document.getElementById('cafe_password').value;if(pw)body.password=pw;
-  try{await j('/api/cafe-user',mk(body));m.textContent=' ✓ saved';document.getElementById('cafe_password').value='';loadCafe();}
-  catch(e){m.textContent=' ✗ '+e.message;}}
+  try{await j('/api/cafe-user',mk(body));m.textContent=' âœ“ saved';document.getElementById('cafe_password').value='';loadCafe();}
+  catch(e){m.textContent=' âœ— '+e.message;}}
 async function savePw(){const m=document.getElementById('pw_msg'),g=id=>document.getElementById(id).value;
-  if(g('pw_new').length<8){m.textContent=' ✗ at least 8 characters';return;}
-  if(g('pw_new')!==g('pw_new2')){m.textContent=' ✗ passwords do not match';return;}
-  try{await j('/api/password',mk({current:g('pw_cur'),new:g('pw_new')}));m.textContent=' ✓ changed, other sessions signed out';
+  if(g('pw_new').length<8){m.textContent=' âœ— at least 8 characters';return;}
+  if(g('pw_new')!==g('pw_new2')){m.textContent=' âœ— passwords do not match';return;}
+  try{await j('/api/password',mk({current:g('pw_cur'),new:g('pw_new')}));m.textContent=' âœ“ changed, other sessions signed out';
     for(const id of ['pw_cur','pw_new','pw_new2'])document.getElementById(id).value='';}
-  catch(e){m.textContent=' ✗ '+e.message;}}
-async function setTimeout_(){await j('/api/config/timeout',mk({seconds:+document.getElementById('timeout').value}));document.getElementById('to_msg').textContent=' ✓ saved';}
+  catch(e){m.textContent=' âœ— '+e.message;}}
+async function setTimeout_(){await j('/api/config/timeout',mk({seconds:+document.getElementById('timeout').value}));document.getElementById('to_msg').textContent=' âœ“ saved';}
 async function setSsd(){const m=document.getElementById('ssd_msg');
-  try{await j('/api/config/ssd',mk({room_gb:+v('ssd_room'),warn_gb:+v('ssd_warn'),reboot_gb:+v('ssd_reboot')}));m.textContent=' ✓ saved';}
-  catch(e){m.textContent=' ✗ '+e.message;}}
+  try{await j('/api/config/ssd',mk({room_gb:+v('ssd_room'),warn_gb:+v('ssd_warn'),reboot_gb:+v('ssd_reboot')}));m.textContent=' âœ“ saved';}
+  catch(e){m.textContent=' âœ— '+e.message;}}
 async function setAlert(){const m=document.getElementById('al_msg');
-  try{await j('/api/config/alert',mk({pct:+document.getElementById('alert_pct').value}));m.textContent=' ✓ saved';}catch(e){m.textContent=' ✗ '+e.message;}}
-async function setZramReserve(){await j('/api/config/zram-reserve',mk({mb:+document.getElementById('zram_reserve').value}));document.getElementById('zr_msg').textContent=' ✓ saved';}
+  try{await j('/api/config/alert',mk({pct:+document.getElementById('alert_pct').value}));m.textContent=' âœ“ saved';}catch(e){m.textContent=' âœ— '+e.message;}}
+async function setZramReserve(){await j('/api/config/zram-reserve',mk({mb:+document.getElementById('zram_reserve').value}));document.getElementById('zr_msg').textContent=' âœ“ saved';}
 
 // ---- server liveness (SSE /api/events: "ping" on connect + every 5 s) ----
 // Green on ping; red on connection error or no ping for 12 s (e.g. server powered off, half-open link).
-// EventSource reconnects by itself → green again on the next ping.
+// EventSource reconnects by itself â†’ green again on the next ping.
 let lastPing=0;
 function setServer(up){const d=document.getElementById('srvdot');
   d.classList.toggle('up',up);d.classList.toggle('down',!up);d.title=up?'server online':'server offline';}
@@ -538,16 +538,16 @@ function setServer(up){const d=document.getElementById('srvdot');
 const BENCH_KINDS={srv_seq:['Server sequential','MB/s'],srv_rand:['Server random 4K','IOPS'],disk:['Disk read','MB/s'],net:['Network','MB/s'],boot:['Boot','s']};
 let benchData=null,iscsiES=null;
 const bName=mac=>{if(!mac)return 'server';const m=benchData&&benchData.machines.find(x=>x.mac===mac);return (m&&m.hostname)||mac;};
-const bVal=r=>r?`${r.value.toLocaleString()} ${BENCH_KINDS[r.kind]?BENCH_KINDS[r.kind][1]:''}`:'—';
+const bVal=r=>r?`${r.value.toLocaleString()} ${BENCH_KINDS[r.kind]?BENCH_KINDS[r.kind][1]:''}`:'â€”';
 // Value + a bar against the best machine (higher = better: disk, network).
-const bBar=(r,max)=>r?`${esc(bVal(r))}<span style="display:inline-block;height:6px;width:${Math.round(70*r.value/max)}px;background:var(--accent);border-radius:3px;margin-left:8px;vertical-align:middle"></span>`:'—';
+const bBar=(r,max)=>r?`${esc(bVal(r))}<span style="display:inline-block;height:6px;width:${Math.round(70*r.value/max)}px;background:var(--accent);border-radius:3px;margin-left:8px;vertical-align:middle"></span>`:'â€”';
 const bTime=t=>new Date(t*1000).toLocaleString();
 async function loadBench(){
   const d=benchData=await j('/api/bench');
   const seq=document.getElementById('b_seq');if(!seq)return;
   const last=(mac,k)=>d.latest.find(r=>r.mac===mac&&r.kind===k);
   seq.textContent=bVal(last(null,'srv_seq'));document.getElementById('b_rand').textContent=bVal(last(null,'srv_rand'));
-  if(d.job&&d.job.startsWith('⏳')&&!jobWatch['bench:server'])watchJob('bench:server',document.getElementById('bench_msg'),benchDone);
+  if(d.job&&d.job.startsWith('â³')&&!jobWatch['bench:server'])watchJob('bench:server',document.getElementById('bench_msg'),benchDone);
   const max=k=>Math.max(1,...d.latest.filter(r=>r.mac&&r.kind===k).map(r=>r.value));
   // Registered machines + any other MAC with results.
   const macs=[...new Set([...d.machines.map(m=>m.mac),...d.latest.filter(r=>r.mac).map(r=>r.mac)])];
@@ -560,7 +560,7 @@ async function loadBench(){
       <td><b>${esc(bName(mac))}</b> <span class="mono">${esc(mac)}</span>${d.pending.includes(mac)?' <span class="pill new" title="measured at its next boot">waiting</span>':''}</td>
       <td title="${esc(boot?boot.detail:'')}">${esc(bVal(boot))}${stage?` <span class="mono">(stage ${esc(stage[1])} s)</span>`:''}</td>
       <td title="${esc(disk?disk.detail:'')}">${bBar(disk,max('disk'))}</td><td>${bBar(net,max('net'))}</td>
-      <td class="mono">${at?esc(bTime(at)):'—'}</td></tr>`;}).join('')||'<tr><td colspan=6 class="mono">no machines yet</td></tr>';
+      <td class="mono">${at?esc(bTime(at)):'â€”'}</td></tr>`;}).join('')||'<tr><td colspan=6 class="mono">no machines yet</td></tr>';
   const sel=document.getElementById('b_hmac'),cur=sel.value;
   sel.innerHTML='<option value="">all</option><option value="server">server</option>'+macs.map(m=>`<option value="${esc(m)}">${esc(bName(m))}</option>`).join('');
   sel.value=cur;
@@ -579,13 +579,13 @@ function loadIscsi(){
   iscsiES=new EventSource('/api/bench/iscsi/live');
   iscsiES.addEventListener('iscsi',e=>showIscsi(JSON.parse(e.data)));
   iscsiES.onerror=()=>{const el=document.getElementById('b_iscsi');
-    if(el)el.textContent=iscsiES&&iscsiES.readyState===EventSource.CLOSED?'disconnected — ↻ to reconnect':'reconnecting...';
+    if(el)el.textContent=iscsiES&&iscsiES.readyState===EventSource.CLOSED?'disconnected â€” â†» to reconnect':'reconnecting...';
     if(iscsiES&&iscsiES.readyState===EventSource.CLOSED)iscsiES=null;};
 }
 function showIscsi(d){
   const el=document.getElementById('b_iscsi');if(!el)return;
   if(d.daemon==='none'){el.textContent='iSCSI daemon not running';return;}
-  if(d.daemon==='old'){el.textContent='the running iSCSI daemon is an older build without counters — it is replaced by itself once no client is connected';return;}
+  if(d.daemon==='old'){el.textContent='the running iSCSI daemon is an older build without counters â€” it is replaced by itself once no client is connected';return;}
   if(!d.targets.length&&!d.peers.length){el.textContent='no client connected';return;}
   const mb=x=>x.toFixed(1)+' MB/s';
   el.innerHTML=`<div class="row" style="align-items:flex-start;gap:28px">
@@ -594,29 +594,34 @@ function showIscsi(d){
     <table style="width:auto"><thead><tr><th>Client</th><th>Read</th></tr></thead><tbody>${d.peers.map(p=>
       `<tr><td>${esc(p.host||p.ip)} <span class="mono">${esc(p.ip)}</span></td><td>${p.mbps>0?mb(p.mbps):'<span class="mono">idle</span>'}</td></tr>`).join('')||'<tr><td colspan=2 class="mono">none</td></tr>'}</tbody></table></div>`;
 }
-// Server resources (sysmon.rs): "res" on /api/events every 2 s → the alert banner (every page) + "Server now".
+// Server resources (sysmon.rs): "res" on /api/events every 2 s â†’ the alert banner (every page) + "Server now".
 let lastRes=null;
 function showRes(d){lastRes=d;
   const bar=document.getElementById('alertbar');
   if(bar){bar.hidden=!d.alerts.length;
-    if(d.alerts.length)bar.innerHTML=`<b>⚠ Server at its limit:</b> ${esc(d.alerts.join(', '))} (threshold ${d.limit}%) — clients boot and load slower. <a href="/benchmark" data-click="go" data-args='["benchmark"]'><u>Details</u></a>`;}
+    if(d.alerts.length)bar.innerHTML=`<b>âš  Server at its limit:</b> ${esc(d.alerts.join(', '))} (threshold ${d.limit}%) â€” clients boot and load slower. <a href="/benchmark" data-click="go" data-args='["benchmark"]'><u>Details</u></a>`;}
   const el=document.getElementById('b_res');if(!el)return;
-  const row=(name,pct,txt)=>`<tr><td>${name}</td><td>${pct==null?'<span class="mono">—</span>':
-    `<span class="meter"><i class="${pct>=d.limit?'hot':''}" style="width:${Math.min(100,pct).toFixed(0)}%"></i></span>${pct.toFixed(0)}%`}</td><td class="mono">${txt}</td></tr>`;
-  const n=d.net,k=d.disk;
+  // Measured values first; a bar + % only where the whole is known (none for a VM's virtual network card).
+  const row=(name,pct,txt)=>`<tr><td>${name}</td><td>${pct==null?'':
+    `<span class="meter"><i class="${pct>=d.limit?'hot':''}" style="width:${Math.min(100,pct).toFixed(0)}%"></i></span>${pct.toFixed(0)}%`}</td><td class="mono">${esc(txt)}</td></tr>`;
+  const rate=b=>(b/1e6).toFixed(1)+' MB/s';
+  const {cpu:c,ram:r,net:n,disk:k,space:s}=d;
   el.innerHTML=`<table style="width:auto"><tbody>
-    ${row('CPU',d.cpu,'')}${row('RAM',d.ram,'')}
-    ${row('Network',n.pct,esc(`${n.iface||'?'}: out ${n.tx.toFixed(1)} MB/s, in ${n.rx.toFixed(1)} MB/s${n.link?`, link ${n.link>=1000?n.link/1000+' Gbit/s':n.link+' Mbit/s'}`:''}`))}
-    ${row('Disk busy',k.busy,esc(k.dev||'images on a filesystem without a block device'))}${row('Disk space',k.used,'image storage')}
+    ${row('CPU',c.pct,`${c.cores} cores${c.load!=null?`, load ${c.load.toFixed(2)} (1 min)`:''}`)}
+    ${row('RAM',r.pct,`${gbs(r.used)} used of ${gbs(r.total)} (+ ${gbs(r.cache)} page cache, given back when needed)`)}
+    ${row('Network',n.pct,`${n.iface||'?'}: out ${rate(n.tx)}, in ${rate(n.rx)}`+(n.link?`, link ${n.link>=1000?n.link/1000+' Gbit/s':n.link+' Mbit/s'}`:'')
+      +(n.virtual?` â€” virtual card (${n.virtual}): the host's real port speed is not visible, so no %`:''))}
+    ${row('Disk busy',k.busy,k.dev?`${k.dev}: read ${rate(k.read)}, write ${rate(k.write)}`:'images on a filesystem without a block device')}
+    ${row('Disk space',s.pct,s.total?`${gbs(s.used)} used of ${gbs(s.total)} (image storage)`:'image storage: unknown')}
   </tbody></table>`;}
 const benchDone=()=>{if(curPage==='benchmark')loadBench();};
 async function benchServer(){const el=document.getElementById('bench_msg');
-  try{await j('/api/bench/server',{method:'POST'});watchJob('bench:server',el,benchDone);}catch(e){el.textContent=' ✗ '+e.message;}}
+  try{await j('/api/bench/server',{method:'POST'});watchJob('bench:server',el,benchDone);}catch(e){el.textContent=' âœ— '+e.message;}}
 async function benchAsk(cancel){const m=document.getElementById('bq_msg');
   const macs=[...document.querySelectorAll('.b_sel:checked')].map(x=>x.value);
   if(!macs.length){toast('Tick the machines first',true);return;}
-  try{await j('/api/bench/request',mk({macs,cancel}));m.textContent=cancel?' ✓ cancelled':` ✓ ${macs.length} machine(s) measured at their next boot`;}
-  catch(e){m.textContent=' ✗ '+e.message;}
+  try{await j('/api/bench/request',mk({macs,cancel}));m.textContent=cancel?' âœ“ cancelled':` âœ“ ${macs.length} machine(s) measured at their next boot`;}
+  catch(e){m.textContent=' âœ— '+e.message;}
   loadBench();}
 function bSelAll(el){document.querySelectorAll('.b_sel').forEach(x=>x.checked=el.checked);}
 
@@ -632,7 +637,7 @@ function toast(msg,err){let t=document.getElementById('toast');
 
 // ---- admin login (auth.rs) ----
 // Login lives on its own page (/login). This page is only served to a signed-in admin: the server redirects an
-// unauthenticated browser here → /login. A 401 on any API call (session expired) sends us back to /login.
+// unauthenticated browser here â†’ /login. A 401 on any API call (session expired) sends us back to /login.
 async function logout(){try{await fetch('/api/auth/logout',{method:'POST'});}catch(e){}location.replace('/login');}
 
 // Everything an element may name in data-click / data-change / data-input (see act()). Called as f(...args, el, event).
@@ -661,7 +666,7 @@ function startApp(){
   srvEvents.addEventListener('job',e=>{const d=JSON.parse(e.data);showJob(d.name,d.status);});
   srvEvents.addEventListener('res',e=>showRes(JSON.parse(e.data)));
   srvEvents.onerror=()=>setServer(false);
-  // (Re)connected: job events sent while the link was down are lost → ask for the status of every followed job.
+  // (Re)connected: job events sent while the link was down are lost â†’ ask for the status of every followed job.
   srvEvents.onopen=()=>{for(const n in jobWatch)j('/api/images/job?name='+encodeURIComponent(n)).then(r=>showJob(n,r.status)).catch(()=>{});};
   setInterval(()=>{if(lastPing&&Date.now()-lastPing>12000)setServer(false);},3000);
   if(location.pathname!=='/'+pageFromPath())history.replaceState(null,'','/'+pageFromPath());
