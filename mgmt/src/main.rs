@@ -31,6 +31,7 @@ mod preflight;
 mod publish;
 mod settings;
 mod setup;
+mod sysmon;
 mod tftp;
 mod versions;
 mod vhdx;
@@ -157,13 +158,16 @@ fn clean_leftovers() {
 /// Version (Cargo.toml) — shown on the web + in logs to tell deployed builds apart.
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 // Web admin (assets.rs: embedded, or the release's broom-assets.zip) — deploy a single file, no static/ directory.
-// index.html loads the script as /app.js?v=<version>, so a new build is never served from cache. /login is the
+// index.html loads /app.js?v=<version> + /app.css?v=<version>, so a new build is never served from cache. /login is the
 // standalone login/setup page (auth.rs); unauthenticated page requests are redirected there.
 async fn index() -> Html<String> {
     Html(assets::text("static/index.html").replace("__VERSION__", VERSION))
 }
 async fn app_js() -> impl axum::response::IntoResponse {
     ([(axum::http::header::CONTENT_TYPE, "text/javascript; charset=utf-8")], assets::text("static/app.js"))
+}
+async fn app_css() -> impl axum::response::IntoResponse {
+    ([(axum::http::header::CONTENT_TYPE, "text/css; charset=utf-8")], assets::text("static/app.css"))
 }
 async fn login_page() -> Html<&'static str> {
     Html(assets::text("static/login.html"))
@@ -193,7 +197,19 @@ async fn events(
             }
         }
     });
-    Sse::new(stream::once(async move { Ok(ping()) }).chain(jobs))
+    // "res": the server's resources every 2 s (sysmon.rs) — the alert banner + the Benchmark page; the last one at once.
+    let latest = sysmon::LATEST.lock().unwrap().clone();
+    let first = (!latest.is_empty()).then(|| Ok(Event::default().event("res").data(latest)));
+    let res = stream::unfold(sysmon::RES.subscribe(), |mut rx| async move {
+        loop {
+            match rx.recv().await {
+                Ok(data) => return Some((Ok(Event::default().event("res").data(data)), rx)),
+                Err(RecvError::Lagged(_)) => continue,
+                Err(RecvError::Closed) => return None,
+            }
+        }
+    });
+    Sse::new(stream::once(async move { Ok(ping()) }).chain(stream::iter(first)).chain(stream::select(jobs, res)))
         .keep_alive(KeepAlive::new().interval(std::time::Duration::from_secs(5)).event(ping()))
 }
 
@@ -275,6 +291,7 @@ impl AppState {
 #[tokio::main]
 async fn main() {
     init_logging();
+    sysmon::raise_fd_limit(); // before the iSCSI daemon / TFTP size their limits from it
     let args: Vec<String> = std::env::args().collect();
     match args.get(1).map(String::as_str) {
         Some("install-service") => setup::install_service(&args),
@@ -420,11 +437,15 @@ async fn main() {
         });
     }
 
+    // Server resources every 2 s → web pages (alert banner over the threshold, Benchmark page).
+    tokio::spawn(sysmon::run(state.clone()));
+
     let app = Router::new()
         .route("/login", get(login_page)) // standalone sign-in page (auth.rs); public
         .route("/login.js", get(login_js))
         .route("/", get(index)) // web admin shell (embedded in the binary)
         .route("/app.js", get(app_js))
+        .route("/app.css", get(app_css))
         // One URL per page (F5 / bookmarks keep the page); same shell, JS picks the page from the path.
         .route("/machines", get(index))
         .route("/images", get(index))

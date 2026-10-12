@@ -58,8 +58,10 @@ impl Disk {
 pub const MRDSL: usize = 262_144;
 /// Commands in flight per connection (also the CmdSN window we advertise).
 const WINDOW: u32 = 64;
-/// Commands in flight in the whole daemon: bounds the read buffers (≤ 1 MB each) whatever the connection count.
-static IN_FLIGHT: Semaphore = Semaphore::const_new(512);
+/// Commands in flight in the whole daemon: bounds the read buffers (≤ 1 MB each) whatever the connection count — to
+/// 10% of the server's RAM (16 GB → ~1600), so a burst can't run it out of memory.
+pub static IN_FLIGHT_MAX: LazyLock<usize> = LazyLock::new(|| crate::sysmon::ram_share(10, 1 << 20, 256));
+static IN_FLIGHT: LazyLock<Semaphore> = LazyLock::new(|| Semaphore::new(*IN_FLIGHT_MAX));
 /// A data segment bigger than this ends the connection (login/text are small; Data-Out ≤ MRDSL).
 const MAX_IN: usize = 1 << 20;
 

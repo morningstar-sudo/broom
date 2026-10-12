@@ -12,6 +12,7 @@ pub fn routes() -> Router<SharedState> {
         .route("/api/config", get(get_config))
         .route("/api/config/timeout", post(set_timeout))
         .route("/api/config/zram-reserve", post(set_zram_reserve))
+        .route("/api/config/alert", post(set_alert))
         .route("/api/config/ssd", post(set_ssd))
         .route("/api/client-config", get(client_config))
         .route("/api/dhcp", get(get_dhcp).post(set_dhcp))
@@ -72,6 +73,7 @@ async fn get_config(State(st): State<SharedState>) -> Json<serde_json::Value> {
     Json(serde_json::json!({
         "boot_timeout": st.db.get_config("boot_timeout", "10").parse::<u64>().unwrap_or(10),
         "zram_reserve_mb": st.db.get_config("zram_reserve_mb", "2048").parse::<u64>().unwrap_or(2048),
+        "alert_pct": st.db.get_config("alert_pct", "80").parse::<u64>().unwrap_or(80),
         "ssd_room_gb": room,
         "ssd_warn_gb": warn,
         "ssd_reboot_gb": reboot,
@@ -123,6 +125,22 @@ async fn set_timeout(
     let secs = b.seconds.min(3600); // used as timeout_s * 1000 in the iPXE menu
     st.db.set_config("boot_timeout", &secs.to_string()).map_err(ise)?;
     tracing::info!("boot menu countdown set to {secs} s");
+    Ok(ok())
+}
+
+#[derive(Deserialize)]
+struct Alert {
+    pct: u64,
+}
+
+/// Server resource alert threshold (%): a banner on every page while CPU / RAM / network / the image disk stays at or
+/// above it (sysmon.rs). POST /api/config/alert {pct}
+async fn set_alert(State(st): State<SharedState>, Json(b): Json<Alert>) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    if !(50..=99).contains(&b.pct) {
+        return Err(crate::api::bad("alert threshold: 50–99 %"));
+    }
+    st.db.set_config("alert_pct", &b.pct.to_string()).map_err(ise)?;
+    tracing::info!("server resource alert threshold set to {}%", b.pct);
     Ok(ok())
 }
 

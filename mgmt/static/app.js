@@ -503,6 +503,7 @@ function deleteGroup(n){if(confirm('Delete group '+n+'? Its machines get no grou
 async function loadCafe(){
   j('/api/config').then(c=>{const t=document.getElementById('timeout'),z=document.getElementById('zram_reserve');
     if(t)t.value=c.boot_timeout;if(z)z.value=c.zram_reserve_mb;
+    const al=document.getElementById('alert_pct');if(al)al.value=c.alert_pct;
     for(const k of ['room','warn','reboot']){const e=document.getElementById('ssd_'+k);if(e)e.value=c['ssd_'+k+'_gb'];}}).catch(()=>{});
   const c=await j('/api/cafe-user');
   const u=document.getElementById('cafe_user');if(u)u.value=c.user||'';
@@ -522,6 +523,8 @@ async function setTimeout_(){await j('/api/config/timeout',mk({seconds:+document
 async function setSsd(){const m=document.getElementById('ssd_msg');
   try{await j('/api/config/ssd',mk({room_gb:+v('ssd_room'),warn_gb:+v('ssd_warn'),reboot_gb:+v('ssd_reboot')}));m.textContent=' ✓ saved';}
   catch(e){m.textContent=' ✗ '+e.message;}}
+async function setAlert(){const m=document.getElementById('al_msg');
+  try{await j('/api/config/alert',mk({pct:+document.getElementById('alert_pct').value}));m.textContent=' ✓ saved';}catch(e){m.textContent=' ✗ '+e.message;}}
 async function setZramReserve(){await j('/api/config/zram-reserve',mk({mb:+document.getElementById('zram_reserve').value}));document.getElementById('zr_msg').textContent=' ✓ saved';}
 
 // ---- server liveness (SSE /api/events: "ping" on connect + every 5 s) ----
@@ -561,7 +564,7 @@ async function loadBench(){
   const sel=document.getElementById('b_hmac'),cur=sel.value;
   sel.innerHTML='<option value="">all</option><option value="server">server</option>'+macs.map(m=>`<option value="${esc(m)}">${esc(bName(m))}</option>`).join('');
   sel.value=cur;
-  loadBenchHist();loadIscsi();
+  loadBenchHist();loadIscsi();if(lastRes)showRes(lastRes);
 }
 async function loadBenchHist(){
   const sel=document.getElementById('b_hmac');if(!sel)return;
@@ -591,6 +594,21 @@ function showIscsi(d){
     <table style="width:auto"><thead><tr><th>Client</th><th>Read</th></tr></thead><tbody>${d.peers.map(p=>
       `<tr><td>${esc(p.host||p.ip)} <span class="mono">${esc(p.ip)}</span></td><td>${p.mbps>0?mb(p.mbps):'<span class="mono">idle</span>'}</td></tr>`).join('')||'<tr><td colspan=2 class="mono">none</td></tr>'}</tbody></table></div>`;
 }
+// Server resources (sysmon.rs): "res" on /api/events every 2 s → the alert banner (every page) + "Server now".
+let lastRes=null;
+function showRes(d){lastRes=d;
+  const bar=document.getElementById('alertbar');
+  if(bar){bar.hidden=!d.alerts.length;
+    if(d.alerts.length)bar.innerHTML=`<b>⚠ Server at its limit:</b> ${esc(d.alerts.join(', '))} (threshold ${d.limit}%) — clients boot and load slower. <a href="/benchmark" data-click="go" data-args='["benchmark"]'><u>Details</u></a>`;}
+  const el=document.getElementById('b_res');if(!el)return;
+  const row=(name,pct,txt)=>`<tr><td>${name}</td><td>${pct==null?'<span class="mono">—</span>':
+    `<span class="meter"><i class="${pct>=d.limit?'hot':''}" style="width:${Math.min(100,pct).toFixed(0)}%"></i></span>${pct.toFixed(0)}%`}</td><td class="mono">${txt}</td></tr>`;
+  const n=d.net,k=d.disk;
+  el.innerHTML=`<table style="width:auto"><tbody>
+    ${row('CPU',d.cpu,'')}${row('RAM',d.ram,'')}
+    ${row('Network',n.pct,esc(`${n.iface||'?'}: out ${n.tx.toFixed(1)} MB/s, in ${n.rx.toFixed(1)} MB/s${n.link?`, link ${n.link>=1000?n.link/1000+' Gbit/s':n.link+' Mbit/s'}`:''}`))}
+    ${row('Disk busy',k.busy,esc(k.dev||'images on a filesystem without a block device'))}${row('Disk space',k.used,'image storage')}
+  </tbody></table>`;}
 const benchDone=()=>{if(curPage==='benchmark')loadBench();};
 async function benchServer(){const el=document.getElementById('bench_msg');
   try{await j('/api/bench/server',{method:'POST'});watchJob('bench:server',el,benchDone);}catch(e){el.textContent=' ✗ '+e.message;}}
@@ -632,7 +650,7 @@ const ACTIONS={
   loadDrivers,uploadDriver,saveDrvTargets,delDriver,
   loadGroups,editGroup,closeGroup,saveGroup,createGroup,renameGroup,deleteGroup,
   loadBench,loadBenchHist,benchServer,benchRequest:()=>benchAsk(false),benchCancel:()=>benchAsk(true),bSelAll,
-  applyDhcp,savePw,saveCafe,setTimeout_,setZramReserve,setSsd,logout,
+  applyDhcp,savePw,saveCafe,setTimeout_,setZramReserve,setAlert,setSsd,logout,
 };
 
 let started=false;
@@ -641,6 +659,7 @@ function startApp(){
   const srvEvents=new EventSource('/api/events');
   srvEvents.addEventListener('ping',()=>{lastPing=Date.now();setServer(true);});
   srvEvents.addEventListener('job',e=>{const d=JSON.parse(e.data);showJob(d.name,d.status);});
+  srvEvents.addEventListener('res',e=>showRes(JSON.parse(e.data)));
   srvEvents.onerror=()=>setServer(false);
   // (Re)connected: job events sent while the link was down are lost → ask for the status of every followed job.
   srvEvents.onopen=()=>{for(const n in jobWatch)j('/api/images/job?name='+encodeURIComponent(n)).then(r=>showJob(n,r.status)).catch(()=>{});};

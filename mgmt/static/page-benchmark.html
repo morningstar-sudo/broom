@@ -2,6 +2,12 @@
   <div class="head"><h1>Benchmark</h1><p>server disk, iSCSI, client disk / network, boot time</p>
     <span class="sp"></span><button data-click="loadBench">↻</button></div>
   <div class="card">
+    <h2>Server now</h2>
+    <div id="b_res" class="msg">—</div>
+    <p class="hint">Live, every 2 s. Red = at or above the alert threshold (Settings); held there for 6 s → a banner on
+      every page. Network % is of the boot card's link speed (none for a virtual card that doesn't report it).</p>
+  </div>
+  <div class="card">
     <h2>Server disk</h2>
     <div class="row">
       <span class="mono">sequential</span><b id="b_seq">—</b>

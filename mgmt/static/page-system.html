@@ -42,6 +42,13 @@
       machine update them. Applies at each machine's next boot.</p>
   </div>
   <div class="card">
+    <h2>Server resource alert</h2>
+    <div class="row"><input id="alert_pct" type="number" min="50" max="99" size="4"> %
+      <button data-click="setAlert">Save</button> <span id="al_msg" class="msg"></span></div>
+    <p class="hint">A banner shows on every page while the server's CPU, RAM, boot network card or image disk (busy time or
+      space) stays at or above this for 6 s — clients boot and load slower then. Live numbers: Benchmark page.</p>
+  </div>
+  <div class="card">
     <h2>RAM cache — RAM reserved for the server</h2>
     <div class="row"><input id="zram_reserve" type="number" min="0" size="6"> MB
       <button data-click="setZramReserve">Save</button> <span id="zr_msg" class="msg"></span></div>

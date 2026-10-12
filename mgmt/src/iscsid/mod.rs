@@ -20,8 +20,12 @@ use serde::{Deserialize, Serialize};
 /// Control socket (root only).
 pub const SOCK: &str = "/run/broom-iscsid.sock";
 const PORT: u16 = 3260;
-/// Open connections at most (each holds a socket + a few buffers).
-const MAX_CONNS: usize = 512;
+/// Open connections at most: each holds a socket (file descriptor) + a few buffers (~256 KB at worst) → what the open
+/// file limit allows (minus a few for targets / control), and at most 5% of RAM.
+fn max_conns() -> usize {
+    let fds = crate::sysmon::fd_limit().saturating_sub(64) as usize;
+    fds.min(crate::sysmon::ram_share(5, 256 << 10, 64)).max(64)
+}
 
 /// One exported target, as saved in the state file.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -336,11 +340,13 @@ pub async fn run(args: &[String]) -> ! {
             tokio::spawn(control(s));
         }
     });
-    let slots = Arc::new(tokio::sync::Semaphore::new(MAX_CONNS));
+    let max = max_conns();
+    tracing::info!("iscsid: up to {max} connections, {} commands in flight (sized from this server)", *conn::IN_FLIGHT_MAX);
+    let slots = Arc::new(tokio::sync::Semaphore::new(max));
     loop {
         let Ok((s, peer)) = tcp.accept().await else { continue };
         let Ok(permit) = slots.clone().try_acquire_owned() else {
-            tracing::warn!("iscsid: {MAX_CONNS} connections open, refusing {peer}");
+            tracing::warn!("iscsid: {max} connections open, refusing {peer}");
             continue;
         };
         // A client that died without closing (power cut, shutdown) is noticed in ~1 min and its session freed: keepalive

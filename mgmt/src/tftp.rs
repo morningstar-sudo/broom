@@ -16,11 +16,15 @@ const MAX_BLKSIZE: usize = 1468;
 const RETRIES: usize = 5;
 
 /// Transfers at once. Each holds a socket for up to ~10 s (retries): a flood of (spoofed) RRQs must not use up the
-/// process's file descriptors (HTTP and everything else would fail). A room booting at once stays far below it.
-const MAX_TRANSFERS: usize = 64;
+/// process's file descriptors (HTTP and everything else would fail) → an eighth of what the open file limit allows.
+/// A room booting at once stays far below it.
+fn max_transfers() -> usize {
+    ((crate::sysmon::fd_limit() / 8) as usize).max(64)
+}
 
 pub async fn serve(sock: UdpSocket, server: Ipv4Addr, iface: String) {
-    let slots = std::sync::Arc::new(tokio::sync::Semaphore::new(MAX_TRANSFERS));
+    let max = max_transfers();
+    let slots = std::sync::Arc::new(tokio::sync::Semaphore::new(max));
     let mut buf = [0u8; 1500];
     loop {
         let Ok((n, peer)) = sock.recv_from(&mut buf).await else { continue };
@@ -30,7 +34,7 @@ pub async fn serve(sock: UdpSocket, server: Ipv4Addr, iface: String) {
         }
         // All slots busy → drop the request (the client retries its RRQ).
         let Ok(slot) = slots.clone().try_acquire_owned() else {
-            tracing::debug!("tftp {peer}: {MAX_TRANSFERS} transfers running, request dropped");
+            tracing::debug!("tftp {peer}: {max} transfers running, request dropped");
             continue;
         };
         let req = buf[..n].to_vec();
