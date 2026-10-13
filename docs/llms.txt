@@ -1,0 +1,18 @@
+---
+layout: null
+sitemap: false
+---
+# {{ site.title }}
+
+> {{ site.description }}
+
+Broom is free and open source (Apache-2.0), maintained by Nguyễn Trung Hoàng Hải (https://hainth.edu.vn/).
+
+## Guides
+{% assign guides = site.html_pages | where_exp: "p", "p.url != '/'" | sort: "url" %}{% for p in guides %}
+- [{{ p.title }}]({{ p.url | absolute_url }}): {{ p.description }}{% endfor %}
+
+## Links
+- [Source code and full manual](https://github.com/morningstar-sudo/broom)
+- [Latest release](https://github.com/morningstar-sudo/broom/releases/latest)
+- [Author](https://hainth.edu.vn/)

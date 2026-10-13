@@ -1,6 +1,8 @@
 ---
 title: Broom vs CCBoot — open-source alternative for diskless internet cafés
-description: How Broom, a free open-source diskless boot server, compares with CCBoot and other commercial diskless software for internet cafés and labs — and where Broom is still behind.
+description: How Broom, a free open-source diskless boot server, compares with CCBoot and other commercial diskless software, and where Broom is still behind.
+date: 2026-10-11T23:07:00+07:00
+last_modified_at: 2026-10-13
 ---
 
 [← Broom](index.md)

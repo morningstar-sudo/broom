@@ -3,12 +3,13 @@ description: Open-source diskless boot server for Windows 11 & Linux — PXE/iSC
 url: https://broom.hainth.edu.vn
 baseurl: ""
 lang: en
-logo: /images/broom.png
 defaults:
   - scope: { path: "" }
     values:
       layout: default
+      seo: { type: WebPage }
       image: /images/og-broom.jpg
+exclude: [README.md]
 plugins:
   - jekyll-seo-tag
   - jekyll-sitemap

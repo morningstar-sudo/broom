@@ -1,6 +1,8 @@
 ---
 title: FACEIT Anti-Cheat on diskless PCs with Broom
 description: Run FACEIT Anti-Cheat on network-booted Windows 11 PCs — Secure Boot, TPM 2.0, IOMMU and HVCI on Broom diskless clients.
+date: 2026-10-11T23:07:00+07:00
+last_modified_at: 2026-10-12T23:23:13+07:00
 ---
 
 [← Broom](index.md)

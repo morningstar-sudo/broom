@@ -1,6 +1,8 @@
 ---
 title: Diskless boot Windows 11 over PXE and iSCSI with Broom
-description: Network-boot Windows 11 Pro on a room of PCs from one golden image with Broom — how it works, what the clients need, and the steps from an empty Linux server to clean-on-every-boot machines.
+description: "Network-boot Windows 11 Pro on a room of PCs from one golden image with Broom: how it works, what clients need, and setup from an empty Linux server."
+date: 2026-10-11T23:07:00+07:00
+last_modified_at: 2026-10-13
 ---
 
 [← Broom](index.md)

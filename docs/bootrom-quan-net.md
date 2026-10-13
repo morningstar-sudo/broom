@@ -1,7 +1,20 @@
 ---
 title: Bootrom quán net miễn phí với Broom — boot không ổ cứng Windows 11
-description: Hướng dẫn dựng bootrom (diskless) cho quán net, phòng game, phòng máy trường học bằng Broom — phần mềm mã nguồn mở, miễn phí, máy chủ Linux một file, máy trạm Windows 11 sạch sau mỗi lần khởi động.
+description: "Bootrom quán net miễn phí, mã nguồn mở: máy chủ Linux một file, máy trạm Windows 11 boot qua mạng, sạch sau mỗi lần khởi động."
 lang: vi
+date: 2026-10-11T23:07:00+07:00
+last_modified_at: 2026-10-13
+faq:
+  - q: Broom có miễn phí không?
+    a: Có, giấy phép Apache-2.0, dùng cho quán kinh doanh được, không tính phí theo máy.
+  - q: Máy trạm có cần ổ cứng không?
+    a: Image Windows cần SSD trên mỗi máy (để lưu image và chạy Windows). Image Linux chạy được cả khi không có ổ.
+  - q: Bao nhiêu máy?
+    a: Broom được làm cho phòng nhỏ, khoảng 10–30 máy mỗi máy chủ.
+  - q: Có chạy được game có anti-cheat không?
+    a: FACEIT Anti-Cheat chạy được với Secure Boot, TPM 2.0 và HVCI — xem [hướng dẫn FACEIT](faceit-diskless.html).
+  - q: So với CCBoot thì sao?
+    a: Xem [Broom vs CCBoot](broom-vs-ccboot.html).
 ---
 
 [← Broom](index.md)
@@ -87,16 +100,8 @@ nhật game — launcher tự cập nhật trên máy khách sẽ làm đầy SS
 
 ## Câu hỏi thường gặp
 
-**Broom có miễn phí không?** Có, giấy phép Apache-2.0, dùng cho quán kinh doanh được, không tính phí theo máy.
-
-**Máy trạm có cần ổ cứng không?** Image Windows cần SSD trên mỗi máy (để lưu image và chạy Windows). Image Linux chạy
-được cả khi không có ổ.
-
-**Bao nhiêu máy?** Broom được làm cho phòng nhỏ, khoảng 10–30 máy mỗi máy chủ.
-
-**Có chạy được game có anti-cheat không?** FACEIT Anti-Cheat chạy được với Secure Boot, TPM 2.0 và HVCI — xem
-[hướng dẫn FACEIT](faceit-diskless.md).
-
-**So với CCBoot thì sao?** Xem [Broom vs CCBoot](broom-vs-ccboot.md).
+{% for item in page.faq %}
+**{{ item.q }}** {{ item.a | markdownify | remove: '<p>' | remove: '</p>' | strip }}
+{% endfor %}
 
 Tài liệu đầy đủ (tiếng Anh): [github.com/morningstar-sudo/broom](https://github.com/morningstar-sudo/broom#readme)

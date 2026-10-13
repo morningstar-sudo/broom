@@ -66,6 +66,34 @@ footer{margin-top:3rem;padding-top:1.5rem;border-top:1px solid #eff0f1;font-size
   }
 }
 </script>
+{% else %}
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "TechArticle",
+  "headline": {{ page.title | jsonify }},
+  "description": {{ page.description | jsonify }},
+  "url": {{ page.url | absolute_url | jsonify }},
+  "inLanguage": {{ page.lang | default: site.lang | jsonify }},
+  "image": {{ page.image | absolute_url | jsonify }},
+  {% if page.date %}"datePublished": {{ page.date | date_to_xmlschema | jsonify }},{% endif %}
+  {% if page.last_modified_at %}"dateModified": {{ page.last_modified_at | date_to_xmlschema | jsonify }},{% endif %}
+  "author": {"@type": "Person", "@id": "https://hainth.edu.vn/#person", "name": "Nguyễn Trung Hoàng Hải", "url": "https://hainth.edu.vn/"},
+  "publisher": {"@type": "Person", "@id": "https://hainth.edu.vn/#person", "name": "Nguyễn Trung Hoàng Hải", "url": "https://hainth.edu.vn/"},
+  "about": {"@id": "https://broom.hainth.edu.vn/#software"}
+}
+</script>
+{% endif %}
+{% if page.faq %}
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "FAQPage",
+  "mainEntity": [{% for item in page.faq %}
+    {"@type": "Question", "name": {{ item.q | jsonify }}, "acceptedAnswer": {"@type": "Answer", "text": {{ item.a | markdownify | strip_html | strip | jsonify }}}}{% unless forloop.last %},{% endunless %}{% endfor %}
+  ]
+}
+</script>
 {% endif %}
 </head>
 <body>
@@ -77,7 +105,7 @@ footer{margin-top:3rem;padding-top:1.5rem;border-top:1px solid #eff0f1;font-size
 </header>
 <main id="content">
 {{ content }}
-<footer><a href="https://github.com/morningstar-sudo/broom">Broom</a> is maintained by <a href="https://github.com/morningstar-sudo">morningstar-sudo</a> · Apache-2.0</footer>
+<footer>Broom is maintained by <a href="https://hainth.edu.vn/">Nguyễn Trung Hoàng Hải</a> (<a href="https://github.com/morningstar-sudo">morningstar-sudo</a>) · Apache-2.0</footer>
 </main>
 </body>
 </html>
