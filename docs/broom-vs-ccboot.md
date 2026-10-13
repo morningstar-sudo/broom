@@ -22,7 +22,7 @@ change between versions; check their own documentation for current details.
 | Linux clients | yes (ext4 / LVM goldens) | — |
 | Where the client runs | from a VHDX cached on the PC's own SSD | depends on product and setup |
 | Reset | every boot | every boot |
-| Secure Boot / TPM / HVCI | yes — [works with FACEIT](faceit-diskless.md) | check the product |
+| Secure Boot / TPM / HVCI | yes, no MOK enrollment — [works with FACEIT](faceit-diskless.md) | check the product |
 | Games | shared games disks, versioned, updated from one PC | product-specific game update tools |
 | Track record | young project | many years, many sites |
 
@@ -34,7 +34,7 @@ change between versions; check their own documentation for current details.
 - **One file on Linux.** No Windows Server licence, no services to install — DHCP, TFTP, iPXE, iSCSI target and web
   admin are all inside one binary.
 - **Signed boot chain.** With Secure Boot clients on, the whole network boot is signed, so Secure Boot, TPM 2.0 and
-  HVCI stay on — what modern anti-cheats require.
+  HVCI stay on — what modern anti-cheats require. No MOK to enroll on any PC.
 - **Versions in a click.** Snapshots of the golden are hard links: instant and free until the golden changes. Games
   disks get a new version on every save, and PCs already playing keep the old one until they reboot.
 - **Open.** You can read, audit, fork and fix the code; no licence keys or per-PC fees.

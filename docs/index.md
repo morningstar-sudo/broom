@@ -1,18 +1,17 @@
 ---
 title: Broom — open-source diskless boot server for Windows 11 and Linux
-description: Free, open-source diskless boot server. Network-boot a room of Windows 11 or Linux PCs from one golden image, clean on every boot. One static binary.
+description: Free, open-source diskless boot server. Network-boot a room of Windows 11 or Linux PCs from one golden image, clean on every boot. Secure Boot without MOK. One static binary.
 seo: { type: WebSite }
 date: 2026-10-11T23:07:00+07:00
 last_modified_at: 2026-10-13
 ---
 
-**Broom** network-boots a room of PCs from **one shared golden image**. Every write a user makes lands on the
-machine's local SSD and is **wiped at the next boot**, so every machine comes up clean. Clients run
-**Windows 11 Pro** or **Linux**. The server is **one static binary** for any x86_64 Linux, with DHCP, TFTP, iPXE,
-an iSCSI target and a web admin built in.
+**Broom** network-boots a room of PCs from **one golden image** — every reboot comes up clean. One static binary
+on any Linux server, DHCP / TFTP / iSCSI / web admin built in. Free and open source (Apache-2.0), for internet cafés,
+gaming centers and school labs (≈10–30 PCs).
 
-Broom is free and open source (Apache-2.0), built for **internet cafés, gaming centers, school labs and
-classrooms** of about 10–30 machines.
+**Secure Boot on, no MOK:** every step of the network boot is signed through Microsoft's UEFI CA — no keys to
+enroll, no MokManager screen on any client. With TPM 2.0 + HVCI, [FACEIT Anti-Cheat works](faceit-diskless.md).
 
 [Download the latest release](https://github.com/morningstar-sudo/broom/releases/latest) ·
 [Source code & full manual](https://github.com/morningstar-sudo/broom) ·
@@ -32,15 +31,11 @@ classrooms** of about 10–30 machines.
 
 ## What you get
 
-- **Clean on every boot** — Windows boots from a child VHDX on the SSD that is reset each boot; Linux from a
-  read-only iSCSI root plus an overlay.
-- **One file to deploy** — no dnsmasq, tftpd, targetcli, qemu-img or kernel modules to install.
-- **Build the golden in a VM**, upload the VM folder from the browser, and Broom publishes it.
-- **Local SSD cache** — each machine keeps its images on its SSD, so a whole room boots without loading the server.
-- **Games disks** — install or update a game once on one machine, save, and every machine has it at its next boot.
-- **Image versions** — instant snapshot / rollback; export a version back to a VM to edit it.
-- **Machine groups** — per-group boot menus, images, games disks and drivers.
-- **Secure Boot, TPM 2.0, VBS / HVCI** — [works with FACEIT Anti-Cheat](faceit-diskless.md).
+- **Secure Boot without MOK, TPM 2.0, HVCI** — [works with FACEIT Anti-Cheat](faceit-diskless.md).
+- **Clean every boot** — Windows 11 Pro or Linux clients; writes go to the local SSD and are reset at the next boot.
+- **One file to deploy** — no dnsmasq, tftpd, targetcli; build the golden in a VM and upload it from the browser.
+- **Games disks** — update a game once, every PC gets it at its next boot.
+- **Snapshot / rollback, machine groups, web admin.**
 
 ## Quick start
 

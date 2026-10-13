@@ -2,7 +2,7 @@
 title: FACEIT Anti-Cheat on diskless PCs with Broom
 description: Run FACEIT Anti-Cheat on network-booted Windows 11 PCs — Secure Boot, TPM 2.0, IOMMU and HVCI on Broom diskless clients.
 date: 2026-10-11T23:07:00+07:00
-last_modified_at: 2026-10-12T23:23:13+07:00
+last_modified_at: 2026-10-13
 ---
 
 [← Broom](index.md)
@@ -17,7 +17,8 @@ clients pass them:
 
 - **Secure Boot** — with **Secure Boot clients** ticked on the Network page, the PCs boot the official iPXE signed by
   the iPXE project through its Microsoft-signed shim, and the Windows stage runs Ubuntu's signed kernel through
-  Ubuntu's Microsoft-signed shim. Every step of the network boot is signed, so Secure Boot stays on.
+  Ubuntu's Microsoft-signed shim. Every step of the network boot is signed, so Secure Boot stays on — and with keys
+  the shims already trust, so there is **no MOK to enroll** and no MokManager screen on any PC.
 - **TPM 2.0** — Windows runs natively on the PC (from a VHDX on its SSD), so it uses the PC's own TPM.
 - **VBS / HVCI** — `broom-prep-win` turns on Virtualization-Based Security and memory integrity in the golden.
 - **IOMMU** — on where the PC's firmware enables it.

@@ -5,41 +5,17 @@
 [![Release](https://img.shields.io/github/v/release/morningstar-sudo/broom)](https://github.com/morningstar-sudo/broom/releases/latest)
 [![License](https://img.shields.io/github/license/morningstar-sudo/broom)](LICENSE)
 
-**Broom** network-boots a room of PCs (PXE + iSCSI) from **one shared golden image**. Every user write goes to
-the local SSD and is **wiped on every boot**, so every machine comes up clean. It is a free, open-source
-alternative to commercial diskless software, built for **internet cafés, gaming centers, school labs and
-classrooms** (≈10–30 machines). Clients run **Windows 11 Pro** or **Linux**; the server is **one static Rust
-binary** with DHCP, TFTP, iSCSI target and web admin built in.
+Network-boot a room of PCs from **one golden image** — every reboot comes up clean. One static Rust binary on any
+Linux server, DHCP / TFTP / iSCSI / web admin built in. For internet cafés, gaming centers and school labs (≈10–30 PCs).
 
-**Guides:** [broom.hainth.edu.vn](https://broom.hainth.edu.vn/) — Windows 11 diskless,
-FACEIT on diskless PCs, Broom vs CCBoot, [hướng dẫn tiếng Việt](https://broom.hainth.edu.vn/bootrom-quan-net.html).
+- **Secure Boot on, no MOK** — every step of the network boot is signed through Microsoft's UEFI CA: no keys to
+  enroll, no MokManager screen on any client. With TPM 2.0 + HVCI, **FACEIT Anti-Cheat works**.
+- **Clean every boot** — Windows 11 Pro or Linux clients; writes go to the local SSD and are reset at the next boot.
+- **One file to deploy** — no dnsmasq, tftpd, targetcli; build the golden in a VM and upload it from the browser.
+- **Games disks** — update a game once, every PC gets it at its next boot.
+- **Snapshot / rollback, machine groups, web admin.** Free, Apache-2.0.
 
-> **Tiếng Việt:** Broom là phần mềm **bootrom (boot không ổ cứng / diskless)** mã nguồn mở, miễn phí, dành cho
-> **quán net, phòng game, phòng máy trường học**. Một máy chủ Linux chạy đúng một file, các máy trạm boot qua mạng
-> (PXE) từ một image Windows 11 Pro hoặc Linux dùng chung; mỗi lần khởi động lại máy trạm sạch như mới. Có ổ game
-> dùng chung, cập nhật game một lần cho cả phòng, snapshot / rollback image, chia nhóm máy. Chạy được **FACEIT
-> Anti-Cheat** (Secure Boot, TPM 2.0, HVCI).
-
-## Features
-
-- **Clean on every boot** — guests' writes land on the local SSD and are reset at the next boot; Windows boots
-  from a child VHDX, Linux from a read-only iSCSI root + overlay.
-- **One file to deploy** — no dnsmasq, tftpd, targetcli, qemu-img, libguestfs, LIO, zram or ntfs3: DHCP, TFTP,
-  iPXE, iSCSI target, compressed RAM cache, VMDK/VHDX conversion, ext4/LVM and NTFS reading are all in the binary.
-  Runs on any x86_64 Linux (static musl build).
-- **Build the golden in a VM** (e.g. VMware) and upload the VM folder from the browser; the server prepares the boot
-  files and publishes it.
-- **Local SSD cache** — each machine keeps its images on its SSD, so a room boots fast and the server's disk and
-  network stay quiet; new goldens can be preloaded in the background.
-- **Games disks** — shared, read-only game libraries per machine group; install or update a game once on one machine,
-  save, and every machine gets it at its next boot.
-- **Image versions** — snapshot / rollback instantly (hard links, no copy, no ZFS); export a version back to a
-  VMware VM to edit it.
-- **Machine groups** — per-group boot menus, images, games disks and drivers.
-- **Upgrade without kicking clients** — the iSCSI target runs as its own process (`broom-iscsid`).
-- **Secure Boot, TPM 2.0, VBS / HVCI** on the clients — **works with FACEIT Anti-Cheat**.
-- **Web admin** for images, machines (Wake-on-LAN, live status), DHCP and settings — behind a login.
-- **Free and open source** — Apache-2.0.
+**Guides:** [broom.hainth.edu.vn](https://broom.hainth.edu.vn/)
 
 ## Screenshots
 
@@ -179,7 +155,8 @@ both want ports 67/69/80. To upgrade: `systemctl stop bootrom-mgmt`, replace the
 
 **Secure Boot:** tick **Secure Boot clients** on the Network page. Clients then get the official iPXE signed
 by the iPXE project (`mgmt/ipxe/signed/`, via its Microsoft-signed shim) instead of broom's own build, and the kernels
-boot through Ubuntu's Microsoft-signed shim: the Windows stage runs Ubuntu's Canonical-signed generic kernel from the
+boot through Ubuntu's Microsoft-signed shim — no MOK enrollment, every link is signed by a key the shims already
+trust: the Windows stage runs Ubuntu's Canonical-signed generic kernel from the
 stage bundle (whatever distro/kernel the server has), and Ubuntu goldens' own kernels pass the same shim. Goldens of
 other distros need their kernel signed for that shim. On the clients: enable
 Secure Boot and the "Microsoft 3rd-party UEFI CA" (often off on Secured-core PCs). The menu footer (Host / IP / MAC)
@@ -405,7 +382,7 @@ new version at its next boot, while machines already playing keep theirs.
 
 **Does it work with anti-cheat (FACEIT)?**
 Yes — FACEIT Anti-Cheat runs on Broom clients with Secure Boot, TPM 2.0 and HVCI on (Network page → Secure Boot
-clients). If an anti-cheat needs a first run on each machine, tick **Base mode** on the image (see *Adding a golden*).
+clients), with no MOK enrollment on the clients. If an anti-cheat needs a first run on each machine, tick **Base mode** on the image (see *Adding a golden*).
 
 **Is it free?**
 Yes — Apache-2.0, free for commercial use (e.g. a paid internet café).

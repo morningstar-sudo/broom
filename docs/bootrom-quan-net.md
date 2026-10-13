@@ -12,7 +12,7 @@ faq:
   - q: Bao nhiêu máy?
     a: Broom được làm cho phòng nhỏ, khoảng 10–30 máy mỗi máy chủ.
   - q: Có chạy được game có anti-cheat không?
-    a: FACEIT Anti-Cheat chạy được với Secure Boot, TPM 2.0 và HVCI — xem [hướng dẫn FACEIT](faceit-diskless.html).
+    a: FACEIT Anti-Cheat chạy được với Secure Boot (không cần MOK), TPM 2.0 và HVCI — xem [hướng dẫn FACEIT](faceit-diskless.html).
   - q: So với CCBoot thì sao?
     a: Xem [Broom vs CCBoot](broom-vs-ccboot.html).
 ---
@@ -35,7 +35,8 @@ cũng mất sau khi restart.
   chỉ dùng khi có image mới, nên cả phòng boot cùng lúc máy chủ vẫn nhẹ.
 - **Ổ game dùng chung** — game để trên ổ game riêng, không nằm trong image. Cập nhật game **trên một máy**, bấm
   Save, cả phòng có bản mới ở lần boot sau; máy đang chơi vẫn dùng bản cũ đến khi restart.
-- **Chạy được FACEIT Anti-Cheat** — Secure Boot, TPM 2.0, HVCI đều bật ([chi tiết](faceit-diskless.md)).
+- **Bật Secure Boot không cần MOK** — cả chuỗi boot mạng đã được ký sẵn, không phải enroll khoá trên từng máy.
+  Secure Boot, TPM 2.0, HVCI đều bật nên **chạy được FACEIT Anti-Cheat** ([chi tiết](faceit-diskless.md)).
 - **Snapshot / rollback image** tức thì, **chia nhóm máy** (mỗi nhóm một menu boot, image, ổ game riêng),
   **Wake-on-LAN** và xem trạng thái máy trên web.
 - **Miễn phí, mã nguồn mở** (Apache-2.0) — không tính phí theo số máy, dùng cho quán kinh doanh được.
