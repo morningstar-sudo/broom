@@ -34,7 +34,37 @@ footer{margin-top:3rem;padding-top:1.5rem;border-top:1px solid #eff0f1;font-size
 </style>
 {% if page.url == "/" %}
 <script type="application/ld+json">
-{"@context":"https://schema.org","@type":"SoftwareApplication","name":"Broom","description":{{ site.description | jsonify }},"url":"{{ site.url }}/","image":"{{ site.url }}/images/broom.png","screenshot":["{{ site.url }}/images/client-games-disk.png","{{ site.url }}/images/faceit-anticheat.png"],"applicationCategory":"UtilitiesApplication","operatingSystem":"Linux (server); Windows 11, Linux (clients)","license":"https://www.apache.org/licenses/LICENSE-2.0","downloadUrl":"https://github.com/morningstar-sudo/broom/releases/latest","sameAs":["https://github.com/morningstar-sudo/broom"],"author":{"@type":"Person","name":"morningstar-sudo","url":"https://github.com/morningstar-sudo"},"offers":{"@type":"Offer","price":"0","priceCurrency":"USD"}}
+{
+  "@context": "https://schema.org",
+  "@type": "SoftwareApplication",
+  "@id": "{{ site.url }}/#software",
+  "name": "Broom",
+  "description": {{ site.description | jsonify }},
+  "url": "{{ site.url }}/",
+  "image": "{{ site.url }}/images/broom.png",
+  "screenshot": [
+    "{{ site.url }}/images/client-games-disk.png",
+    "{{ site.url }}/images/faceit-anticheat.png"
+  ],
+  "applicationCategory": "UtilitiesApplication",
+  "operatingSystem": "Linux (server); Windows 11, Linux (clients)",
+  "license": "https://www.apache.org/licenses/LICENSE-2.0",
+  "downloadUrl": "https://github.com/morningstar-sudo/broom/releases/latest",
+  "sameAs": ["https://github.com/morningstar-sudo/broom"],
+  "author": {
+    "@type": "Person",
+    "@id": "https://hainth.edu.vn/#person",
+    "name": "Nguyễn Trung Hoàng Hải",
+    "alternateName": "Nguyen Trung Hoang Hai",
+    "url": "https://hainth.edu.vn/",
+    "sameAs": ["https://github.com/morningstar-sudo"]
+  },
+  "offers": {
+    "@type": "Offer",
+    "price": "0",
+    "priceCurrency": "USD"
+  }
+}
 </script>
 {% endif %}
 </head>
