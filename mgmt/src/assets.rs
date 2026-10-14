@@ -43,7 +43,18 @@ assets!(
     "scripts/broom-games.ps1",
     "scripts/broom-watch.ps1",
     "scripts/broom-stub.ps1",
+    "scripts/broom-fw.cs",
 );
+
+/// Assets only a release has: built by CI on another OS and added to its broom-assets.zip (a local build has none).
+/// broom-fw.dll: broom-fw.cs compiled on a Windows runner, so the clients never run the C# compiler for it.
+const OPTIONAL: &[&str] = &["scripts/broom-fw.dll"];
+
+/// An asset of OPTIONAL: Some in a release whose zip has it.
+pub fn optional(name: &str) -> Option<&'static [u8]> {
+    debug_assert!(OPTIONAL.contains(&name));
+    LOADED.get().and_then(|m| m.get(name).copied())
+}
 
 /// broom-assets.zip of this release: sha256, then its URL (CI). Comments only = local build (embedded assets).
 #[cfg_attr(not(feature = "external-assets"), allow(dead_code))]
@@ -134,6 +145,13 @@ fn unzip(data: &[u8]) -> Result<HashMap<String, &'static [u8]>, String> {
         let mut f = z
             .by_name(name)
             .map_err(|_| format!("broom-assets.zip has no {name} (another release?)"))?;
+        let mut v = Vec::new();
+        f.read_to_end(&mut v)
+            .map_err(|e| format!("broom-assets.zip {name}: {e}"))?;
+        map.insert(name.to_string(), &*Box::leak(v.into_boxed_slice()));
+    }
+    for name in OPTIONAL {
+        let Ok(mut f) = z.by_name(name) else { continue };
         let mut v = Vec::new();
         f.read_to_end(&mut v)
             .map_err(|e| format!("broom-assets.zip {name}: {e}"))?;

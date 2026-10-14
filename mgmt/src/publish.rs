@@ -355,18 +355,27 @@ fn publish_iscsi_staged(
     //    target for connected clients (dropped once they leave). cache_mode (images column): disk → the daemon reads
     //    the file; zram → it serves a compressed copy in RAM. RAM refused (not enough, checked before anything is
     //    loaded) or failed → falls back to disk BY ITSELF (DB updated) so the image always boots.
+    // The sha256 (step 4) reads the whole golden; a RAM target reads it all too: both at once → one pass over the disk
+    // (the slower one reads from the page cache).
     let path = img_abs.to_string_lossy();
     let ram = want == "zram";
-    let (iqn, ram) = match export_target(st, name, g, ram, &path) {
-        Ok(iqn) => (iqn, ram),
-        Err(e) if ram => {
-            tracing::warn!(
-                "image {name}: RAM cache not used ({e}) → falling back to cache_mode=disk"
-            );
-            (export_target(st, name, g, false, &path)?, false)
-        }
-        Err(e) => return Err(e),
-    };
+    let (target, hash) = std::thread::scope(|s| {
+        let hash = s.spawn(|| {
+            crate::hash::file_hash_cached(img_abs, &images_dir().join(name).join("image.sha256"))
+        });
+        let target = match export_target(st, name, g, ram, &path) {
+            Ok(iqn) => Ok((iqn, ram)),
+            Err(e) if ram => {
+                tracing::warn!(
+                    "image {name}: RAM cache not used ({e}) → falling back to cache_mode=disk"
+                );
+                export_target(st, name, g, false, &path).map(|iqn| (iqn, false))
+            }
+            Err(e) => Err(e),
+        };
+        (target, hash.join().ok().flatten())
+    });
+    let (iqn, ram) = target?;
     if want == "zram" && !ram {
         let _ = st.db.set_cache_mode(id, "disk");
     }
@@ -375,18 +384,17 @@ fn publish_iscsi_staged(
     // 4. iPXE boot_script. The initrd hook reads broom.name/hash/size/srv/reg/lxgb/ssd from the cmdline.
     // sanhook = iPXE attaches iSCSI via iBFT (does not boot the LUN); initrd open-iscsi reads the iBFT →
     // /dev/sda golden RO → root=UUID mounted RO; overlayroot (baked into the golden) overlays it onto the
-    // SSD writeback (reset every boot). ip=dhcp gives the initrd a network.
+    // SSD writeback (reset every boot). ip=dhcp: the system keeps a lease it renews; BOOTIF + broom.ip (the address
+    // iPXE booted with) let the initrd hook bring up that card at once, no DHCP round.
     // overlayroot on the CMDLINE (takes precedence over the conf file) → root RO + upper on the SSD LABEL broomwb.
     // `quiet` left out so overlayroot/broom logs show on the client console (easier to debug a boot).
     // broom.name/hash/size: the initrd hook compares the hash with the SSD cache copy (match → boot from the SSD,
     // skip iSCSI; mismatch → iSCSI + background copy). Hash computed FIRST to embed it in the cmdline.
-    let hash =
-        crate::hash::file_hash_cached(img_abs, &images_dir().join(name).join("image.sha256"))
-            .ok_or_else(|| format!("sha256 of {} failed", img_abs.display()))?;
+    let hash = hash.ok_or_else(|| format!("sha256 of {} failed", img_abs.display()))?;
     let size = std::fs::metadata(img_abs).map_err(|e| e.to_string())?.len();
     let bs = format!(
         "sanhook iscsi:${{broom-srv}}::::{iqn} || shell\n\
-         kernel http://${{broom-srv}}/tftp/broom/{name}/vmlinuz initrd=initrd.img ip=dhcp root=UUID={root_uuid} ro fsck.mode=skip overlayroot=device:dev=/dev/disk/by-label/broomwb,recurse=0 broom.name={name} broom.hash={hash} broom.size={size} broom.srv=${{broom-srv}} broom.reg=${{broom-reg}} broom.lxgb=${{broom-lxgb}} broom.wbgb=${{broom-wbgb}} broom.ssd=${{broom-ssd}}\n\
+         kernel http://${{broom-srv}}/tftp/broom/{name}/vmlinuz initrd=initrd.img ip=dhcp BOOTIF=01-${{mac:hexhyp}} broom.ip=${{ip}}:${{netmask}}:${{gateway}} root=UUID={root_uuid} ro fsck.mode=skip overlayroot=device:dev=/dev/disk/by-label/broomwb,recurse=0 broom.name={name} broom.hash={hash} broom.size={size} broom.srv=${{broom-srv}} broom.reg=${{broom-reg}} broom.lxgb=${{broom-lxgb}} broom.wbgb=${{broom-wbgb}} broom.ssd=${{broom-ssd}}\n\
          initrd http://${{broom-srv}}/tftp/broom/{name}/initrd.img\n\
          boot"
     );

@@ -5,9 +5,10 @@ log(){ echo "broom: $*"; echo "$*" >> /run/broom-wb.log; }
 WB_GB=""   # writeback GB (broom.wbgb, set by the server); the rest of the Linux part = cache + /games.
 modprobe iscsi_tcp 2>/dev/null
 modprobe iscsi_ibft 2>/dev/null
-NAME=""; HASH=""; SIZE=""; NOCACHE=""; REG=""; LX=""; SSD=""; SRV=""
+NAME=""; HASH=""; SIZE=""; NOCACHE=""; REG=""; LX=""; SSD=""; SRV=""; MAC=""; BIP=""
 for a in $(cat /proc/cmdline); do
   case "$a" in
+    BOOTIF=01-*) MAC=$(echo "${a#BOOTIF=01-}" | tr 'A-F-' 'a-f:');; broom.ip=*) BIP=${a#*=};;
     broom.name=*) NAME=${a#*=};; broom.hash=*) HASH=${a#*=};; broom.size=*) SIZE=${a#*=};;
     broom.nocache) NOCACHE=1;;
     broom.reg=*) REG=${a#*=};; broom.lxgb=*) LX=${a#*=};; broom.ssd=*) SSD=${a#*=};; broom.srv=*) SRV=${a#*=};; broom.wbgb=*) WB_GB=${a#*=};;
@@ -124,7 +125,19 @@ log "cache: $MODE ($cache)"
 
 # 3. MISS / no cache → attach iSCSI as before.
 if [ "$MODE" != hit ]; then
-  for ni in /sys/class/net/*; do
+  # The card iPXE booted from, with the address it had (BOOTIF + broom.ip "ip:mask:gw"): up at once — no DHCP round,
+  # no 15 s wait on an unplugged card that sorts first. Not found (boot script of an older version) → DHCP on each card.
+  up=""
+  if [ -n "$MAC" ] && [ -n "${BIP%%:*}" ]; then
+    mask=${BIP#*:}; gw=${mask#*:}; mask=${mask%%:*}
+    for ni in /sys/class/net/*; do
+      [ "$(cat "$ni/address" 2>/dev/null)" = "$MAC" ] || continue
+      ipconfig -t 5 -d "${BIP%%:*}::$gw:$mask::${ni##*/}:off" >/dev/null 2>&1 && up=${ni##*/}
+      break
+    done
+    log "network: ${up:-card $MAC not set up -> DHCP} ${up:+static ${BIP%%:*}}"
+  fi
+  [ -n "$up" ] || for ni in /sys/class/net/*; do
     n=${ni##*/}; [ "$n" = lo ] && continue
     ipconfig -t 15 "$n" >/dev/null 2>&1 && break
   done

@@ -85,7 +85,7 @@ pub async fn render(State(st): State<SharedState>, Query(q): Q) -> impl IntoResp
     // Clamp: menu_script does timeout_s * 1000 (would overflow / panic on a huge stored value).
     let timeout_s: u64 = st
         .db
-        .get_config("boot_timeout", "10")
+        .get_config("boot_timeout", "3")
         .parse()
         .unwrap_or(10)
         .min(3600);

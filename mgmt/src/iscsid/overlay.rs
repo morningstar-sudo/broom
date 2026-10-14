@@ -66,11 +66,24 @@ impl Overlay {
         self.blocks.lock().contains(&b)
     }
 
+    /// Neighbouring blocks on the same side (overlay / below) are read in one go: a 1 MB read is one call, not 16.
     pub fn read_at(&self, base: Base, mut off: u64, mut buf: &mut [u8]) -> Result<(), String> {
+        let Some(end) = off.checked_add(buf.len() as u64) else {
+            return Err("read past the end of the disk".into());
+        };
+        // Which blocks of the range are the overlay's, under one lock.
+        let first = off / BLOCK;
+        let mine: Vec<bool> = {
+            let set = self.blocks.lock();
+            (first..end.div_ceil(BLOCK))
+                .map(|b| set.contains(&(b as u32)))
+                .collect()
+        };
         while !buf.is_empty() {
-            let b = (off / BLOCK) as u32;
-            let n = ((BLOCK - off % BLOCK) as usize).min(buf.len());
-            if self.has(b) {
+            let i = (off / BLOCK - first) as usize;
+            let run = mine[i..].iter().take_while(|&&m| m == mine[i]).count() as u64;
+            let n = ((off / BLOCK + run) * BLOCK - off).min(buf.len() as u64) as usize;
+            if mine[i] {
                 self.file
                     .read_exact_at(&mut buf[..n], off)
                     .map_err(|e| format!("overlay read: {e}"))?;

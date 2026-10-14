@@ -95,10 +95,11 @@ fn load(name: &str, server: Ipv4Addr) -> Result<Cow<'static, [u8]>, String> {
 
 /// First script of every iPXE: configure the NIC by DHCP, then the server's boot menu. `ifconf -c dhcp`, not `dhcp`:
 /// that one runs every configurator, IPv6 router discovery too, which on a LAN without an IPv6 router waits out its
-/// backoff (~3.9 s) before the menu.
+/// backoff (~3.9 s) before the menu. An address already there (the firmware's PXE DHCP answer, which iPXE loaded over
+/// PXE takes over) is used as it is: a second DHCP waits ~2–3 s for a ProxyDHCP offer behind a router that sends none.
 fn autoexec(server: Ipv4Addr) -> String {
     format!(
-        "#!ipxe\nifconf -c dhcp || ifconf -c dhcp || shell\nchain http://{server}/boot.ipxe?mac=${{net0/mac}}&ip=${{net0/ip}} || shell\n"
+        "#!ipxe\nisset ${{net0/ip}} && ifopen net0 || ifconf -c dhcp || ifconf -c dhcp || shell\nchain http://{server}/boot.ipxe?mac=${{net0/mac}}&ip=${{net0/ip}} || shell\n"
     )
 }
 

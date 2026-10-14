@@ -97,7 +97,7 @@ const SCHEMA: &str = r#"
         key   TEXT PRIMARY KEY,
         value TEXT NOT NULL
     );
-    INSERT OR IGNORE INTO config(key,value) VALUES('boot_timeout','10');
+    INSERT OR IGNORE INTO config(key,value) VALUES('boot_timeout','3');
     INSERT OR IGNORE INTO config(key,value) VALUES('zram_reserve_mb','2048');
     INSERT OR IGNORE INTO config(key,value) VALUES('dhcp_mode','off');
     INSERT OR IGNORE INTO config(key,value) VALUES('dhcp_iface','');
@@ -284,8 +284,10 @@ impl Sqlite {
 
 impl Db for Sqlite {
     fn get_config(&self, key: &str, default: &str) -> String {
+        // Cached statement: DHCP reads ~17 keys per packet.
         self.c()
-            .query_row("SELECT value FROM config WHERE key=?1", [key], |r| r.get(0))
+            .prepare_cached("SELECT value FROM config WHERE key=?1")
+            .and_then(|mut s| s.query_row([key], |r| r.get(0)))
             .unwrap_or_else(|_| default.to_string())
     }
 
@@ -717,9 +719,12 @@ impl Db for Sqlite {
 
     fn bench_rows(&self, mac: Option<&str>, limit: usize) -> DbResult<Vec<BenchRow>> {
         let c = self.c();
-        let mut s = c
-            .prepare("SELECT at,mac,kind,value,detail FROM bench WHERE ?1 IS NULL OR mac=?1 ORDER BY at DESC, id DESC LIMIT ?2")
-            .map_err(e)?;
+        // Two statements: `?1 IS NULL OR mac=?1` would keep SQLite off the bench_mac index for one machine's rows.
+        let mut s = match mac {
+            Some(_) => c.prepare_cached("SELECT at,mac,kind,value,detail FROM bench WHERE mac=?1 ORDER BY at DESC, id DESC LIMIT ?2"),
+            None => c.prepare_cached("SELECT at,mac,kind,value,detail FROM bench WHERE ?1 IS NULL ORDER BY at DESC, id DESC LIMIT ?2"),
+        }
+        .map_err(e)?;
         let rows = s
             .query_map(params![mac, limit as i64], bench_row)
             .map_err(e)?;
@@ -728,10 +733,11 @@ impl Db for Sqlite {
 
     fn bench_latest(&self) -> DbResult<Vec<BenchRow>> {
         let c = self.c();
+        // One pass over the table (not a lookup per row: up to 20k rows, under the lock DHCP waits on).
         let mut s = c
-            .prepare(
-                "SELECT at,mac,kind,value,detail FROM bench b WHERE id = (SELECT id FROM bench WHERE mac IS b.mac AND kind=b.kind
-                 ORDER BY at DESC, id DESC LIMIT 1)",
+            .prepare_cached(
+                "SELECT at,mac,kind,value,detail FROM (SELECT *, ROW_NUMBER() OVER (PARTITION BY mac, kind
+                 ORDER BY at DESC, id DESC) AS n FROM bench) WHERE n=1",
             )
             .map_err(e)?;
         let rows = s.query_map([], bench_row).map_err(e)?;

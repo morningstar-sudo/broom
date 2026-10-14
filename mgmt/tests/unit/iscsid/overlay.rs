@@ -26,6 +26,15 @@ fn reads_see_writes_over_the_disk() {
     let mut got = vec![0u8; size as usize];
     o.read_at(&b, 0, &mut got).unwrap();
     assert!(got == want);
+    // Neighbouring blocks on one side are one call: [0, 1] in the overlay, [2..=5] below → 1 call to the disk.
+    let calls = std::cell::Cell::new(0);
+    let counted = |off: u64, buf: &mut [u8]| {
+        calls.set(calls.get() + 1);
+        b(off, buf)
+    };
+    o.read_at(&counted, 0, &mut got).unwrap();
+    assert!(got == want);
+    assert_eq!(calls.get(), 1);
     o.write_at(&b, size - 1, &[3]).unwrap(); // the partial last block
     assert!(o.write_at(&b, size - 1, &[1, 2]).is_err(), "past the end");
     let _ = std::fs::remove_dir_all(&d);

@@ -88,7 +88,7 @@ async fn set_cafe_user(
 async fn get_config(State(st): State<SharedState>) -> Json<serde_json::Value> {
     let (room, warn, reboot) = ssd_limits(&st);
     Json(serde_json::json!({
-        "boot_timeout": st.db.get_config("boot_timeout", "10").parse::<u64>().unwrap_or(10),
+        "boot_timeout": st.db.get_config("boot_timeout", "3").parse::<u64>().unwrap_or(3),
         "zram_reserve_mb": st.db.get_config("zram_reserve_mb", "2048").parse::<u64>().unwrap_or(2048),
         "alert_pct": st.db.get_config("alert_pct", "80").parse::<u64>().unwrap_or(80),
         "ssd_room_gb": room,

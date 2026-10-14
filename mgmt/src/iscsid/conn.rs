@@ -660,7 +660,7 @@ pub async fn command(bhs: &[u8; 48], disk: Disk, mrdsl: usize, data: Vec<u8>) ->
     let cmd = match (cmd, disk.ov.clone()) {
         (scsi::Cmd::Read { lba, blocks }, ov) => {
             let (off, len) = (lba * scsi::BLOCK, blocks as usize * scsi::BLOCK as usize);
-            let r = match lun.read_now(off, len).filter(|_| plain) {
+            let r = match plain.then(|| lun.read_now(off, len)).flatten() {
                 Some(buf) => Ok(Ok(buf)),
                 None => {
                     let d = disk.clone();

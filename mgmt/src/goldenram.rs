@@ -210,26 +210,25 @@ fn serve(img: Arc<Golden>, headers: &HeaderMap) -> Response {
         }
     };
     let len = if size == 0 { 0 } else { last - first + 1 };
-    // 1 MB at a time, read (disk) / unpacked (RAM) off the async threads.
-    let body = futures_util::stream::unfold(first, move |at| {
-        let img = img.clone();
-        async move {
-            let end = first + len;
-            if at >= end {
-                return None;
+    // 1 MB at a time, read (disk) / unpacked (RAM) off the async threads; the next MB is read while one is sent.
+    use futures_util::StreamExt;
+    let end = first + len;
+    let body = futures_util::stream::iter((first..end).step_by(1 << 20))
+        .map(move |at| {
+            let img = img.clone();
+            async move {
+                let n = (end - at).min(1 << 20) as usize;
+                tokio::task::spawn_blocking(move || {
+                    let mut buf = vec![0u8; n];
+                    img.read_at(at, &mut buf).map(|_| buf)
+                })
+                .await
+                .map_err(|e| e.to_string())
+                .and_then(|r| r)
+                .map_err(std::io::Error::other)
             }
-            let n = (end - at).min(1 << 20) as usize;
-            let chunk = tokio::task::spawn_blocking(move || {
-                let mut buf = vec![0u8; n];
-                img.read_at(at, &mut buf).map(|_| buf)
-            })
-            .await
-            .map_err(|e| e.to_string())
-            .and_then(|r| r)
-            .map_err(std::io::Error::other);
-            Some((chunk, at + n as u64))
-        }
-    });
+        })
+        .buffered(2);
     let mut r = Response::new(Body::from_stream(body));
     *r.status_mut() = status;
     let h = r.headers_mut();

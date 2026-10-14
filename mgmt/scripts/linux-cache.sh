@@ -75,7 +75,10 @@ avail=$(df -B1 --output=avail $C | tail -1)
 log "cache: copying $GOLDEN -> $C/$NAME.img ..."
 # Hashed while copying (tee) → the copy is never read back. count_bytes: a zram backstore can be larger than the
 # source file (page rounding) → cut exactly SIZE so the hash matches. Short copy (disk full / read error) → size check.
-h=$(ionice -c3 nice -n19 dd if="$GOLDEN" bs=4M iflag=count_bytes count="$SIZE" status=none \
+# direct: the golden passes by the page cache instead of pushing the session's own files (games) out of it; only on a
+# whole number of sectors (a direct read must be).
+direct=""; [ $((SIZE % 512)) -eq 0 ] && direct=,direct
+h=$(ionice -c3 nice -n19 dd if="$GOLDEN" bs=4M iflag=count_bytes$direct count="$SIZE" status=none \
   | tee "$C/$NAME.tmp" | sha256sum | cut -d' ' -f1)
 if [ "$h" = "$HASH" ] && [ "$(stat -c %s "$C/$NAME.tmp" 2>/dev/null)" = "$SIZE" ]; then
   mv "$C/$NAME.tmp" "$C/$NAME.img" && sync && echo "$HASH" > "$C/$NAME.sha256" && sync

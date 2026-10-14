@@ -558,7 +558,11 @@ async fn main() {
         // /tftp/... -> <home>/tftp/... (e.g. http://SERVER/tftp/broom-stage/vmlinuz); a Windows golden set to RAM
         // from its RAM copy.
         .route("/tftp/broom-win/{name}/golden.vhdx", get(goldenram::get))
-        .nest_service("/tftp", ServeDir::new(tftp_dir()))
+        // 1 MB reads (default 64 KB): every boot of every client fetches its kernel + initrd here.
+        .nest_service(
+            "/tftp",
+            ServeDir::new(tftp_dir()).with_buf_chunk_size(1 << 20),
+        )
         // Guard EVERYTHING: Host check + a session for non-public routes (auth.rs::is_public lists the open ones).
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),

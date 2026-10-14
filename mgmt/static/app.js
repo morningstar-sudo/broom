@@ -678,6 +678,6 @@ function startApp(){
   setInterval(()=>{if(lastPing&&Date.now()-lastPing>12000)setServer(false);},3000);
   if(location.pathname!=='/'+pageFromPath())history.replaceState(null,'','/'+pageFromPath());
   showPage(pageFromPath());
-  setInterval(()=>{if(curPage==='machines')loadStatus();},15000);
+  setInterval(()=>{if(curPage==='machines'&&!document.hidden)loadStatus();},15000);
 }
 startApp();

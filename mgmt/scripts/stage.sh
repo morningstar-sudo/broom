@@ -9,7 +9,8 @@ PATH=/broom/bin:$PATH
 log(){ echo "broom: $*"; echo "[$(cut -d' ' -f1 /proc/uptime)] $*" >> /run/broom-stage.log; }
 # panic = shell (initramfs); fix by hand then `exit` → the script CONTINUES from the failed step (on-site debug).
 die(){ panic "broom stage ERROR: $*"; }
-restart(){ log "$*"; sleep 2; reboot -f 2>/dev/null || echo b > /proc/sysrq-trigger; sleep 30; }
+# Errors: 2 s to read the reason on screen. The normal end ("-> Windows") reboots at once.
+restart(){ log "$*"; case "$1" in "-> Windows"*) ;; *) sleep 2;; esac; reboot -f 2>/dev/null || echo b > /proc/sysrq-trigger; sleep 30; }
 # GNU wget copied by the hook, called by path: the initramfs busybox wget has no --post-file / -T (the driver list
 # needs them) and must never be picked instead. Its defaults wait 15 min per read and retry 20 times — a stalled server
 # must not hang the stage that long: 30 s, 3 tries (an -T given by the caller still wins).
@@ -18,6 +19,8 @@ else log "WARNING: no GNU wget in the stage (publish again) -> drivers skipped";
 # GNU tee, as a function for the same reason: the golden is hashed while downloading through tee, and the busybox
 # applet (which ash runs before anything in PATH) copies one byte per write() → ~300 KB/s instead of the network's.
 tee(){ /broom/bin/tee "$@"; }
+# GNU sha256sum (SHA-NI) for the same reason: the busybox applet hashes a golden several times slower.
+sha256sum(){ /broom/bin/sha256sum "$@"; }
 # One timeline for stage.log: the stage's lines ($1, "[secs] text") and the kernel's (GNU dmesg, "[   secs] text",
 # marked "kernel:"), sorted by the seconds since power-on both carry.
 kmsg(){ /broom/bin/dmesg 2>/dev/null; }
@@ -178,13 +181,9 @@ fi
 if [ -d "img.$NAME" ]; then
   for f in "img.$NAME"/*; do [ -e "$f" ] && mv "$f" .; done
   rm -f "img.$NAME/.parked"; rmdir "img.$NAME" 2>/dev/null
-  # A parked set sat on BROOMWIN while other sessions ran: its golden is checked against the SERVER's hash (cmdline,
-  # not the copy's own golden.sha256) before it is used again — one read, only when switching images. Mismatch
-  # (changed meanwhile, or republished) → step 1 downloads it again.
-  if [ -f golden.vhdx ] && [ "$(cat golden.sha256 2>/dev/null)" = "$HASH" ]; then
-    log "checking the golden of $NAME after its time parked..."
-    [ "$(sha256sum golden.vhdx | cut -c1-64)" = "$HASH" ] || { rm -f golden.sha256; log "golden of $NAME does not match the server's -> downloaded again"; }
-  fi
+  # A parked set is trusted like the active one: its golden.sha256 was written once the download checked out, and step
+  # 1 compares it with the server's hash (republished meanwhile → downloaded again). No re-read of the whole golden on
+  # every switch of images.
 fi
 echo "$NAME" > active.txt
 # Parked images the server no longer lets this machine keep (deleted / republished: "name hash" lines) → removed.
@@ -324,9 +323,11 @@ else
   log "no files.sha256 on the server for $NAME (published by an older version) -> Publish again to check the boot files"
 fi
 if wget -q -O /run/broom-scripts.sha256 http://$SRV/tftp/broom-scripts/scripts.sha256 2>/dev/null && [ -s /run/broom-scripts.sha256 ]; then
-  check_list /run/broom-scripts.sha256 http://$SRV/tftp/broom-scripts broom-done.ps1 broom-bootorder.ps1 broom-games.ps1 broom-watch.ps1
+  check_list /run/broom-scripts.sha256 http://$SRV/tftp/broom-scripts broom-done.ps1 broom-bootorder.ps1 broom-games.ps1 broom-watch.ps1 broom-fw.cs broom-fw.dll
+  # broom-fw.dll (the SYSTEM task loads it) only as the server ships it: none listed (a local build) -> none kept.
+  grep -q '  broom-fw.dll$' /run/broom-scripts.sha256 || rm -f $B/broom-fw.dll
 else
-  log "no scripts.sha256 on the server -> Windows scripts not checked this boot"
+  log "no scripts.sha256 on the server -> Windows scripts not checked this boot"; rm -f $B/broom-fw.dll
 fi
 
 # 1c. Preload: the other Windows images of this machine set to preload (cache-list lines "preload name hash windows")

@@ -657,7 +657,14 @@ pub(crate) async fn write_chunk(
         if f.metadata()?.len() < total {
             f.set_len(total)?; // sparse; chunks fill it in any order
         }
-        f.write_all_at(&data, offset)
+        // All-zero MBs are left as holes (the file starts as one; each range is sent once): a raw disk keeps its free
+        // space out of the golden, the download and every full read of it.
+        for (i, part) in data.chunks(1 << 20).enumerate() {
+            if part.iter().any(|&b| b != 0) {
+                f.write_all_at(part, offset + (i << 20) as u64)?;
+            }
+        }
+        Ok(())
     })
     .await
     .map_err(|e| ise(e.to_string()))?

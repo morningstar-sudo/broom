@@ -81,8 +81,8 @@ fn autoexec_chains_the_menu() {
     for name in ["autoexec.ipxe", "/autoexec.ipxe", "sb/autoexec.ipxe"] {
         let s = String::from_utf8(load(name, ip).unwrap().into_owned()).unwrap();
         assert!(
-            s.starts_with("#!ipxe\nifconf -c dhcp ||"),
-            "{name}: DHCPv4 only, no IPv6 router discovery wait"
+            s.starts_with("#!ipxe\nisset ${net0/ip} && ifopen net0 || ifconf -c dhcp ||"),
+            "{name}: the PXE address kept; else DHCPv4 only, no IPv6 router discovery wait"
         );
         assert!(
             s.contains("chain http://10.0.0.12/boot.ipxe?mac=${net0/mac}&ip=${net0/ip}"),

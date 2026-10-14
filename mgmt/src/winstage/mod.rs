@@ -18,7 +18,9 @@ mod prep;
 mod stage;
 
 pub use prep::prep_script;
-use prep::{boot_storage_done, broom_bootorder, broom_done, broom_games, broom_watch, has_stub};
+use prep::{
+    boot_storage_done, broom_bootorder, broom_done, broom_fw_cs, broom_games, broom_watch, has_stub,
+};
 #[cfg(feature = "external-assets")]
 pub(crate) use stage::download;
 pub use stage::{build_bundle, ensure_stage}; // assets.rs: the release's broom-assets.zip
@@ -38,12 +40,16 @@ fn stage_dir() -> String {
 
 type Script = (&'static str, fn() -> &'static str);
 /// The Windows scripts the stage puts in BROOMWIN broom\ (the golden only holds fixed stubs that run them).
-const SCRIPTS: [Script; 4] = [
+const SCRIPTS: [Script; 5] = [
     ("broom-done.ps1", broom_done),
     ("broom-bootorder.ps1", broom_bootorder),
     ("broom-games.ps1", broom_games),
     ("broom-watch.ps1", broom_watch),
+    ("broom-fw.cs", broom_fw_cs),
 ];
+/// Compiled broom-fw.cs, next to the scripts when this release has it (CI). Not listed = the stage removes BROOMWIN's
+/// copy: a DLL the SYSTEM task loads must never be one a guest left there.
+const FW_DLL: &str = "broom-fw.dll";
 
 /// At start: the Windows scripts of this version into tftp/broom-scripts/ + their scripts.sha256, which the stage
 /// checks BROOMWIN's copies against on every boot — like the stage itself, a new mgmt version reaches every client at
@@ -52,11 +58,20 @@ const SCRIPTS: [Script; 4] = [
 pub fn install_scripts() -> Result<(), String> {
     let dir = crate::tftp_dir().join("broom-scripts");
     std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    let mut files: Vec<(&str, std::borrow::Cow<[u8]>)> = SCRIPTS
+        .iter()
+        .map(|(f, body)| (*f, body().replace('\n', "\r\n").into_bytes().into()))
+        .collect();
+    match crate::assets::optional(&format!("scripts/{FW_DLL}")) {
+        Some(dll) => files.push((FW_DLL, dll.into())),
+        None => {
+            let _ = std::fs::remove_file(dir.join(FW_DLL)); // of another release
+        }
+    }
     let mut sums = String::new();
-    for (f, body) in SCRIPTS {
-        let body = body().replace('\n', "\r\n");
+    for (f, body) in files {
         let p = dir.join(f);
-        if std::fs::read(&p).ok().as_deref() != Some(body.as_bytes()) {
+        if std::fs::read(&p).ok().as_deref() != Some(&body[..]) {
             let tmp = dir.join(format!("{f}.tmp"));
             std::fs::write(&tmp, &body)
                 .and_then(|_| std::fs::rename(&tmp, &p))

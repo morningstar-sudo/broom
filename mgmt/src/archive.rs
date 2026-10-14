@@ -70,10 +70,16 @@ pub fn tar_gz(dir: &Path, out: &Path) -> Result<(), String> {
         if is_dir {
             header(&mut gz, &format!("{rel}/"), 0o755, 0, b'5')?;
         } else {
-            let data = std::fs::read(&full).map_err(|e| format!("{}: {e}", full.display()))?;
-            header(&mut gz, &rel, 0o644, data.len() as u64, b'0')?;
-            gz.write_all(&data).map_err(|e| e.to_string())?;
-            gz.write_all(&vec![0u8; (512 - data.len() % 512) % 512])
+            // Streamed: a driver package can hold single files of hundreds of MB.
+            let io = |e: std::io::Error| format!("{}: {e}", full.display());
+            let mut src = std::fs::File::open(&full).map_err(io)?;
+            let len = src.metadata().map_err(io)?.len();
+            header(&mut gz, &rel, 0o644, len, b'0')?;
+            let n = std::io::copy(&mut std::io::Read::take(&mut src, len), &mut gz).map_err(io)?;
+            if n != len {
+                return Err(format!("{}: changed while packing", full.display()));
+            }
+            gz.write_all(&[0u8; 512][..((512 - len % 512) % 512) as usize])
                 .map_err(|e| e.to_string())?;
         }
     }

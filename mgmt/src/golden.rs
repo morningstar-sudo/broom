@@ -45,10 +45,10 @@ pub(crate) fn unzip(zip_path: &Path, dir: &Path) -> Result<(), String> {
         if let Some(p) = out.parent() {
             std::fs::create_dir_all(p).map_err(|e| e.to_string())?;
         }
-        let mut w = std::fs::File::create(&out).map_err(|e| format!("{}: {e}", out.display()))?;
+        let w = std::fs::File::create(&out).map_err(|e| format!("{}: {e}", out.display()))?;
         // Cap the read so a lying uncompressed-size can't fill the disk; +1 detects overflow of the budget.
         let remain = budget.saturating_sub(written);
-        let n = std::io::copy(&mut std::io::Read::take(&mut entry, remain + 1), &mut w)
+        let n = write_sparse(&mut std::io::Read::take(&mut entry, remain + 1), &w)
             .map_err(|e| format!("unzip {}: {e}", out.display()))?;
         written += n;
         if written > budget {
@@ -57,6 +57,36 @@ pub(crate) fn unzip(zip_path: &Path, dir: &Path) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+/// `r` into the new, empty file `w`, all-zero MBs left as holes (a raw disk in a zip keeps its free space out of the
+/// golden). Returns the bytes copied.
+fn write_sparse(r: &mut impl std::io::Read, w: &std::fs::File) -> std::io::Result<u64> {
+    use std::os::unix::fs::FileExt;
+    let mut buf = vec![0u8; 4 << 20];
+    let mut off = 0u64;
+    loop {
+        // Fill the buffer whole (a zip entry reads in small pieces): holes are only worth it on whole MBs.
+        let mut n = 0;
+        while n < buf.len() {
+            match r.read(&mut buf[n..]) {
+                Ok(0) => break,
+                Ok(k) => n += k,
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(e) => return Err(e),
+            }
+        }
+        for (i, part) in buf[..n].chunks(1 << 20).enumerate() {
+            if part.iter().any(|&b| b != 0) {
+                w.write_all_at(part, off + (i << 20) as u64)?;
+            }
+        }
+        off += n as u64;
+        if n < buf.len() {
+            w.set_len(off)?; // a trailing hole still counts in the size
+            return Ok(off);
+        }
+    }
 }
 
 /// Every string a VMDK descriptor points at (extent file names + parentFileNameHint) must be a plain name inside the

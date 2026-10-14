@@ -377,15 +377,17 @@ fn bench_rows_latest_prune() {
         row(3, Some("m1"), "boot", 40.0),
         row(4, Some("m1"), "boot", 30.0),
         row(5, Some("m2"), "net", 110.0),
+        row(0, Some("m1"), "boot", 99.0), // added last, older: not the latest
     ] {
         db.add_bench(&r).unwrap();
     }
-    assert_eq!(db.bench_rows(None, 10).unwrap().len(), 5);
+    assert_eq!(db.bench_rows(None, 10).unwrap().len(), 6);
     assert_eq!(
         db.bench_rows(Some("m1"), 10).unwrap(),
         vec![
             row(4, Some("m1"), "boot", 30.0),
-            row(3, Some("m1"), "boot", 40.0)
+            row(3, Some("m1"), "boot", 40.0),
+            row(0, Some("m1"), "boot", 99.0)
         ]
     );
     let mut latest = db.bench_latest().unwrap();
@@ -398,8 +400,8 @@ fn bench_rows_latest_prune() {
             row(5, Some("m2"), "net", 110.0)
         ]
     );
-    // Older than the cutoff (at 1) + over the cap (keep the newest 2: at 5, 4).
-    assert_eq!(db.prune_bench(2, 2).unwrap(), 3);
+    // Older than the cutoff (at 0, 1) + over the cap (keep the newest 2: at 5, 4).
+    assert_eq!(db.prune_bench(2, 2).unwrap(), 4);
     assert_eq!(
         db.bench_rows(None, 10)
             .unwrap()

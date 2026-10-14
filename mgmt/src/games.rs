@@ -261,7 +261,13 @@ async fn delete(
     put(&st, &list)?;
     sync_now(st).await?;
     let dir = img(&b.name).parent().unwrap().to_path_buf();
-    std::fs::remove_dir_all(&dir).map_err(|e| ise(format!("{}: {e}", dir.display())))?;
+    // Off the async threads: freeing a sparse disk of many TB (+ its versions) can take seconds.
+    tokio::task::spawn_blocking(move || {
+        std::fs::remove_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))
+    })
+    .await
+    .map_err(|e| ise(e.to_string()))?
+    .map_err(ise)?;
     tracing::info!("games disk {} deleted", b.name);
     Ok(ok())
 }

@@ -16,7 +16,8 @@ $gf = $v.Path + 'broom\broom-games.ps1'
 if ([IO.File]::Exists($gf) -and [IO.File]::Exists($srvf)) {
   $run = "$env:SystemRoot\Temp\broom-games.run.ps1"
   [IO.File]::Copy($gf, $run, $true)
-  & powershell -NoProfile -ExecutionPolicy Bypass -File $run -Srv ([IO.File]::ReadAllText($srvf).Trim())
+  # In this process (not a second powershell.exe every 5 minutes on a machine someone is playing on).
+  try { & $run -Srv ([IO.File]::ReadAllText($srvf).Trim()) } catch { }
 }
 # Session watchdog (broom-watch.ps1: SSD room): its own task (SYSTEM, no time limit), started once per boot - it loops,
 # it must not hold this task up. C: is reset every boot, so the task is registered again each time.
@@ -50,40 +51,21 @@ if ($strict) {
 }
 $of = $v.Path + 'broom\bootorder.txt'
 if (-not [IO.File]::Exists($of)) { exit }
-Add-Type -TypeDefinition @'
-using System; using System.Runtime.InteropServices;
-public static class BroomFw {
-  [DllImport("kernel32.dll", SetLastError=true, CharSet=CharSet.Unicode)]
-  static extern uint GetFirmwareEnvironmentVariableExW(string name, string guid, byte[] buf, uint size, IntPtr attr);
-  [DllImport("kernel32.dll", SetLastError=true, CharSet=CharSet.Unicode)]
-  static extern bool SetFirmwareEnvironmentVariableExW(string name, string guid, byte[] buf, uint size, uint attr);
-  [DllImport("advapi32.dll", SetLastError=true)]
-  static extern bool OpenProcessToken(IntPtr process, uint access, out IntPtr token);
-  [DllImport("advapi32.dll", SetLastError=true, CharSet=CharSet.Unicode)]
-  static extern bool LookupPrivilegeValueW(string system, string name, out long luid);
-  [DllImport("advapi32.dll", SetLastError=true)]
-  static extern bool AdjustTokenPrivileges(IntPtr token, bool disableAll, ref TokenPriv tp, uint len, IntPtr prev, IntPtr retLen);
-  [DllImport("kernel32.dll")]
-  static extern IntPtr GetCurrentProcess();
-  [StructLayout(LayoutKind.Sequential, Pack = 4)]
-  struct TokenPriv { public uint Count; public long Luid; public uint Attr; }
-  const string EfiGlobal = "{8BE4DF61-93CA-11D2-AA0D-00E098032B8C}";
-  public static void EnablePrivilege() {
-    IntPtr t; OpenProcessToken(GetCurrentProcess(), 0x28, out t); // TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY
-    TokenPriv tp = new TokenPriv(); tp.Count = 1; tp.Attr = 2;    // SE_PRIVILEGE_ENABLED
-    LookupPrivilegeValueW(null, "SeSystemEnvironmentPrivilege", out tp.Luid);
-    AdjustTokenPrivileges(t, false, ref tp, 0, IntPtr.Zero, IntPtr.Zero);
-  }
-  public static byte[] Get(string name) {
-    byte[] b = new byte[4096];
-    uint n = GetFirmwareEnvironmentVariableExW(name, EfiGlobal, b, (uint)b.Length, IntPtr.Zero);
-    if (n == 0) return null;
-    byte[] r = new byte[n]; Array.Copy(b, r, n); return r;
-  }
-  // 7 = NON_VOLATILE | BOOTSERVICE_ACCESS | RUNTIME_ACCESS (the attributes BootOrder has)
-  public static bool Set(string name, byte[] data) { return SetFirmwareEnvironmentVariableExW(name, EfiGlobal, data, (uint)data.Length, 7); }
+# BroomFw (broom-fw.cs: UEFI variables): the release's broom-fw.dll, compiled by CI and checked by the stage on
+# BROOMWIN like these scripts, copied to Temp (C: is reset every boot) and loaded from there - no C# compiler run on a
+# machine someone is playing on. A local build ships only broom-fw.cs: compiled once per boot into the same Temp file.
+$dll = "$env:SystemRoot\Temp\broom-fw.dll"
+$src = $v.Path + 'broom\broom-fw.cs'
+$ship = $v.Path + 'broom\broom-fw.dll'
+if (-not [IO.File]::Exists($dll) -and [IO.File]::Exists($ship)) { try { [IO.File]::Copy($ship, $dll, $true) } catch { } }
+try { Add-Type -Path $dll -ErrorAction Stop }
+catch {
+  # Not shipped / cut off while written: compile it again; still failing -> in memory.
+  try {
+    Add-Type -TypeDefinition ([IO.File]::ReadAllText($src)) -OutputAssembly $dll -OutputType Library -ErrorAction Stop
+    Add-Type -Path $dll -ErrorAction Stop
+  } catch { if (-not ('BroomFw' -as [type])) { Add-Type -TypeDefinition ([IO.File]::ReadAllText($src)) } }
 }
-'@
 [BroomFw]::EnablePrivilege()
 $cur = [BroomFw]::Get('BootOrder')
 if ($null -eq $cur) { exit }

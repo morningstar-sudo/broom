@@ -270,9 +270,21 @@ async fn bulk(
             }
         }
         "wake" => {
-            for m in &targets {
-                crate::wol::wake(&*st.db, &m.mac).map_err(|e| bad(format!("{}: {e}", who(m))))?;
-            }
+            // One per second, in the background: a whole room powered on in the same instant hits DHCP, TFTP and the
+            // kernel/initrd downloads all together. One that fails doesn't stop the others.
+            let list: Vec<(String, String)> =
+                targets.iter().map(|m| (who(m), m.mac.clone())).collect();
+            let st = st.clone();
+            tokio::spawn(async move {
+                for (i, (name, mac)) in list.into_iter().enumerate() {
+                    if i > 0 {
+                        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                    }
+                    if let Err(e) = crate::wol::wake(&*st.db, &mac) {
+                        tracing::warn!("wake-on-LAN {name}: {e}");
+                    }
+                }
+            });
         }
         "delete" => {
             for m in &targets {

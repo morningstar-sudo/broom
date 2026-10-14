@@ -85,34 +85,42 @@ async fn status(State(st): State<SharedState>) -> Json<Vec<MachineStatus>> {
             .or_insert((Some(ip), None, false));
     }
 
-    // PARALLEL ping (JoinSet + spawn_blocking): 30 offline machines waiting 1 s in sequence = ~30 s
-    // and blocks the runtime → concurrently it's ~1 s, without blocking a tokio worker.
+    // PARALLEL ping (JoinSet + spawn_blocking): 30 offline machines waiting in sequence = 30 × PING_WAIT
+    // and blocks the runtime → concurrently it is one PING_WAIT, without blocking a tokio worker.
     let entries: Vec<(String, Option<String>, Option<String>, bool)> = map
         .into_iter()
         .map(|(mac, (ip, hostname, registered))| (mac, ip, hostname, registered))
         .collect();
-    // At most 32 pings at once: each holds a blocking thread up to 1 s, and the list can hold many machines (it also
-    // shows every MAC seen PXE-booting) — they must not crowd out logins and jobs on the blocking pool.
+    // At most 32 pings at once: each holds a blocking thread up to PING_WAIT, and the list can hold many machines (it
+    // also shows every MAC seen PXE-booting) — they must not crowd out logins and jobs on the blocking pool. Each IP
+    // once, however many MACs list it.
+    let ips: std::collections::HashSet<String> =
+        entries.iter().filter_map(|e| e.1.clone()).collect();
     let mut set = tokio::task::JoinSet::new();
     let slots = std::sync::Arc::new(tokio::sync::Semaphore::new(32));
-    for (i, (_, ip, _, _)) in entries.iter().enumerate() {
-        let (ip, slots) = (ip.clone(), slots.clone());
+    for ip in ips {
+        let slots = slots.clone();
         set.spawn(async move {
             let _slot = slots.acquire_owned().await;
-            (
-                i,
-                tokio::task::spawn_blocking(move || ip.as_deref().is_some_and(ping))
-                    .await
-                    .unwrap_or(false),
-            )
+            let on = tokio::task::spawn_blocking({
+                let ip = ip.clone();
+                move || ping(&ip)
+            })
+            .await
+            .unwrap_or(false);
+            (ip, on)
         });
     }
-    let mut online = vec![false; entries.len()];
+    let mut up = std::collections::HashSet::new();
     while let Some(res) = set.join_next().await {
-        if let Ok((i, on)) = res {
-            online[i] = on;
+        if let Ok((ip, true)) = res {
+            up.insert(ip);
         }
     }
+    let online: Vec<bool> = entries
+        .iter()
+        .map(|e| e.1.as_ref().is_some_and(|ip| up.contains(ip)))
+        .collect();
     let not_reset = st.not_reset.lock().clone();
     let ssd_low = st.ssd_low.lock().clone();
     let mut out: Vec<MachineStatus> = entries
@@ -148,11 +156,15 @@ async fn status(State(st): State<SharedState>) -> Json<Vec<MachineStatus>> {
     Json(out)
 }
 
-/// One ICMP echo over a raw socket (root) — no iputils `ping` needed. true = reply within 1 s. Silent.
+/// How long a ping waits for its reply: a LAN answers in under a millisecond; an offline machine holds the whole
+/// status call this long.
+const PING_WAIT: std::time::Duration = std::time::Duration::from_millis(300);
+
+/// One ICMP echo over a raw socket (root) — no iputils `ping` needed. true = reply within PING_WAIT. Silent.
 fn ping(ip: &str) -> bool {
     use socket2::{Domain, Protocol, Socket, Type};
     use std::io::Read;
-    use std::time::{Duration, Instant};
+    use std::time::Instant;
     let Ok(addr) = ip.parse::<std::net::Ipv4Addr>() else {
         return false;
     };
@@ -186,7 +198,7 @@ fn ping(ip: &str) -> bool {
     {
         return false;
     }
-    let deadline = Instant::now() + Duration::from_secs(1);
+    let deadline = Instant::now() + PING_WAIT;
     let mut buf = [0u8; 1500];
     loop {
         let left = deadline.saturating_duration_since(Instant::now());

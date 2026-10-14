@@ -25,6 +25,27 @@ fn unzip_nested_and_skips_escape() {
     let _ = std::fs::remove_dir_all(&d);
 }
 
+#[test]
+fn write_sparse_leaves_zero_mbs_as_holes() {
+    use std::os::unix::fs::MetadataExt;
+    let p = std::env::temp_dir().join("broom_test_write_sparse.img");
+    // 1 MB data, 8 MB zeros, 3 bytes data, then 2 MB zeros to the end: same bytes, the zero MBs not stored.
+    let mut src = vec![7u8; 1 << 20];
+    src.resize(9 << 20, 0);
+    src.extend(b"abc");
+    src.resize((11 << 20) + 3, 0);
+    let w = std::fs::File::create(&p).unwrap();
+    assert_eq!(
+        super::write_sparse(&mut src.as_slice(), &w).unwrap(),
+        src.len() as u64
+    );
+    drop(w);
+    assert!(std::fs::read(&p).unwrap() == src);
+    let used = std::fs::metadata(&p).unwrap().blocks() * 512;
+    assert!(used < 4 << 20, "zero MBs written: {used} bytes on disk");
+    let _ = std::fs::remove_file(p);
+}
+
 /// Upload folder → image.img: a plain .IMG (any case) is moved; a .zip holding one is extracted
 /// first; the folder is removed either way.
 #[test]
