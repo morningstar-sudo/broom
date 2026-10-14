@@ -141,7 +141,10 @@ jobs:
         run: |
           pkgs="linux-image-generic shim-signed initramfs-tools fdisk ntfs-3g dosfstools efibootmgr wget zstd mawk"
           echo "pkgs=$pkgs" >> "$GITHUB_OUTPUT"
-          v=$(apt-cache show --no-all-versions $pkgs | grep -E '^(Package|Version):' | sha256sum | cut -c1-16)
+          # + what goes into the initrd from packages already on the runner: busybox (BUSYBOX=y), the tools the hook
+          # copies (coreutils, tar, gzip, util-linux), kmod / klibc, and the C library they all link.
+          base="busybox-initramfs coreutils tar gzip util-linux kmod klibc-utils libc6"
+          v=$(apt-cache show --no-all-versions $pkgs $base | grep -E '^(Package|Version):' | sha256sum | cut -c1-16)
           echo "key=stage-$ImageOS-$ImageVersion-$v-${{ hashFiles('mgmt/scripts/stage.sh', 'mgmt/scripts/stage-hook.sh', 'mgmt/src/winstage/stage.rs', 'mgmt/src/archive.rs') }}" >> "$GITHUB_OUTPUT"
       - uses: actions/cache@v4
         id: stagecache
