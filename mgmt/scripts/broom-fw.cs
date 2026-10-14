@@ -1,6 +1,7 @@
-// broom-fw.cs - UEFI BootOrder access for broom-bootorder.ps1 (PowerShell cannot call these Win32 functions itself).
-// Compiled to broom-fw.dll by CI (Windows runner, .NET Framework 4 csc = what Add-Type uses) and shipped in the
-// release's assets; a local build ships only this source and the client compiles it once per boot. ASCII only.
+// broom-fw.cs - Win32 calls PowerShell cannot make itself: UEFI BootOrder (broom-bootorder.ps1) and a volume's free space
+// without the Storage module (broom-watch.ps1). Compiled to broom-fw.dll by CI (Windows runner, .NET Framework 4 csc =
+// what Add-Type uses) and shipped in the release's assets; a local build ships only this source and the client compiles
+// it once per boot. ASCII only.
 using System; using System.Runtime.InteropServices;
 public static class BroomFw {
   [DllImport("kernel32.dll", SetLastError=true, CharSet=CharSet.Unicode)]
@@ -15,6 +16,8 @@ public static class BroomFw {
   static extern bool AdjustTokenPrivileges(IntPtr token, bool disableAll, ref TokenPriv tp, uint len, IntPtr prev, IntPtr retLen);
   [DllImport("kernel32.dll")]
   static extern IntPtr GetCurrentProcess();
+  [DllImport("kernel32.dll", SetLastError=true, CharSet=CharSet.Unicode)]
+  static extern bool GetDiskFreeSpaceExW(string dir, out ulong avail, out ulong total, out ulong free);
   [StructLayout(LayoutKind.Sequential, Pack = 4)]
   struct TokenPriv { public uint Count; public long Luid; public uint Attr; }
   const string EfiGlobal = "{8BE4DF61-93CA-11D2-AA0D-00E098032B8C}";
@@ -32,4 +35,9 @@ public static class BroomFw {
   }
   // 7 = NON_VOLATILE | BOOTSERVICE_ACCESS | RUNTIME_ACCESS (the attributes BootOrder has)
   public static bool Set(string name, byte[] data) { return SetFirmwareEnvironmentVariableExW(name, EfiGlobal, data, (uint)data.Length, 7); }
+  // Free bytes of the volume at `root` (e.g. \?\Volume{...}\, trailing backslash) = Get-Volume's SizeRemaining; -1 on error.
+  public static long Free(string root) {
+    ulong avail, total, free;
+    return GetDiskFreeSpaceExW(root, out avail, out total, out free) ? (long)free : -1;
+  }
 }

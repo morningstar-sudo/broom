@@ -120,7 +120,14 @@ function GamesDisk($name, $iqn, $L, $upd) {
   }
 }
 
-$lines = @($list -split "`n" | Where-Object { $_ -match '^([a-z0-9-]+) (\S+) ([D-Z]) ([01])\s*$' })
+# Drive $L holds disk $name's volume (labelled with its name when made): a few ms, no storage cmdlet (their module
+# alone takes ~0.75 s to load). Anything else (not there, another volume took the letter) -> the full check below.
+function Up($name, $L) {
+  try { $d = New-Object IO.DriveInfo "${L}:"; $d.IsReady -and $d.VolumeLabel -eq $name.ToUpper() } catch { $false }
+}
+$re = '^([a-z0-9-]+) (\S+) ([D-Z]) ([01])\s*$'
+# Every disk already up (the 5-minute runs, nearly always) -> nothing to do.
+$lines = @($list -split "`n" | Where-Object { $_ -match $re -and -not (Up $Matches[1] $Matches[3]) })
 if ($lines.Count -eq 0) { exit }
 try {
   # The initiator service is manual by default.
@@ -128,7 +135,7 @@ try {
   Start-Service MSiSCSI
 } catch { Log $_.Exception.Message; exit }
 foreach ($l in $lines) {
-  $null = $l -match '^([a-z0-9-]+) (\S+) ([D-Z]) ([01])\s*$'
+  $null = $l -match $re
   $name = $Matches[1]
   try { GamesDisk $name $Matches[2] $Matches[3] ($Matches[4] -eq '1') } catch { Log "$name - $($_.Exception.Message)" }
 }
