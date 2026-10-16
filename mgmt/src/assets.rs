@@ -20,6 +20,8 @@ assets!(
     "static/login.js",
     "static/app.js",
     "static/app.css",
+    "static/bootstrap.min.css",
+    "static/bootstrap.bundle.min.js",
     "static/icons.svg",
     "static/page-machines.html",
     "static/page-images.html",

@@ -1,5 +1,9 @@
 let setup=false;
 const $=id=>document.getElementById(id);
+// Bootstrap colour mode follows the OS (same as app.js).
+const darkQ=matchMedia('(prefers-color-scheme: dark)');
+const setTheme=()=>document.documentElement.dataset.bsTheme=darkQ.matches?'dark':'light';
+setTheme();darkQ.addEventListener('change',setTheme);
 // Error under the form: the error icon (/icons.svg) + the text as a text node (never parsed as HTML).
 function fail(t){const m=$('msg');m.innerHTML='<svg class="ic" role="img" aria-label="error"><use href="/icons.svg#err"/></svg> ';m.append(t);$('go').disabled=false;}
 // First run (no admin password yet) → switch to "set a password" mode. Also skip the page if already signed in.

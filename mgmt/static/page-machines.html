@@ -1,32 +1,32 @@
-<section class="page active" id="page-machines">
-  <div class="head"><h1>Machines</h1><p>quick view: on/off, wake, register — edit, bulk + CSV on the Devices page</p>
-    <span class="sp"></span><button data-click="loadStatus"><svg class="ic" aria-hidden="true"><use href="/icons.svg#refresh"/></svg> Refresh</button></div>
-  <div class="card">
-    <h2>Machine list</h2>
-    <div class="row" style="margin-bottom:12px">
-      <button class="ghost" data-click="clearMFilters">Clear filters</button>
-      <span style="flex:1"></span>
+<section id="page-machines">
+  <div class="d-flex flex-wrap align-items-baseline gap-3 mb-4"><h1 class="h4 mb-0">Machines</h1><p class="mb-0 small text-body-secondary">quick view: on/off, wake, register — edit, bulk + CSV on the Devices page</p>
+    <span class="flex-grow-1"></span><button class="btn btn-sm btn-outline-secondary" data-click="loadStatus"><svg class="ic" aria-hidden="true"><use href="/icons.svg#refresh"/></svg> Refresh</button></div>
+  <div class="card card-body mb-3">
+    <h2 class="h6 text-uppercase text-body-secondary mb-3">Machine list</h2>
+    <div class="d-flex flex-wrap gap-2 align-items-center mb-3">
+      <button class="btn btn-sm btn-outline-secondary" data-click="clearMFilters">Clear filters</button>
+      <span class="flex-grow-1"></span>
       <span id="m_count" class="msg"></span>
     </div>
-    <div class="scroll"><table id="machines">
+    <div class="table-responsive"><table class="table table-sm table-hover align-middle" id="machines">
       <thead><tr><th>Hostname</th><th title="free-text group — driver packages can target a group (Drivers page)">Group</th><th>IP</th><th>MAC</th><th>Status</th><th title="Windows license key: armed = handed out once at the next base build; sent = installed (hover: activation result)">License</th><th></th></tr>
         <!-- One filter per column (filteredMachines in app.js). -->
         <tr class="filters" data-input="mFilter">
-          <th><input id="mf_host" placeholder="hostname"></th>
-          <th><input id="mf_grp" placeholder="group"></th>
-          <th><input id="mf_ip" placeholder="IP"></th>
-          <th><input id="mf_mac" placeholder="MAC"></th>
-          <th><select id="mf_state"><option value="">all</option><option value="on">ON</option><option value="off">OFF</option></select></th>
-          <th><select id="mf_lic"><option value="">all</option><option value="none">no key</option><option value="armed">armed</option><option value="sent">sent</option><option value="error">error</option></select></th>
-          <th><select id="mf_reg"><option value="">all</option><option value="registered">registered</option><option value="new">new</option></select></th>
+          <th><input class="form-control form-control-sm" id="mf_host" placeholder="hostname"></th>
+          <th><input class="form-control form-control-sm" id="mf_grp" placeholder="group"></th>
+          <th><input class="form-control form-control-sm" id="mf_ip" placeholder="IP"></th>
+          <th><input class="form-control form-control-sm" id="mf_mac" placeholder="MAC"></th>
+          <th><select class="form-select form-select-sm" id="mf_state"><option value="">all</option><option value="on">ON</option><option value="off">OFF</option></select></th>
+          <th><select class="form-select form-select-sm" id="mf_lic"><option value="">all</option><option value="none">no key</option><option value="armed">armed</option><option value="sent">sent</option><option value="error">error</option></select></th>
+          <th><select class="form-select form-select-sm" id="mf_reg"><option value="">all</option><option value="registered">registered</option><option value="new">new</option></select></th>
         </tr></thead>
       <tbody></tbody></table></div>
-    <div class="row" style="margin-top:12px;justify-content:flex-end;align-items:center">
-      <button class="ghost" data-click="mPrev"><svg class="ic" aria-hidden="true"><use href="/icons.svg#prev"/></svg> Prev</button>
+    <div class="d-flex flex-wrap gap-2 align-items-center justify-content-end mt-2">
+      <button class="btn btn-sm btn-outline-secondary" data-click="mPrev"><svg class="ic" aria-hidden="true"><use href="/icons.svg#prev"/></svg> Prev</button>
       <span id="m_page" class="msg"></span>
-      <button class="ghost" data-click="mNext">Next <svg class="ic" aria-hidden="true"><use href="/icons.svg#next"/></svg></button>
+      <button class="btn btn-sm btn-outline-secondary" data-click="mNext">Next <svg class="ic" aria-hidden="true"><use href="/icons.svg#next"/></svg></button>
     </div>
-    <p class="hint">A <span class="pill new">new</span> machine = has a DHCP lease but is not registered. Register it with a hostname → reboot it to get the IP/name (full DHCP mode; takes effect at once, no Apply needed).
+    <p class="form-text">A <span class="badge rounded-pill text-bg-warning">new</span> machine = has a DHCP lease but is not registered. Register it with a hostname → reboot it to get the IP/name (full DHCP mode; takes effect at once, no Apply needed).
       Many new machines at once (PC01, PC02…), edit, group, image, license key, CSV: <a href="/devices" data-click="go" data-args='["devices"]'>Devices</a>.</p>
   </div>
 </section>

@@ -1,57 +1,57 @@
-<section class="page active" id="page-system">
-  <div class="head"><h1>Settings</h1><p>admin password + guest user + boot menu + RAM cache</p></div>
-  <div class="card">
-    <h2>Admin password</h2>
-    <div class="row">
-      <div class="field"><label>Current</label><input id="pw_cur" type="password" size="10" autocomplete="current-password"></div>
-      <div class="field"><label>New</label><input id="pw_new" type="password" size="10" autocomplete="new-password"></div>
-      <div class="field"><label>Confirm</label><input id="pw_new2" type="password" size="10" autocomplete="new-password"></div>
-      <button class="primary" style="align-self:flex-end" data-click="savePw">Change</button>
-      <span id="pw_msg" class="msg"></span>
+<section id="page-system">
+  <div class="d-flex flex-wrap align-items-baseline gap-3 mb-4"><h1 class="h4 mb-0">Settings</h1><p class="mb-0 small text-body-secondary">admin password + guest user + boot menu + RAM cache</p></div>
+  <div class="card card-body mb-3">
+    <h2 class="h6 text-uppercase text-body-secondary mb-3">Admin password</h2>
+    <div class="d-flex flex-wrap gap-2 align-items-end">
+      <div><label class="form-label small mb-1" for="pw_cur">Current</label><input class="form-control form-control-sm" id="pw_cur" type="password" size="10" autocomplete="current-password"></div>
+      <div><label class="form-label small mb-1" for="pw_new">New</label><input class="form-control form-control-sm" id="pw_new" type="password" size="10" autocomplete="new-password"></div>
+      <div><label class="form-label small mb-1" for="pw_new2">Confirm</label><input class="form-control form-control-sm" id="pw_new2" type="password" size="10" autocomplete="new-password"></div>
+      <button class="btn btn-sm btn-primary" data-click="savePw">Change</button>
+      <span id="pw_msg" class="msg align-self-center"></span>
     </div>
-    <p class="hint">Changing the password signs out every other browser (all old sessions stop working). This one stays signed in.</p>
+    <p class="form-text">Changing the password signs out every other browser (all old sessions stop working). This one stays signed in.</p>
   </div>
-  <div class="card">
-    <h2>Guest user (Windows)</h2>
-    <div class="row">
-      <div class="field"><label>Guest user</label><input id="cafe_user" size="10"></div>
-      <div class="field"><label>Password</label><input id="cafe_password" type="password" size="10" placeholder="(unchanged)"></div>
-      <button class="primary" style="align-self:flex-end" data-click="saveCafe">Save</button>
-      <span id="cafe_msg" class="msg"></span>
+  <div class="card card-body mb-3">
+    <h2 class="h6 text-uppercase text-body-secondary mb-3">Guest user (Windows)</h2>
+    <div class="d-flex flex-wrap gap-2 align-items-end">
+      <div><label class="form-label small mb-1" for="cafe_user">Guest user</label><input class="form-control form-control-sm" id="cafe_user" size="10"></div>
+      <div><label class="form-label small mb-1" for="cafe_password">Password</label><input class="form-control form-control-sm" id="cafe_password" type="password" size="10" placeholder="(unchanged)"></div>
+      <button class="btn btn-sm btn-primary" data-click="saveCafe">Save</button>
+      <span id="cafe_msg" class="msg align-self-center"></span>
     </div>
-    <p class="hint">The user is created + set to autologon in the Windows golden when the Windows prep command (Images page) runs in the VM. Changes here only apply to goldens prepared <b>afterwards</b> (run prep again → upload). Linux golden: the user already exists in the image.</p>
+    <p class="form-text">The user is created + set to autologon in the Windows golden when the Windows prep command (Images page) runs in the VM. Changes here only apply to goldens prepared <b>afterwards</b> (run prep again → upload). Linux golden: the user already exists in the image.</p>
   </div>
-  <div class="card">
-    <h2>Countdown boot menu</h2>
-    <div class="row"><input id="timeout" type="number" min="0" max="3600" size="4"> seconds
-      <button data-click="setTimeout_">Save</button> <span id="to_msg" class="msg"></span></div>
+  <div class="card card-body mb-3">
+    <h2 class="h6 text-uppercase text-body-secondary mb-3">Countdown boot menu</h2>
+    <div class="d-flex flex-wrap gap-2 align-items-center"><input class="form-control form-control-sm" id="timeout" type="number" min="0" max="3600" style="width:90px"> seconds
+      <button class="btn btn-sm btn-outline-primary" data-click="setTimeout_">Save</button> <span id="to_msg" class="msg"></span></div>
   </div>
-  <div class="card">
-    <h2>SSD room (Windows machines)</h2>
-    <div class="row">
-      <div class="field"><label>Keep free per session</label><input id="ssd_room" type="number" min="5" size="5"> GB</div>
-      <div class="field"><label>Warn the guest below</label><input id="ssd_warn" type="number" min="1" size="5"> GB</div>
-      <div class="field"><label>Restart below</label><input id="ssd_reboot" type="number" min="1" size="5"> GB</div>
-      <button style="align-self:flex-end" data-click="setSsd">Save</button> <span id="ssd_msg" class="msg"></span>
+  <div class="card card-body mb-3">
+    <h2 class="h6 text-uppercase text-body-secondary mb-3">SSD room (Windows machines)</h2>
+    <div class="d-flex flex-wrap gap-3 align-items-end">
+      <div><label class="form-label small mb-1" for="ssd_room">Keep free per session</label><div class="input-group input-group-sm"><input class="form-control" id="ssd_room" type="number" min="5" style="width:80px"><span class="input-group-text">GB</span></div></div>
+      <div><label class="form-label small mb-1" for="ssd_warn">Warn the guest below</label><div class="input-group input-group-sm"><input class="form-control" id="ssd_warn" type="number" min="1" style="width:80px"><span class="input-group-text">GB</span></div></div>
+      <div><label class="form-label small mb-1" for="ssd_reboot">Restart below</label><div class="input-group input-group-sm"><input class="form-control" id="ssd_reboot" type="number" min="1" style="width:80px"><span class="input-group-text">GB</span></div></div>
+      <button class="btn btn-sm btn-outline-primary" data-click="setSsd">Save</button> <span id="ssd_msg" class="msg align-self-center"></span>
     </div>
-    <p class="hint">Everything a guest writes (C:, games drives) lands on the machine's SSD until the next boot. At each
+    <p class="form-text">Everything a guest writes (C:, games drives) lands on the machine's SSD until the next boot. At each
       boot the stage frees <b>Keep free</b> GB (parked images, unused the longest first). During the session a watchdog
       checks the SSD every 15 s: below <b>Warn</b> it tells the guest (and the Machines page shows <i>SSD full</i>); below
       <b>Restart</b> it restarts the machine after 60 s — otherwise Windows would crash with a blue screen once the SSD is
       full. Big writes come mostly from launchers updating games on the machines: let only the games disk's update
       machine update them. Applies at each machine's next boot.</p>
   </div>
-  <div class="card">
-    <h2>Server resource alert</h2>
-    <div class="row"><input id="alert_pct" type="number" min="50" max="99" size="4"> %
-      <button data-click="setAlert">Save</button> <span id="al_msg" class="msg"></span></div>
-    <p class="hint">A banner shows on every page while the server's CPU, RAM, boot network card or image disk (busy time or
+  <div class="card card-body mb-3">
+    <h2 class="h6 text-uppercase text-body-secondary mb-3">Server resource alert</h2>
+    <div class="d-flex flex-wrap gap-2 align-items-center"><div class="input-group input-group-sm w-auto"><input class="form-control" id="alert_pct" type="number" min="50" max="99" style="width:80px"><span class="input-group-text">%</span></div>
+      <button class="btn btn-sm btn-outline-primary" data-click="setAlert">Save</button> <span id="al_msg" class="msg"></span></div>
+    <p class="form-text">A banner shows on every page while the server's CPU, RAM, boot network card or image disk (busy time or
       space) stays at or above this for 6 s — clients boot and load slower then. Live numbers: Benchmark page.</p>
   </div>
-  <div class="card">
-    <h2>RAM cache — RAM reserved for the server</h2>
-    <div class="row"><input id="zram_reserve" type="number" min="0" size="6"> MB
-      <button data-click="setZramReserve">Save</button> <span id="zr_msg" class="msg"></span></div>
-    <p class="hint">Loading a golden into the <b>RAM</b> cache (compressed copy: Linux = the iSCSI target serves it, Windows = golden.vhdx downloads come from it, the disk is never read) claims its RAM before loading: the golden's data (holes not counted) at its worst-case compressed size. Refused if that <code>+ reserve > available RAM</code> → never runs out halfway; what compression saves is given back once loaded. Reserve = RAM kept for the OS + serving. Not enough → the image falls back to <code>disk</code> by itself.</p>
+  <div class="card card-body mb-3">
+    <h2 class="h6 text-uppercase text-body-secondary mb-3">RAM cache — RAM reserved for the server</h2>
+    <div class="d-flex flex-wrap gap-2 align-items-center"><div class="input-group input-group-sm w-auto"><input class="form-control" id="zram_reserve" type="number" min="0" style="width:100px"><span class="input-group-text">MB</span></div>
+      <button class="btn btn-sm btn-outline-primary" data-click="setZramReserve">Save</button> <span id="zr_msg" class="msg"></span></div>
+    <p class="form-text">Loading a golden into the <b>RAM</b> cache (compressed copy: Linux = the iSCSI target serves it, Windows = golden.vhdx downloads come from it, the disk is never read) claims its RAM before loading: the golden's data (holes not counted) at its worst-case compressed size. Refused if that <code>+ reserve > available RAM</code> → never runs out halfway; what compression saves is given back once loaded. Reserve = RAM kept for the OS + serving. Not enough → the image falls back to <code>disk</code> by itself.</p>
   </div>
 </section>

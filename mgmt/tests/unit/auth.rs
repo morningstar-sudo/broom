@@ -67,6 +67,12 @@ fn public_paths() {
         pub_get("/login") && pub_get("/login.js"),
         "the standalone sign-in page + its script are public"
     );
+    assert!(
+        pub_get("/app.css")
+            && pub_get("/bootstrap.min.css")
+            && !pub_get("/bootstrap.bundle.min.js"),
+        "its stylesheets too; the app's scripts are not"
+    );
     assert!(pub_get("/boot.ipxe") && pub_get("/tftp/broom/x/vmlinuz"));
     assert!(pub_post("/api/license") && pub_post("/api/auth/login") && pub_post("/api/booted"));
     assert!(!pub_get("/api/golden-chunk"), "delta chunks are gone");

@@ -246,8 +246,13 @@ fn is_public(method: &axum::http::Method, path: &str) -> bool {
     if OPEN.contains(&path) || path.starts_with("/tftp/") || path.starts_with("/api/auth/") {
         return true;
     }
-    // Only the standalone login page (+ its script) is public; the app shell, its tab fragments and all /api/* need a session.
-    method == Method::GET && (path == "/login" || path == "/login.js" || path == "/icons.svg")
+    // Only the standalone login page (+ its script and stylesheets) is public; the app shell, its tab fragments and all /api/* need a session.
+    method == Method::GET
+        && (path == "/login"
+            || path == "/login.js"
+            || path == "/icons.svg"
+            || path == "/app.css"
+            || path == "/bootstrap.min.css")
 }
 
 /// Host header check against DNS rebinding (a page on some domain re-pointing that domain at this server). A rebinding

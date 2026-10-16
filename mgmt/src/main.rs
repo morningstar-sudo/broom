@@ -204,6 +204,22 @@ async fn app_css() -> impl axum::response::IntoResponse {
         assets::text("static/app.css"),
     )
 }
+// Bootstrap 5.3.8 (MIT), vendored as released: no CDN (offline servers, CSP 'self').
+async fn bootstrap_css() -> impl axum::response::IntoResponse {
+    (
+        [(axum::http::header::CONTENT_TYPE, "text/css; charset=utf-8")],
+        assets::text("static/bootstrap.min.css"),
+    )
+}
+async fn bootstrap_js() -> impl axum::response::IntoResponse {
+    (
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "text/javascript; charset=utf-8",
+        )],
+        assets::text("static/bootstrap.bundle.min.js"),
+    )
+}
 async fn icons() -> impl axum::response::IntoResponse {
     (
         [(axum::http::header::CONTENT_TYPE, "image/svg+xml")],
@@ -528,7 +544,9 @@ async fn main() {
         .route("/login.js", get(login_js))
         .route("/", get(index)) // web admin shell (embedded in the binary)
         .route("/app.js", get(app_js))
-        .route("/app.css", get(app_css))
+        .route("/app.css", get(app_css)) // public: the login page uses it too
+        .route("/bootstrap.min.css", get(bootstrap_css)) // public too
+        .route("/bootstrap.bundle.min.js", get(bootstrap_js))
         .route("/icons.svg", get(icons)) // public: the login page uses it too
         // One URL per page (F5 / bookmarks keep the page); same shell, JS picks the page from the path.
         .route("/machines", get(index))

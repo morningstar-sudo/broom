@@ -1,46 +1,46 @@
-<section class="page active" id="page-images">
-  <div class="head"><h1>Images</h1><p>golden OS booted over the network</p>
-    <span class="sp"></span><button data-click="loadImages" title="Refresh" aria-label="Refresh"><svg class="ic" aria-hidden="true"><use href="/icons.svg#refresh"/></svg></button></div>
-  <div class="card">
-    <h2>Image list</h2>
-    <div class="scroll"><table id="images">
+<section id="page-images">
+  <div class="d-flex flex-wrap align-items-baseline gap-3 mb-4"><h1 class="h4 mb-0">Images</h1><p class="mb-0 small text-body-secondary">golden OS booted over the network</p>
+    <span class="flex-grow-1"></span><button class="btn btn-sm btn-outline-secondary" data-click="loadImages" title="Refresh" aria-label="Refresh"><svg class="ic" aria-hidden="true"><use href="/icons.svg#refresh"/></svg></button></div>
+  <div class="card card-body mb-3">
+    <h2 class="h6 text-uppercase text-body-secondary mb-3">Image list</h2>
+    <div class="table-responsive"><table class="table table-sm table-hover align-middle" id="images">
       <thead><tr><th>Name</th><th>OS</th><th title="machine groups that get it in their boot menu (Devices page); click to change">Groups</th><th>Cache</th><th>Default</th><th>Boot</th><th title="golden being served: used on disk / virtual disk size (active version)">Size</th><th>Hash</th><th></th></tr></thead>
       <tbody></tbody></table></div>
-    <div id="img_status" class="msg" style="margin-top:10px"></div>
-    <div id="img_versions" style="margin-top:14px"></div>
+    <div id="img_status" class="msg mt-2"></div>
+    <div id="img_versions" class="mt-3"></div>
   </div>
-  <div class="card">
-    <h2>Golden (VM folder / .vmdk / .img / .zip) — iSCSI + overlay SSD</h2>
-    <div class="row">
-      <div class="field"><label>Name</label><input id="up_name" value="ubuntu" size="12"></div>
-      <div class="field"><label>OS</label><select id="up_os"><option value="linux">linux</option><option value="windows">windows</option></select></div>
-      <div class="field"><label>VM folder</label><input type="file" id="up_dir" webkitdirectory></div>
-      <div class="field"><label>or file</label><input type="file" id="up_file" accept=".vmdk,.img,.raw,.zip"></div>
-      <div class="field"><label>Cache</label><select id="up_cache"><option value="disk">disk (page cache)</option><option value="zram">RAM (compressed)</option></select></div>
-      <button class="primary" style="align-self:flex-end" data-click="addImage">Create + Upload + Publish</button>
-      <progress id="up_prog" value="0" max="100" style="display:none"></progress>
-      <span id="up_msg" class="msg"></span>
+  <div class="card card-body mb-3">
+    <h2 class="h6 text-uppercase text-body-secondary mb-3">Golden (VM folder / .vmdk / .img / .zip) — iSCSI + overlay SSD</h2>
+    <div class="d-flex flex-wrap gap-2 align-items-end">
+      <div><label class="form-label small mb-1" for="up_name">Name</label><input class="form-control form-control-sm" id="up_name" value="ubuntu" size="12"></div>
+      <div><label class="form-label small mb-1" for="up_os">OS</label><select class="form-select form-select-sm" id="up_os"><option value="linux">linux</option><option value="windows">windows</option></select></div>
+      <div><label class="form-label small mb-1" for="up_dir">VM folder</label><input class="form-control form-control-sm" type="file" id="up_dir" webkitdirectory></div>
+      <div><label class="form-label small mb-1" for="up_file">or file</label><input class="form-control form-control-sm" type="file" id="up_file" accept=".vmdk,.img,.raw,.zip"></div>
+      <div><label class="form-label small mb-1" for="up_cache">Cache</label><select class="form-select form-select-sm" id="up_cache"><option value="disk">disk (page cache)</option><option value="zram">RAM (compressed)</option></select></div>
+      <button class="btn btn-sm btn-primary" data-click="addImage">Create + Upload + Publish</button>
+      <div class="progress align-self-center" id="up_prog" style="width:160px;display:none" role="progressbar" aria-label="upload"><div class="progress-bar"></div></div>
+      <span id="up_msg" class="msg align-self-center"></span>
     </div>
-    <p class="hint">Power the VM off, then pick its whole folder — no zip needed (only .vmx/.vmdk are sent; memory files are skipped).</p>
-    <p class="hint"><b>Linux</b>: <code>curl -fsSL http://<span id="srvhost2">SERVER</span>/broom-prep | sudo bash</code></p>
-    <p class="hint"><b>Windows (Pro)</b>: PowerShell Admin, in the VM: <code style="user-select:all">irm http://<span id="srvhost3">SERVER</span>/broom-prep-win | iex</code>
+    <p class="form-text">Power the VM off, then pick its whole folder — no zip needed (only .vmx/.vmdk are sent; memory files are skipped).</p>
+    <p class="form-text"><b>Linux</b>: <code>curl -fsSL http://<span id="srvhost2">SERVER</span>/broom-prep | sudo bash</code></p>
+    <p class="form-text"><b>Windows (Pro)</b>: PowerShell Admin, in the VM: <code style="user-select:all">irm http://<span id="srvhost3">SERVER</span>/broom-prep-win | iex</code>
       <br>Set the guest user + password (Settings) first: they are baked into the golden.</p>
   </div>
-  <div class="card">
-    <h2>Games disks (Windows) <button class="ghost" data-click="loadGames" title="Refresh" aria-label="Refresh"><svg class="ic" aria-hidden="true"><use href="/icons.svg#refresh"/></svg></button></h2>
-    <div class="scroll"><table id="games">
+  <div class="card card-body mb-3">
+    <h2 class="h6 text-uppercase text-body-secondary mb-3">Games disks (Windows) <button class="btn btn-sm btn-outline-secondary ms-1" data-click="loadGames" title="Refresh" aria-label="Refresh"><svg class="ic" aria-hidden="true"><use href="/icons.svg#refresh"/></svg></button></h2>
+    <div class="table-responsive"><table class="table table-sm table-hover align-middle" id="games">
       <thead><tr><th>Name</th><th>Drive</th><th>Size</th><th>Groups</th><th title="version machines get at boot">Version</th><th title="machines connected (still on an older version)">Machines</th><th>Update machine</th><th>Update not saved</th><th></th></tr></thead>
       <tbody></tbody></table></div>
-    <div class="row" style="margin-top:10px">
-      <div class="field"><label>Name</label><input id="gm_name" size="10" placeholder="common"></div>
-      <div class="field"><label>Drive</label><input id="gm_letter" size="2" maxlength="1" value="G"></div>
-      <div class="field"><label>Size GB</label><input id="gm_size" type="number" min="1" size="6" value="500"></div>
-      <div class="field"><label>Groups (empty = all machines)</label><input id="gm_groups" size="20" placeholder="VIP, Thuong" list="gm_grouplist"></div>
+    <div class="d-flex flex-wrap gap-2 align-items-end mt-2">
+      <div><label class="form-label small mb-1" for="gm_name">Name</label><input class="form-control form-control-sm" id="gm_name" size="10" placeholder="common"></div>
+      <div><label class="form-label small mb-1" for="gm_letter">Drive</label><input class="form-control form-control-sm" id="gm_letter" size="2" maxlength="1" value="G"></div>
+      <div><label class="form-label small mb-1" for="gm_size">Size GB</label><input class="form-control form-control-sm" id="gm_size" type="number" min="1" style="width:90px" value="500"></div>
+      <div><label class="form-label small mb-1" for="gm_groups">Groups (empty = all machines)</label><input class="form-control form-control-sm" id="gm_groups" size="20" placeholder="VIP, Thuong" list="gm_grouplist"></div>
       <datalist id="gm_grouplist"></datalist>
-      <button class="primary" style="align-self:flex-end" data-click="saveGames">Add / change</button>
-      <span id="gm_msg" class="msg"></span>
+      <button class="btn btn-sm btn-primary" data-click="saveGames">Add / change</button>
+      <span id="gm_msg" class="msg align-self-center"></span>
     </div>
-    <p class="hint">Disks on the server for the Windows machines (Steam / launcher libraries go there); a machine gets
+    <p class="form-text">Disks on the server for the Windows machines (Steam / launcher libraries go there); a machine gets
       every disk of its group (Devices page) plus those set for all machines, each under its drive letter. Guests write
       to their own SSD (thrown away at reboot); a games disk itself never changes. <b>To install / update games</b>: pick
       the disk's update machine → (re)boot it: that drive is writable there → install → <b>shut it down properly</b> →

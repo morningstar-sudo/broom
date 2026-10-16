@@ -1,28 +1,28 @@
-<section class="page active" id="page-drivers">
-  <div class="head"><h1>Drivers</h1><p>custom Windows drivers installed into each machine's base</p>
-    <span class="sp"></span><button data-click="loadDrivers" title="Refresh" aria-label="Refresh"><svg class="ic" aria-hidden="true"><use href="/icons.svg#refresh"/></svg></button></div>
-  <div class="card">
-    <h2>Upload a driver package (.zip)</h2>
-    <div class="row">
-      <div class="field"><label>Name</label><input id="drv_name" size="14" placeholder="nvidia-572"></div>
-      <div class="field"><label>.zip of the extracted driver folder</label><input type="file" id="drv_file" accept=".zip"></div>
-      <button class="primary" style="align-self:flex-end" data-click="uploadDriver">Upload</button>
-      <progress id="drv_prog" value="0" max="100" style="display:none"></progress>
-      <span id="drv_msg" class="msg"></span>
+<section id="page-drivers">
+  <div class="d-flex flex-wrap align-items-baseline gap-3 mb-4"><h1 class="h4 mb-0">Drivers</h1><p class="mb-0 small text-body-secondary">custom Windows drivers installed into each machine's base</p>
+    <span class="flex-grow-1"></span><button class="btn btn-sm btn-outline-secondary" data-click="loadDrivers" title="Refresh" aria-label="Refresh"><svg class="ic" aria-hidden="true"><use href="/icons.svg#refresh"/></svg></button></div>
+  <div class="card card-body mb-3">
+    <h2 class="h6 text-uppercase text-body-secondary mb-3">Upload a driver package (.zip)</h2>
+    <div class="d-flex flex-wrap gap-2 align-items-end">
+      <div><label class="form-label small mb-1" for="drv_name">Name</label><input class="form-control form-control-sm" id="drv_name" size="14" placeholder="nvidia-572"></div>
+      <div><label class="form-label small mb-1" for="drv_file">.zip of the extracted driver folder</label><input class="form-control form-control-sm" type="file" id="drv_file" accept=".zip"></div>
+      <button class="btn btn-sm btn-primary" data-click="uploadDriver">Upload</button>
+      <div class="progress align-self-center" id="drv_prog" style="width:160px;display:none" role="progressbar" aria-label="upload"><div class="progress-bar"></div></div>
+      <span id="drv_msg" class="msg align-self-center"></span>
     </div>
-    <p class="hint">The zip must contain the <b>extracted</b> driver (<code>.inf</code> + <code>.sys</code> + <code>.cat</code>…), not the vendor's <code>.exe</code> installer
+    <p class="form-text">The zip must contain the <b>extracted</b> driver (<code>.inf</code> + <code>.sys</code> + <code>.cat</code>…), not the vendor's <code>.exe</code> installer
       (extract it first, e.g. open the NVIDIA/AMD installer with 7-Zip). Same name again = replace the package.</p>
   </div>
-  <div class="card">
-    <h2>Packages</h2>
-    <div class="scroll"><table id="drivers">
+  <div class="card card-body mb-3">
+    <h2 class="h6 text-uppercase text-body-secondary mb-3">Packages</h2>
+    <div class="table-responsive"><table class="table table-sm table-hover align-middle" id="drivers">
       <thead><tr><th>Name</th><th>Size</th><th title="hardware IDs read from the .inf files — a machine with one of them gets the package">Hardware IDs</th>
         <th title="machines that get it now (hardware reported by their stage, group, or all)">Machines</th><th>All machines</th><th>Groups</th><th></th></tr></thead>
       <tbody></tbody></table></div>
-    <p class="hint">A machine gets a package when <b>one of its devices matches</b> a hardware ID, the package is assigned to <b>its group</b> (Machines page),
+    <p class="form-text">A machine gets a package when <b>one of its devices matches</b> a hardware ID, the package is assigned to <b>its group</b> (Machines page),
       or <b>All machines</b> is ticked. Changes apply on each machine's next boot: the stage downloads the packages and rebuilds its base once
       (Windows installs the drivers that match its devices). Windows images only.</p>
-    <p class="hint">Put the <b>graphics, chipset and network drivers</b> of every machine model here: they go into its base and load at
+    <p class="form-text">Put the <b>graphics, chipset and network drivers</b> of every machine model here: they go into its base and load at
       every boot. Windows Update does not install drivers on these machines (golden prep turns it off) — one it fetched during a session
       would be gone at the next reset and installed again on every boot.</p>
   </div>

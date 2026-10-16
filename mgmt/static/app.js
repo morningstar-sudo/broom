@@ -1,3 +1,7 @@
+// Bootstrap colour mode follows the OS (light / dark), also when it changes while the page is open.
+const darkQ=matchMedia('(prefers-color-scheme: dark)');
+const setTheme=()=>document.documentElement.dataset.bsTheme=darkQ.matches?'dark':'light';
+setTheme();darkQ.addEventListener('change',setTheme);
 async function j(url,opt){const r=await fetch(url,opt);
   if(r.status===401){location.replace('/login');throw new Error('login required');}
   if(!r.ok)throw new Error(await r.text());return r.json()}
@@ -9,6 +13,9 @@ const ic=(n,c)=>`<svg class="ic ${c??n}" ${ICON_LABEL[n]?`role="img" aria-label=
 // say() shows it in el, escaped, with the marks drawn as icons.
 const MARK={'✓':'ok','✗':'err','⏳':'wait'};
 function say(el,t){if(el)el.innerHTML=esc(t).replace(/[✓✗⏳]/g,c=>ic(MARK[c]));}
+// Badges used in several tables: machine on/off, image OS.
+const led=on=>`<span class="badge ${on?'text-bg-success':'text-bg-secondary'}">${on?'ON':'OFF'}</span>`;
+const osPill=os=>`<span class="badge rounded-pill ${os==='linux'?'text-bg-success':'text-bg-info'}">${esc(os)}</span>`;
 // No data in inline JS (onclick="f('${esc(x)}')" is unsafe: the browser decodes &#39; back to ' before running
 // it; the CSP blocks inline handlers anyway). Elements name an ACTIONS entry in data-click / data-change /
 // data-input and carry JSON args in data-args; one listener per event type calls ACTIONS[name](...args, el, event).
@@ -30,7 +37,7 @@ async function showPage(p){
       if(r.status===401){location.replace('/login');return;} // session expired: never cache the "login required" text
       if(!r.ok)throw new Error(r.status);
       fragCache[p]=await r.text();}
-    catch(e){document.getElementById('main').innerHTML='<p class="hint">failed to load page '+p+'</p>';return;}
+    catch(e){document.getElementById('main').innerHTML='<p class="form-text">failed to load page '+p+'</p>';return;}
   }
   document.getElementById('main').innerHTML=fragCache[p];
   curPage=p;
@@ -41,6 +48,7 @@ const pageFromPath=()=>{const p=location.pathname.slice(1);return loaders[p]?p:'
 document.querySelectorAll('nav a').forEach(a=>a.onclick=e=>{
   if(e.ctrlKey||e.metaKey||e.shiftKey||e.button!==0)return;   // new tab/window: let the browser handle it
   e.preventDefault();
+  bootstrap.Offcanvas.getInstance('#sidebar')?.hide();   // small screens: close the slid-in menu
   if(a.dataset.page!==curPage)history.pushState(null,'','/'+a.dataset.page);
   showPage(a.dataset.page);
 });
@@ -73,15 +81,15 @@ function renderMachines(){
   const page=rows.slice((mPage-1)*M_PAGE,mPage*M_PAGE);
   document.querySelector('#machines tbody').innerHTML=page.map(m=>
     `<tr>
-       <td>${m.hostname?esc(m.hostname):'<span class="mono">—</span>'} ${m.registered?'':'<span class="pill new">new</span>'}</td>
+       <td>${m.hostname?esc(m.hostname):'<span class="mono">—</span>'} ${m.registered?'':'<span class="badge rounded-pill text-bg-warning">new</span>'}</td>
        <td class="mono">${m.grp?esc(m.grp):'—'}</td>
        <td class="mono">${esc(m.ip)}</td><td class="mono">${esc(m.mac)}</td>
-       <td><span class="led ${m.online?'on':'off'}">${m.online?'ON':'OFF'}</span>${m.not_reset?' <span class="pill" style="background:var(--off,#c33);color:#fff" title="Windows started from the SSD without a PXE boot at '+new Date(m.not_reset*1000).toLocaleString()+' — this session was NOT reset (cable out, server down, boot order changed?). Cleared by the next PXE boot.">not reset</span>':''}${m.ssd_low?' <span class="pill" style="background:var(--off,#c33);color:#fff" title="SSD almost full during the session: '+gbs(m.ssd_low[0])+' free at '+new Date(m.ssd_low[1]*1000).toLocaleString()+' (the guest wrote a lot; Settings → SSD room). Cleared by the next PXE boot.">SSD full</span>':''}</td>
+       <td>${led(m.online)}${m.not_reset?' <span class="badge text-bg-danger" title="Windows started from the SSD without a PXE boot at '+new Date(m.not_reset*1000).toLocaleString()+' — this session was NOT reset (cable out, server down, boot order changed?). Cleared by the next PXE boot.">not reset</span>':''}${m.ssd_low?' <span class="badge text-bg-danger" title="SSD almost full during the session: '+gbs(m.ssd_low[0])+' free at '+new Date(m.ssd_low[1]*1000).toLocaleString()+' (the guest wrote a lot; Settings → SSD room). Cleared by the next PXE boot.">SSD full</span>':''}</td>
        <td class="mono" title="${esc(m.license_result||'')}">${licCell(m)}</td>
-       <td class="row">${m.registered
-          ? `<button class="ghost" ${act('wake',m.mac)}>Wake</button>
-             <button class="ghost" ${act('manage',m.id)}>Manage</button>`
-          : `<button ${act('regMachine',m.mac,m.ip,m.hostname)}>Register</button>`}</td>
+       <td><div class="d-flex gap-1">${m.registered
+          ? `<button class="btn btn-sm btn-outline-secondary" ${act('wake',m.mac)}>Wake</button>
+             <button class="btn btn-sm btn-outline-secondary" ${act('manage',m.id)}>Manage</button>`
+          : `<button class="btn btn-sm btn-outline-primary" ${act('regMachine',m.mac,m.ip,m.hostname)}>Register</button>`}</div></td>
      </tr>`).join('') || '<tr><td colspan=7 class="mono">no matching machines</td></tr>';
   document.getElementById('m_count').textContent=rows.length+' machines';
   document.getElementById('m_page').textContent='Page '+mPage+'/'+pages;
@@ -93,7 +101,7 @@ const HOST_RULE='Hostname: 1-15 characters, only letters/digits/"-", must not st
 const hostOk=h=>/^[A-Za-z0-9-]{1,15}$/.test(h)&&!/^-|-$/.test(h)&&!/^[0-9]+$/.test(h);
 async function regMachine(mac,ip,host){
   let hostname=host||'PC';
-  do{hostname=prompt('Hostname for '+mac+(hostOk(hostname)?'':'\n'+HOST_RULE)+':',hostname);if(hostname===null)return;hostname=hostname.trim();}
+  do{hostname=await ask('Hostname for '+mac,hostOk(hostname)?'':HOST_RULE,hostname);if(hostname===null)return;hostname=hostname.trim();}
   while(!hostOk(hostname));
   try{await j('/api/machines',mk({mac,ip:ip||null,hostname}));}catch(e){toast(e.message,true);return;}
   toast('Registered. Reboot the machine to get its IP/name (full DHCP mode).');refreshMachines();
@@ -111,18 +119,18 @@ const keyOk=k=>/^[A-Z0-9]{5}(-[A-Z0-9]{5}){4}$/.test(k);
 // page only): whole key + the full activation result inline.
 function licCell(m,full){if(!m.license_tail)return '—';
   const ok=/activated successfully/i.test(m.license_result||'');
-  const badge=ok?' '+ic('ok'):licErr(m)?' <span class="pill new">error</span>':'';
+  const badge=ok?' '+ic('ok'):licErr(m)?' <span class="badge rounded-pill text-bg-danger">error</span>':'';
   if(!full)return `${esc(m.license_state||'')} …${esc(m.license_tail)}${badge}`;
-  const res=m.license_result?`<div class="mono" style="white-space:pre-wrap;color:var(--muted);margin-top:4px">${esc(m.license_result)}</div>`:'';
+  const res=m.license_result?`<div class="mono mt-1" style="white-space:pre-wrap">${esc(m.license_result)}</div>`:'';
   return `${esc(m.license_state||'')} ${esc(m.license_key||('…'+m.license_tail))}${badge}${res}`;}
 async function setKey(id,who){
   let k='';
-  do{k=prompt('Windows license key for '+who+(k===''||keyOk(k)?'':'\n'+KEY_RULE)+':',k);if(k===null)return;k=k.trim().toUpperCase();}
+  do{k=await ask('Windows license key for '+who,k===''||keyOk(k)?'':KEY_RULE,k);if(k===null)return;k=k.trim().toUpperCase();}
   while(k&&!keyOk(k));
   try{await j('/api/machines/license',mk({id,key:k}));
     toast(k?'Key saved. It is installed when '+who+' boots next (its base is rebuilt once).':'Key removed.');refreshMachines();}
   catch(e){toast(e.message,true)}}
-async function rearmKey(id,who){if(!confirm('Hand the key to '+who+' once more? Its base is rebuilt on the next boot.'))return;
+async function rearmKey(id,who){if(!await sure('Hand the key to '+who+' once more? Its base is rebuilt on the next boot.'))return;
   try{await j('/api/machines/license/rearm',mk({id}));refreshMachines();}catch(e){toast(e.message,true)}}
 
 // ---- devices (devices.rs): full machine management; the Machines page stays the quick dashboard ----
@@ -146,11 +154,11 @@ function dvFiltered(){
 }
 function dvRender(){
   const rows=dvFiltered(), tb=document.querySelector('#devices tbody'); if(!tb)return;
-  tb.innerHTML=rows.map(m=>`<tr class="${dvOpenId&&m.id===dvOpenId?'sel':''}" ${m.registered?`${act('dvOpen',m.id)} style="cursor:pointer"`:''}>
-      <td data-click="noop"><input type="checkbox" ${dvSel.has(dvKey(m))?'checked':''} data-change="dvToggle" data-args="${esc(JSON.stringify([dvKey(m)]))}"></td>
-      <td>${m.hostname?esc(m.hostname):'<span class="mono">—</span>'} ${m.registered?'':'<span class="pill new">new</span>'}</td>
+  tb.innerHTML=rows.map(m=>`<tr class="${dvOpenId&&m.id===dvOpenId?'table-active':''}" ${m.registered?`${act('dvOpen',m.id)} style="cursor:pointer"`:''}>
+      <td data-click="noop"><input class="form-check-input" type="checkbox" ${dvSel.has(dvKey(m))?'checked':''} data-change="dvToggle" data-args="${esc(JSON.stringify([dvKey(m)]))}"></td>
+      <td>${m.hostname?esc(m.hostname):'<span class="mono">—</span>'} ${m.registered?'':'<span class="badge rounded-pill text-bg-warning">new</span>'}</td>
       <td class="mono">${esc(m.grp||'—')}</td><td class="mono">${esc(m.ip)}</td><td class="mono">${esc(m.mac)}</td>
-      <td><span class="led ${m.online?'on':'off'}">${m.online?'ON':'OFF'}</span></td>
+      <td>${led(m.online)}</td>
       <td class="mono">${esc(imgName(m.image_id)||'—')}</td>
       <td class="mono" title="${esc(m.license_result||'')}">${licCell(m)}</td>
       <td style="white-space:normal">${esc(m.notes||'')}</td></tr>`).join('')
@@ -168,7 +176,7 @@ async function dvBulk(action){
   let value='';
   if(action==='group'){value=v('dv_bulk_grp');if(value&&!/^[A-Za-z0-9_-]{1,32}$/.test(value)){toast('Group: letters/digits/_/-, max 32',true);return;}}
   if(action==='image')value=document.getElementById('dv_bulk_img').value;
-  if(action==='delete'&&!confirm('Delete '+reg.length+' machine(s)? Their DHCP binding and license key go too.'))return;
+  if(action==='delete'&&!await sure('Delete '+reg.length+' machine(s)? Their DHCP binding and license key go too.'))return;
   try{const r=await j('/api/machines/bulk',mk({ids:reg.map(m=>m.id),action,value}));dvMsg('✓ '+action+': '+r.count+' machine(s)');
     if(action==='delete'){dvSel.clear();dvClose();}loadDevices();}
   catch(e){dvMsg('✗ '+e.message);}
@@ -204,25 +212,26 @@ async function dvOpen(id){
   const opt=dvImages.map(i=>`<option value="${i.id}" ${i.id===m.image_id?'selected':''}>${esc(i.name)}</option>`).join('');
   const lease=d.lease?esc(d.lease.ip||'—')+' · '+esc(d.lease.source)+' · '+(d.lease.expires_in>0?'expires in '+Math.round(d.lease.expires_in/60)+' min':'expired'):'—';
   box.hidden=false;
-  box.innerHTML=`<h2>${who} &nbsp;<span class="led ${st.online?'on':'off'}">${st.online?'ON':'OFF'}</span></h2>
-    <div class="row">
-      <div class="field"><label>Hostname</label><input id="dd_host" value="${esc(m.hostname||'')}" size="12" maxlength="15"></div>
-      <div class="field"><label>MAC</label><input id="dd_mac" value="${esc(m.mac)}" size="17"></div>
-      <div class="field"><label>Fixed IP</label><input id="dd_ip" value="${esc(m.ip||'')}" size="12" placeholder="(none)"></div>
-      <div class="field"><label>Group</label><input id="dd_grp" value="${esc(m.grp||'')}" size="8"></div>
-      <div class="field"><label>Default image</label><select id="dd_img"><option value="">(global default)</option>${opt}</select></div>
-      <div class="field" style="flex:1;min-width:180px"><label>Notes</label><input id="dd_notes" value="${esc(m.notes||'')}" maxlength="200"></div>
+  const fld=(label,id,input)=>`<div><label class="form-label small mb-1" for="${id}">${label}</label>${input}</div>`;
+  box.innerHTML=`<h2 class="h5 mb-3">${who} ${led(st.online)}</h2>
+    <div class="d-flex flex-wrap gap-2 align-items-end">
+      ${fld('Hostname','dd_host',`<input class="form-control form-control-sm" id="dd_host" value="${esc(m.hostname||'')}" size="12" maxlength="15">`)}
+      ${fld('MAC','dd_mac',`<input class="form-control form-control-sm" id="dd_mac" value="${esc(m.mac)}" size="17">`)}
+      ${fld('Fixed IP','dd_ip',`<input class="form-control form-control-sm" id="dd_ip" value="${esc(m.ip||'')}" size="12" placeholder="(none)">`)}
+      ${fld('Group','dd_grp',`<input class="form-control form-control-sm" id="dd_grp" value="${esc(m.grp||'')}" size="8">`)}
+      ${fld('Default image','dd_img',`<select class="form-select form-select-sm" id="dd_img"><option value="">(global default)</option>${opt}</select>`)}
+      <div class="flex-grow-1" style="min-width:180px"><label class="form-label small mb-1" for="dd_notes">Notes</label><input class="form-control form-control-sm" id="dd_notes" value="${esc(m.notes||'')}" maxlength="200"></div>
     </div>
-    <div class="row" style="margin-top:10px">
-      <button class="primary" ${act('dvSave',id)}>Save</button>
-      <button class="ghost" ${act('wake',m.mac)}>Wake</button>
-      <button class="ghost" ${act('setKey',id,name)}>License key</button>
-      ${m.license_state==='sent'?`<button class="ghost" ${act('rearmKey',id,name)}>Re-arm key</button>`:''}
-      <button class="ghost danger" ${act('dvDelete',id,name)}>Delete</button>
-      <button class="ghost" ${act('dvClose')}>Close</button>
+    <div class="d-flex flex-wrap gap-2 align-items-center mt-2">
+      <button class="btn btn-sm btn-primary" ${act('dvSave',id)}>Save</button>
+      <button class="btn btn-sm btn-outline-secondary" ${act('wake',m.mac)}>Wake</button>
+      <button class="btn btn-sm btn-outline-secondary" ${act('setKey',id,name)}>License key</button>
+      ${m.license_state==='sent'?`<button class="btn btn-sm btn-outline-secondary" ${act('rearmKey',id,name)}>Re-arm key</button>`:''}
+      <button class="btn btn-sm btn-outline-danger" ${act('dvDelete',id,name)}>Delete</button>
+      <button class="btn btn-sm btn-outline-secondary" ${act('dvClose')}>Close</button>
       <span id="dd_msg" class="msg"></span>
     </div>
-    <table style="margin-top:12px"><tbody>
+    <table class="table table-sm align-middle mt-3 mb-0"><tbody>
       <tr><td class="mono">Lease</td><td class="mono">${lease}</td></tr>
       <tr><td class="mono">License</td><td class="mono" style="white-space:normal">${licCell(m,true)}</td></tr>
       <tr><td class="mono">Driver packages</td><td class="mono">${d.drivers.length?esc(d.drivers.join(', ')):'—'}</td></tr>
@@ -240,7 +249,7 @@ async function dvSave(id){
   try{await j('/api/machines/update',mk(body));say(msg,' ✓ saved');loadDevices();}
   catch(e){say(msg,' ✗ '+e.message);}
 }
-async function dvDelete(id,who){if(!confirm('Delete '+who+'? Its DHCP binding and license key go too.'))return;
+async function dvDelete(id,who){if(!await sure('Delete '+who+'? Its DHCP binding and license key go too.'))return;
   try{await j('/api/machines/delete',mk({ids:[id]}));dvClose();loadDevices();}catch(e){toast(e.message,true);}}
 
 // ---- images ----
@@ -249,35 +258,35 @@ let imgRows=[];
 async function loadImages(){
   const rows=imgRows=await j('/api/images');
   document.querySelector('#images tbody').innerHTML=rows.map(i=>
-    `<tr><td>${esc(i.name)}${i.export?`<div class="mono" style="font-size:12px" title="exported ${i.export.created?new Date(i.export.created*1000).toLocaleString():''} — save both into one folder, open the .vmx in VMware">${ic('down','')} <a href="/api/images/export-file?id=${i.id}&f=vmx">.vmx</a> · <a href="/api/images/export-file?id=${i.id}&f=vmdk">.vmdk ${gbs(i.export.size)}</a> (${esc(i.export.version)})</div>`:''}</td><td><span class="pill ${i.os}">${esc(i.os)}</span></td>
+    `<tr><td>${esc(i.name)}${i.export?`<div class="mono" style="font-size:12px" title="exported ${i.export.created?new Date(i.export.created*1000).toLocaleString():''} — save both into one folder, open the .vmx in VMware">${ic('down','')} <a href="/api/images/export-file?id=${i.id}&f=vmx">.vmx</a> · <a href="/api/images/export-file?id=${i.id}&f=vmdk">.vmdk ${gbs(i.export.size)}</a> (${esc(i.export.version)})</div>`:''}</td><td>${osPill(i.os)}</td>
        <td><a href="#" ${act('editImgGroups',i.id,i.name,i.groups)} title="machine groups that get it in their boot menu">${i.groups.length?esc(i.groups.join(', ')):'all'}</a></td>
        <td class="mono">${i.cache_mode==='zram'?'RAM':'disk'}</td>
        <td>${i.is_default?ic('ok'):''}</td>
        <td>${i.boot_script?ic('ok'):'<span class="mono">no</span>'}</td>
-       <td class="mono" title="used on disk / virtual disk">${i.size==null?'—':gbs(i.used)+' / '+gbs(i.size)}${i.active_version?' <span class="pill linux">'+esc(i.active_version)+'</span>':''}</td>
+       <td class="mono" title="used on disk / virtual disk">${i.size==null?'—':gbs(i.used)+' / '+gbs(i.size)}${i.active_version?' <span class="badge rounded-pill text-bg-success">'+esc(i.active_version)+'</span>':''}</td>
        <td class="mono" title="${esc(i.hash||'')}">${i.hash?esc(i.hash).slice(0,10):'—'}</td>
-       <td class="row">
-         <button class="ghost" ${act('setDefault',i.id)}>Default</button>
-         <button class="ghost" ${act('toggleCache',i.id,i.cache_mode||'disk',i.name)}>${(i.cache_mode==='zram')?'→disk':'→RAM'}</button>
-         ${i.os==='windows'?`<button class="ghost" ${act('toggleBase',i.id,!i.base_mode)} title="BASE MODE: the first logon on each machine waits for a technician to set up apps, then restart (saved for every boot). Off: base is saved by itself.">${i.base_mode?'Base mode: ON':'Base mode: off'}</button>`:`<button class="ghost" ${act('toggleSsd',i.id,!i.use_ssd)} title="On: the golden is cached and the session's writes go to the machine's SSD (reset every boot). Off (one-time): nothing touches the SSD — golden over the network, writes in RAM, gone at power-off.">${i.use_ssd?'SSD: on':'SSD: off (one-time)'}</button>`}
-         ${i.os==='windows'?`<button class="ghost" ${act('togglePreload',i.id,!i.preload)} title="On: every machine that may boot it keeps it on its SSD ahead of use (fetched while another image boots: that boot takes longer once), so choosing it needs no download (its base is still built on its first boot). Off: fetched the first time it is chosen.">${i.preload?'Preload: on':'Preload: off'}</button>`:''}
-         <button class="ghost" ${act('republish',i.id,i.name)}>Republish</button>
-         <button class="ghost" ${act('showVersions',i.id,i.name,i.os)}>Versions</button>
-         <button class="ghost" ${act('exportImage',i.id,i.name,null)} title="download as a VMware VM (.vmx + .vmdk) to edit the golden">Export</button>
-         <button class="ghost" ${act('editBoot',i.id)}>Boot</button>
-         <button class="ghost danger" ${act('delImage',i.id,i.name)}>Delete</button>
-       </td></tr>`).join('') || '<tr><td colspan=9 class="mono">no images yet</td></tr>';
+       <td><div class="d-flex flex-wrap gap-1" style="min-width:320px">
+         <button class="btn btn-sm btn-outline-secondary" ${act('setDefault',i.id)}>Default</button>
+         <button class="btn btn-sm btn-outline-secondary" ${act('toggleCache',i.id,i.cache_mode||'disk',i.name)}>${(i.cache_mode==='zram')?'→disk':'→RAM'}</button>
+         ${i.os==='windows'?`<button class="btn btn-sm btn-outline-secondary" ${act('toggleBase',i.id,!i.base_mode)} title="BASE MODE: the first logon on each machine waits for a technician to set up apps, then restart (saved for every boot). Off: base is saved by itself.">${i.base_mode?'Base mode: ON':'Base mode: off'}</button>`:`<button class="btn btn-sm btn-outline-secondary" ${act('toggleSsd',i.id,!i.use_ssd)} title="On: the golden is cached and the session's writes go to the machine's SSD (reset every boot). Off (one-time): nothing touches the SSD — golden over the network, writes in RAM, gone at power-off.">${i.use_ssd?'SSD: on':'SSD: off (one-time)'}</button>`}
+         ${i.os==='windows'?`<button class="btn btn-sm btn-outline-secondary" ${act('togglePreload',i.id,!i.preload)} title="On: every machine that may boot it keeps it on its SSD ahead of use (fetched while another image boots: that boot takes longer once), so choosing it needs no download (its base is still built on its first boot). Off: fetched the first time it is chosen.">${i.preload?'Preload: on':'Preload: off'}</button>`:''}
+         <button class="btn btn-sm btn-outline-secondary" ${act('republish',i.id,i.name)}>Republish</button>
+         <button class="btn btn-sm btn-outline-secondary" ${act('showVersions',i.id,i.name,i.os)}>Versions</button>
+         <button class="btn btn-sm btn-outline-secondary" ${act('exportImage',i.id,i.name,null)} title="download as a VMware VM (.vmx + .vmdk) to edit the golden">Export</button>
+         <button class="btn btn-sm btn-outline-secondary" ${act('editBoot',i.id)}>Boot</button>
+         <button class="btn btn-sm btn-outline-danger" ${act('delImage',i.id,i.name)}>Delete</button>
+       </div></td></tr>`).join('') || '<tr><td colspan=9 class="mono">no images yet</td></tr>';
   // A job still running that this tab doesn't follow (page reloaded / opened meanwhile) → follow it on the status line.
   for(const i of rows)if(i.job&&i.job.startsWith('⏳')&&!jobWatch[i.name])watchJob(i.name,document.getElementById('img_status'));
   // srvhost inside the images fragment → set after it is injected.
   for(const id of ['srvhost2','srvhost3']){const e=document.getElementById(id);if(e)e.textContent=location.host;}
 }
 async function toggleCache(id,cur,name){const mode=cur==='zram'?'disk':'zram';
-  if(!confirm('Switch image cache to "'+(mode==='zram'?'RAM':'disk')+'"? (republish; RAM keeps a compressed copy of the golden in memory and serves clients from it)'))return;
+  if(!await sure('Switch image cache to "'+(mode==='zram'?'RAM':'disk')+'"? (republish; RAM keeps a compressed copy of the golden in memory and serves clients from it)'))return;
   const el=document.getElementById('img_status');
   try{await j('/api/images/cache-mode',mk({id,mode}));watchJob(name,el);}catch(e){say(el,' ✗ '+e.message);}}
 async function toggleBase(id,on){
-  if(on&&!confirm('BASE MODE: every machine that builds its base (first boot, new golden, rename, drivers) will wait on the desktop until someone restarts it — whatever is done before that restart is kept for good. Turn on?'))return;
+  if(on&&!await sure('BASE MODE: every machine that builds its base (first boot, new golden, rename, drivers) will wait on the desktop until someone restarts it — whatever is done before that restart is kept for good. Turn on?'))return;
   const el=document.getElementById('img_status');
   try{await j('/api/images/base-mode',mk({id,on}));loadImages();}catch(e){say(el,' ✗ '+e.message);}}
 async function toggleSsd(id,on){
@@ -287,7 +296,7 @@ async function togglePreload(id,on){
   const el=document.getElementById('img_status');
   try{await j('/api/images/preload',mk({id,on}));loadImages();}catch(e){say(el,' ✗ '+e.message);}}
 async function editImgGroups(id,name,groups,el,e){e.preventDefault();
-  const g=prompt('Machine groups that get '+name+' in their boot menu, comma-separated (Devices page groups). Empty = every machine:',groups.join(', '));
+  const g=await ask('Groups of '+name,'Machine groups that get '+name+' in their boot menu, comma-separated (Devices page groups). Empty = every machine.',groups.join(', '));
   if(g===null)return;const st=document.getElementById('img_status');
   try{await j('/api/images/groups',mk({id,groups:[g]}));loadImages();}catch(err){say(st,' ✗ '+err.message);}}
 async function setDefault(id){await j('/api/images/default',mk({id}));loadImages()}
@@ -311,41 +320,41 @@ function watchJob(name,el,done){
 let verImg=null;
 async function showVersions(id,name,os){verImg={id,name,os};
   const el=document.getElementById('img_versions');
-  el.innerHTML=`<h2>Versions — ${esc(name)}</h2><p class="mono">${ic('wait')} loading...</p>`;
+  el.innerHTML=`<h2 class="h6 mb-2">Versions — ${esc(name)}</h2><p class="mono">${ic('wait')} loading...</p>`;
   const r=await j('/api/images/snapshots?id='+id);
-  el.innerHTML=`<h2>Versions — ${esc(name)} <button class="ghost" ${act('snapshotImage')}>+ Snapshot now</button></h2>
-    <div class="scroll"><table><thead><tr><th>Version</th><th>Label</th><th>Created</th><th></th></tr></thead><tbody>${
-    r.versions.map(v=>`<tr><td class="mono">${esc(v.version)} ${v.version===r.active?'<span class="pill linux">active</span>':''}</td>
+  el.innerHTML=`<h2 class="h6 mb-2">Versions — ${esc(name)} <button class="btn btn-sm btn-outline-primary ms-2" ${act('snapshotImage')}>+ Snapshot now</button></h2>
+    <div class="table-responsive"><table class="table table-sm table-hover align-middle"><thead><tr><th>Version</th><th>Label</th><th>Created</th><th></th></tr></thead><tbody>${
+    r.versions.map(v=>`<tr><td class="mono">${esc(v.version)} ${v.version===r.active?'<span class="badge rounded-pill text-bg-success">active</span>':''}</td>
       <td>${esc(v.label)}</td><td class="mono">${new Date(v.created*1000).toLocaleString()}</td>
-      <td class="row"><button class="ghost" ${act('rollbackImage',v.version)}>Rollback</button>
-        <button class="ghost" ${act('exportImage',id,name,v.version)}>Export</button>
-        <button class="ghost" ${act('versionToImage',v.version)} title="add this version as a new image on the list">→ New image</button>
-        <button class="ghost danger" ${act('deleteVersion',v.version)}>Delete</button></td></tr>`).join('')
+      <td><div class="d-flex flex-wrap gap-1" style="min-width:320px"><button class="btn btn-sm btn-outline-secondary" ${act('rollbackImage',v.version)}>Rollback</button>
+        <button class="btn btn-sm btn-outline-secondary" ${act('exportImage',id,name,v.version)}>Export</button>
+        <button class="btn btn-sm btn-outline-secondary" ${act('versionToImage',v.version)} title="add this version as a new image on the list">→ New image</button>
+        <button class="btn btn-sm btn-outline-danger" ${act('deleteVersion',v.version)}>Delete</button></div></td></tr>`).join('')
     || '<tr><td colspan=5 class="mono">no versions yet — Snapshot now saves the current golden</td></tr>'}</tbody></table></div>`;}
-async function snapshotImage(){const label=prompt('Label for this version (optional):','');if(label===null)return;
+async function snapshotImage(){const label=await ask('Snapshot '+verImg.name,'Label for this version (optional):','');if(label===null)return;
   const el=document.getElementById('img_status');
   try{await j('/api/images/snapshot',mk({id:verImg.id,label}));watchJob(verImg.name,el,()=>showVersions(verImg.id,verImg.name,verImg.os));}catch(e){say(el,' ✗ '+e.message);}}
 async function rollbackImage(version){
-  if(!confirm('Roll '+verImg.name+' back to '+version+'?'+(verImg.os==='windows'?' Every client will download the golden again.':' Running clients lose their iSCSI disk until publish finishes.')))return;
+  if(!await sure('Roll '+verImg.name+' back to '+version+'?'+(verImg.os==='windows'?' Every client will download the golden again.':' Running clients lose their iSCSI disk until publish finishes.')))return;
   const el=document.getElementById('img_status');
   try{await j('/api/images/rollback',mk({id:verImg.id,version}));watchJob(verImg.name,el,()=>showVersions(verImg.id,verImg.name,verImg.os));}catch(e){say(el,' ✗ '+e.message);}}
-async function deleteVersion(version){if(!confirm('Delete version '+version+' of '+verImg.name+'?'))return;
+async function deleteVersion(version){if(!await sure('Delete version '+version+' of '+verImg.name+'?'))return;
   try{await j('/api/images/version-delete',mk({id:verImg.id,version}));}catch(e){toast(e.message,true);}
   showVersions(verImg.id,verImg.name,verImg.os);}
 async function exportImage(id,name,version){
-  if(!confirm('Export '+name+(version?' '+version:' (current golden)')+' as a VMware VM (.vmx + .vmdk)?\nNeeds free disk space on the server ≈ the golden size; replaces the previous export of this image.'))return;
+  if(!await sure('Export '+name+(version?' '+version:' (current golden)')+' as a VMware VM (.vmx + .vmdk)?\nNeeds free disk space on the server ≈ the golden size; replaces the previous export of this image.'))return;
   const el=document.getElementById('img_status');
   try{await j('/api/images/export',mk({id,version}));watchJob(name,el);}catch(e){say(el,' ✗ '+e.message);}}
 async function versionToImage(version){
-  const name=prompt('New image name for '+verImg.name+' '+version+' (letters, digits, _ -):',verImg.name+'-'+version);
+  const name=await ask('Version '+version+' → new image','New image name for '+verImg.name+' '+version+' (letters, digits, _ -):',verImg.name+'-'+version);
   if(!name)return;
   const el=document.getElementById('img_status');
   try{await j('/api/images/from-version',mk({id:verImg.id,version,name}));loadImages();watchJob(name,el);}catch(e){say(el,' ✗ '+e.message);}}
 async function republish(id,name){const el=document.getElementById('img_status');
   try{await j('/api/images/publish',mk({id}));watchJob(name,el);}catch(e){say(el,' ✗ '+e.message);}}
-async function editBoot(id){const cur=(imgRows.find(i=>i.id===id)||{}).boot_script||'';const s=prompt('iPXE boot script:',cur);if(s===null)return;
+async function editBoot(id){const cur=(imgRows.find(i=>i.id===id)||{}).boot_script||'';const s=await ask('iPXE boot script','',cur,true);if(s===null)return;
   await j('/api/images/boot-script',mk({id,boot_script:s}));loadImages();}
-async function delImage(id,name){if(!confirm('Delete image "'+name+'"?'))return;
+async function delImage(id,name){if(!await sure('Delete image "'+name+'"?'))return;
   await j('/api/images/delete',mk({id}));loadImages();}
 // Chunked upload: every file in 8 MB pieces, 4 in flight; a failed piece is retried (2,4,8,16,32 s).
 const CHUNK=8<<20,LANES=4;
@@ -364,10 +373,10 @@ async function uploadFiles(api,name,files,prog,msg){
   await j(api+'/upload-start',mk({name}));
   const q=[];for(const f of files)for(let o=0;o===0||o<f.size;o+=CHUNK)q.push([f,o]);
   const total=files.reduce((s,f)=>s+f.size,0)||1,t0=Date.now();let done=0;
-  prog.style.display='';prog.value=0;
+  const bar=prog.firstElementChild;prog.style.display='';bar.style.width='0%';
   const lane=async()=>{while(q.length){const [f,o]=q.shift();
     try{await putChunk(api,name,f,o);}catch(e){q.length=0;throw e;}   // one piece failed for good → stop all lanes
-    done+=Math.min(CHUNK,f.size-o);prog.value=done/total*100;
+    done+=Math.min(CHUNK,f.size-o);bar.style.width=done/total*100+'%';
     msg.textContent=' upload '+Math.round(done/total*100)+'% · '+(done/1e6/Math.max(1,(Date.now()-t0)/1000)).toFixed(0)+' MB/s';}};
   await Promise.all(Array.from({length:LANES},lane));
   msg.textContent=' upload 100% — finishing on the server…';   // driver packages: unzip + read .inf + pack
@@ -392,10 +401,10 @@ async function loadDrivers(){
     `<tr><td>${esc(d.name)}</td><td class="mono">${gbs(d.size)}</td>
        <td class="mono" title="${esc(d.hwids.slice(0,40).join('\n'))}${d.hwids.length>40?'\n…':''}">${d.hwids.length}</td>
        <td class="mono" style="white-space:normal">${d.machines.length?esc(d.machines.join(', ')):'—'}</td>
-       <td><input type="checkbox" id="drv_all_${d.id}" ${d.all_machines?'checked':''}></td>
-       <td><input id="drv_grp_${d.id}" value="${esc(d.groups.join(', '))}" placeholder="VIP, Pro" size="12"></td>
-       <td class="row"><button class="ghost" ${act('saveDrvTargets',d.id)}>Save</button>
-         <button class="ghost danger" ${act('delDriver',d.id,d.name)}>Delete</button></td></tr>`).join('')
+       <td><input class="form-check-input" type="checkbox" id="drv_all_${d.id}" ${d.all_machines?'checked':''}></td>
+       <td><input class="form-control form-control-sm" id="drv_grp_${d.id}" value="${esc(d.groups.join(', '))}" placeholder="VIP, Pro" size="12"></td>
+       <td><div class="d-flex gap-1"><button class="btn btn-sm btn-outline-secondary" ${act('saveDrvTargets',d.id)}>Save</button>
+         <button class="btn btn-sm btn-outline-danger" ${act('delDriver',d.id,d.name)}>Delete</button></div></td></tr>`).join('')
     || '<tr><td colspan=7 class="mono">no driver packages yet</td></tr>';
 }
 async function uploadDriver(){
@@ -409,17 +418,17 @@ async function uploadDriver(){
 async function saveDrvTargets(id){
   const all_machines=document.getElementById('drv_all_'+id).checked, groups=document.getElementById('drv_grp_'+id).value;
   try{await j('/api/drivers/targets',mk({id,all_machines,groups}));loadDrivers();}catch(e){toast(e.message,true)}}
-async function delDriver(id,name){if(!confirm('Delete driver package "'+name+'"? Machines that had it rebuild their base on the next boot.'))return;
+async function delDriver(id,name){if(!await sure('Delete driver package "'+name+'"? Machines that had it rebuild their base on the next boot.'))return;
   try{await j('/api/drivers/delete',mk({id}));loadDrivers();}catch(e){toast(e.message,true)}}
 
 // ---- network ----
 // DNS servers: one box each (order = preference), up to 8; sent to the server as one comma-separated list.
 const DNS_MAX=8;
-function dnsBox(v){const w=document.createElement('span');w.style.cssText='display:inline-flex;gap:2px';
-  w.innerHTML='<input class="dns" size="14" placeholder="e.g. 1.1.1.1"><button type="button" class="ghost" title="remove">×</button>';
+function dnsBox(v){const w=document.createElement('div');w.className='input-group input-group-sm w-auto';
+  w.innerHTML='<input class="dns form-control" size="14" placeholder="e.g. 1.1.1.1"><button type="button" class="btn btn-outline-secondary" title="remove" aria-label="remove">×</button>';
   w.querySelector('input').value=v||'';w.querySelector('button').onclick=()=>{w.remove();dnsButton();};return w;}
 function dnsButton(){const l=document.getElementById('dns_list');if(!l)return;let b=document.getElementById('dns_add');
-  if(!b){b=document.createElement('button');b.id='dns_add';b.type='button';b.className='ghost';b.textContent='+ DNS';
+  if(!b){b=document.createElement('button');b.id='dns_add';b.type='button';b.className='btn btn-sm btn-outline-secondary';b.textContent='+ DNS';
     b.onclick=()=>{l.insertBefore(dnsBox(''),b);dnsButton();};l.appendChild(b);}
   b.style.display=l.querySelectorAll('input.dns').length>=DNS_MAX?'none':'';}
 function setDns(csv){const l=document.getElementById('dns_list');if(!l)return;l.innerHTML='';
@@ -449,14 +458,14 @@ async function loadGames(){const g=await j('/api/games');const tb=document.query
   tb.innerHTML=g.disks.map(x=>{const d=x.disk,s=x.status;
     return `<tr><td>${esc(d.name)}</td><td class="mono">${esc(d.letter)}:</td><td class="mono">${d.size_gb} GB</td>
       <td>${d.groups.length?esc(d.groups.join(', ')):'<span class="mono">all</span>'}</td>
-      <td class="mono">${s?'g'+s.ver+(s.layers?` <span title="versions not merged into the disk yet (${gbs(s.layer_bytes)})">+${s.layers} ${s.merging?'merging…':'to merge'}</span>`:''):'<span class="no">not served</span>'}</td>
+      <td class="mono">${s?'g'+s.ver+(s.layers?` <span title="versions not merged into the disk yet (${gbs(s.layer_bytes)})">+${s.layers} ${s.merging?'merging…':'to merge'}</span>`:''):'<span class="text-danger">not served</span>'}</td>
       <td class="mono">${s?s.sessions+(s.old_sessions?` <span title="still on an older version until they reboot">(${s.old_sessions} older)</span>`:''):''}</td>
-      <td><select data-change="setGamesUpdate" data-args="${esc(JSON.stringify([d.name]))}">${opts(d.update)}</select>${d.update!=null&&!x.update_ip?' <span class="no" title="no fixed IP or lease known">no IP</span>':''}${s&&s.update_connected?' <span class="ok">'+ic('dot','')+' writable</span>':''}</td>
-      <td class="mono">${s&&s.update_bytes?gbs(s.update_bytes)+` <button ${act('saveGamesUpdate',d.name)}>Save</button> <button class="ghost" ${act('discardGamesUpdate',d.name)}>Discard</button>`:'—'}</td>
-      <td><button class="ghost" ${act('editGames',d.name)}>Edit</button> <button class="ghost" ${act('delGames',d.name)}>Delete</button></td></tr>`;}).join('')
-    ||'<tr><td colspan="9" class="hint">no games disk yet</td></tr>';
+      <td><select class="form-select form-select-sm d-inline-block w-auto" data-change="setGamesUpdate" data-args="${esc(JSON.stringify([d.name]))}">${opts(d.update)}</select>${d.update!=null&&!x.update_ip?' <span class="text-danger" title="no fixed IP or lease known">no IP</span>':''}${s&&s.update_connected?' <span class="text-success">'+ic('dot','')+' writable</span>':''}</td>
+      <td class="mono">${s&&s.update_bytes?gbs(s.update_bytes)+` <button class="btn btn-sm btn-outline-primary" ${act('saveGamesUpdate',d.name)}>Save</button> <button class="btn btn-sm btn-outline-secondary" ${act('discardGamesUpdate',d.name)}>Discard</button>`:'—'}</td>
+      <td><button class="btn btn-sm btn-outline-secondary" ${act('editGames',d.name)}>Edit</button> <button class="btn btn-sm btn-outline-danger" ${act('delGames',d.name)}>Delete</button></td></tr>`;}).join('')
+    ||'<tr><td colspan="9" class="mono">no games disk yet</td></tr>';
   const m=document.getElementById('gm_msg');if(m&&g.error)say(m,' ✗ not served: '+g.error);}
-async function gamesCall(url,body,ask){if(ask&&!confirm(ask))return;const m=document.getElementById('gm_msg');
+async function gamesCall(url,body,q){if(q&&!await sure(q))return;const m=document.getElementById('gm_msg');
   try{const r=await j(url,mk(body));say(m,' ✓ '+(r.status||'saved'));}catch(e){say(m,' ✗ '+e.message);}loadGames();}
 const saveGames=()=>gamesCall('/api/games/disk',{name:v('gm_name'),letter:v('gm_letter'),size_gb:+v('gm_size'),groups:[v('gm_groups')]});
 const setGamesUpdate=(name,el)=>gamesCall('/api/games/update',{name,id:el.value?+el.value:null});
@@ -474,18 +483,18 @@ async function loadGroups(){const g=grData=await j('/api/groups');const tb=docum
   const cnt=n=>g.machines.filter(m=>(m.grp||'').toLowerCase()===n.toLowerCase()).length;
   tb.innerHTML=g.groups.map(n=>`<tr><td><b>${esc(n)}</b></td><td class="mono">${cnt(n)}</td>
       <td>${grNames(g.images.filter(x=>grIn(x,n)))}</td><td>${grNames(g.disks.filter(x=>grIn(x,n)))}</td><td>${grNames(g.drivers.filter(x=>grIn(x,n)))}</td>
-      <td class="row"><button class="ghost" ${act('editGroup',n)}>Edit</button> <button class="ghost" ${act('renameGroup',n)}>Rename</button> <button class="ghost danger" ${act('deleteGroup',n)}>Delete</button></td></tr>`).join('')
+      <td><div class="d-flex gap-1"><button class="btn btn-sm btn-outline-secondary" ${act('editGroup',n)}>Edit</button> <button class="btn btn-sm btn-outline-secondary" ${act('renameGroup',n)}>Rename</button> <button class="btn btn-sm btn-outline-danger" ${act('deleteGroup',n)}>Delete</button></div></td></tr>`).join('')
     +`<tr><td><i>every machine</i></td><td class="mono" title="machines without a group">${g.machines.filter(m=>!m.grp).length} without</td>
       <td>${grNames(g.images.filter(x=>!x.groups.length))}</td><td>${grNames(g.disks.filter(x=>!x.groups.length))}</td><td>${grNames(g.drivers.filter(x=>x.all))}</td><td></td></tr>`;
   if(grCur&&g.groups.some(n=>n===grCur))editGroup(grCur);else closeGroup();}
 function editGroup(n){if(!grData)return;grCur=n;const g=grData,lc=n.toLowerCase();
   document.getElementById('gr_edit').style.display='';document.getElementById('gr_title').textContent='Group '+n;document.getElementById('gr_emsg').textContent='';
-  const box=(v,on,label,off,title)=>`<label style="display:block;white-space:nowrap"${title?` title="${esc(title)}"`:''}><input type="checkbox" data-v="${esc(String(v))}"${on?' checked':''}${off?' disabled':''}> ${label}</label>`;
+  const box=(v,on,label,off,title)=>`<label class="form-check text-nowrap"${title?` title="${esc(title)}"`:''}><input class="form-check-input" type="checkbox" data-v="${esc(String(v))}"${on?' checked':''}${off?' disabled':''}> ${label}</label>`;
   const all=' <span class="mono">(every machine)</span>',allT='for every machine — limit it to groups on its own page';
   document.getElementById('gr_machines').innerHTML=g.machines.map(m=>box(m.id,(m.grp||'').toLowerCase()===lc,
     esc(m.name)+(m.grp&&m.grp.toLowerCase()!==lc?` <span class="mono">(${esc(m.grp)})</span>`:''))).join('')||'—';
   document.getElementById('gr_images').innerHTML=g.images.map(i=>box(i.id,!i.groups.length||grIn(i,n),
-    esc(i.name)+` <span class="pill ${esc(i.os)}">${esc(i.os)}</span>`+(i.groups.length?'':all),!i.groups.length,i.groups.length?'':allT)).join('')||'—';
+    esc(i.name)+' '+osPill(i.os)+(i.groups.length?'':all),!i.groups.length,i.groups.length?'':allT)).join('')||'—';
   document.getElementById('gr_disks').innerHTML=g.disks.map(d=>box(d.name,!d.groups.length||grIn(d,n),
     esc(d.name)+' ('+esc(d.letter)+':)'+(d.groups.length?'':all),!d.groups.length,d.groups.length?'':allT)).join('')||'—';
   document.getElementById('gr_drivers').innerHTML=g.drivers.map(d=>box(d.id,d.all||grIn(d,n),
@@ -495,16 +504,16 @@ async function saveGroup(){const m=document.getElementById('gr_emsg');
   const ids=(id,num)=>[...document.querySelectorAll('#'+id+' input:checked:not(:disabled)')].map(e=>num?+e.dataset.v:e.dataset.v);
   const body={name:grCur,machines:ids('gr_machines',1),images:ids('gr_images',1),disks:ids('gr_disks',0),drivers:ids('gr_drivers',1)};
   try{await j('/api/groups/set',mk(body));say(m,' ✓ saved');}
-  catch(e){if(/EVERY machine/.test(e.message)&&confirm(e.message+'.\n\nSave anyway?')){
+  catch(e){if(/EVERY machine/.test(e.message)&&await sure(e.message+'.\n\nSave anyway?')){
       try{await j('/api/groups/set',mk({...body,allow_all:true}));say(m,' ✓ saved');}catch(e2){say(m,' ✗ '+e2.message);}}
     else say(m,' ✗ '+e.message);}
   loadGroups();}
 async function grCall(url,body,el){const m=document.getElementById(el||'gr_msg');
   try{await j(url,mk(body));say(m,' ✓ done');}catch(e){say(m,' ✗ '+e.message);}loadGroups();}
 const createGroup=()=>{const n=v('gr_new');if(n)grCall('/api/groups/create',{name:n}).then(()=>{document.getElementById('gr_new').value='';});};
-function renameGroup(n){const to=prompt('New name for group '+n+' (an existing name merges the two):',n);
+async function renameGroup(n){const to=await ask('Rename group '+n,'New name (an existing name merges the two):',n);
   if(to&&to!==n){if(grCur===n)grCur=to.trim();grCall('/api/groups/rename',{from:n,to});}}
-function deleteGroup(n){if(confirm('Delete group '+n+'? Its machines get no group; it leaves every image, games disk and driver package.'))grCall('/api/groups/delete',{name:n});}
+async function deleteGroup(n){if(await sure('Delete group '+n+'? Its machines get no group; it leaves every image, games disk and driver package.'))grCall('/api/groups/delete',{name:n});}
 
 // ---- system ----
 async function loadCafe(){
@@ -547,7 +556,7 @@ let benchData=null,iscsiES=null;
 const bName=mac=>{if(!mac)return 'server';const m=benchData&&benchData.machines.find(x=>x.mac===mac);return (m&&m.hostname)||mac;};
 const bVal=r=>r?`${r.value.toLocaleString()} ${BENCH_KINDS[r.kind]?BENCH_KINDS[r.kind][1]:''}`:'—';
 // Value + a bar against the best machine (higher = better: disk, network).
-const bBar=(r,max)=>r?`${esc(bVal(r))}<span style="display:inline-block;height:6px;width:${Math.round(70*r.value/max)}px;background:var(--accent);border-radius:3px;margin-left:8px;vertical-align:middle"></span>`:'—';
+const bBar=(r,max)=>r?`${esc(bVal(r))}<div class="progress d-inline-flex align-middle ms-2" style="width:70px;height:6px"><div class="progress-bar" style="width:${Math.round(100*r.value/max)}%"></div></div>`:'—';
 const bTime=t=>new Date(t*1000).toLocaleString();
 async function loadBench(){
   const d=benchData=await j('/api/bench');
@@ -563,8 +572,8 @@ async function loadBench(){
     const boot=last(mac,'boot'),disk=last(mac,'disk'),net=last(mac,'net');
     const at=Math.max(0,...[boot,disk,net].filter(Boolean).map(r=>r.at));
     const stage=boot&&/stage (\d+)s/.exec(boot.detail);
-    return `<tr><td><input type="checkbox" class="b_sel" value="${esc(mac)}"${checked.has(mac)?' checked':''}></td>
-      <td><b>${esc(bName(mac))}</b> <span class="mono">${esc(mac)}</span>${d.pending.includes(mac)?' <span class="pill new" title="measured at its next boot">waiting</span>':''}</td>
+    return `<tr><td><input type="checkbox" class="b_sel form-check-input" value="${esc(mac)}"${checked.has(mac)?' checked':''}></td>
+      <td><b>${esc(bName(mac))}</b> <span class="mono">${esc(mac)}</span>${d.pending.includes(mac)?' <span class="badge rounded-pill text-bg-warning" title="measured at its next boot">waiting</span>':''}</td>
       <td title="${esc(boot?boot.detail:'')}">${esc(bVal(boot))}${stage?` <span class="mono">(stage ${esc(stage[1])} s)</span>`:''}</td>
       <td title="${esc(disk?disk.detail:'')}">${bBar(disk,max('disk'))}</td><td>${bBar(net,max('net'))}</td>
       <td class="mono">${at?esc(bTime(at)):'—'}</td></tr>`;}).join('')||'<tr><td colspan=6 class="mono">no machines yet</td></tr>';
@@ -595,10 +604,10 @@ function showIscsi(d){
   if(d.daemon==='old'){el.textContent='the running iSCSI daemon is an older build without counters — it is replaced by itself once no client is connected';return;}
   if(!d.targets.length&&!d.peers.length){el.textContent='no client connected';return;}
   const mb=x=>x.toFixed(1)+' MB/s';
-  el.innerHTML=`<div class="row" style="align-items:flex-start;gap:28px">
-    <table style="width:auto"><thead><tr><th>Target</th><th>Sessions</th><th>Read</th></tr></thead><tbody>${d.targets.map(t=>
-      `<tr><td>${esc(t.name)}${t.ram?' <span class="pill">RAM</span>':''}</td><td>${t.sessions}</td><td>${mb(t.mbps)}</td></tr>`).join('')}</tbody></table>
-    <table style="width:auto"><thead><tr><th>Client</th><th>Read</th></tr></thead><tbody>${d.peers.map(p=>
+  el.innerHTML=`<div class="d-flex flex-wrap align-items-start gap-4">
+    <table class="table table-sm w-auto mb-0"><thead><tr><th>Target</th><th>Sessions</th><th>Read</th></tr></thead><tbody>${d.targets.map(t=>
+      `<tr><td>${esc(t.name)}${t.ram?' <span class="badge text-bg-secondary">RAM</span>':''}</td><td>${t.sessions}</td><td>${mb(t.mbps)}</td></tr>`).join('')}</tbody></table>
+    <table class="table table-sm w-auto mb-0"><thead><tr><th>Client</th><th>Read</th></tr></thead><tbody>${d.peers.map(p=>
       `<tr><td>${esc(p.host||p.ip)} <span class="mono">${esc(p.ip)}</span></td><td>${p.mbps>0?mb(p.mbps):'<span class="mono">idle</span>'}</td></tr>`).join('')||'<tr><td colspan=2 class="mono">none</td></tr>'}</tbody></table></div>`;
 }
 // Server resources (sysmon.rs): "res" on /api/events every 2 s → the alert banner (every page) + "Server now".
@@ -606,14 +615,14 @@ let lastRes=null;
 function showRes(d){lastRes=d;
   const bar=document.getElementById('alertbar');
   if(bar){bar.hidden=!d.alerts.length;
-    if(d.alerts.length)bar.innerHTML=`<b>${ic('warn')} Server at its limit:</b> ${esc(d.alerts.join(', '))} (threshold ${d.limit}%) — clients boot and load slower. <a href="/benchmark" data-click="go" data-args='["benchmark"]'><u>Details</u></a>`;}
+    if(d.alerts.length)bar.innerHTML=`<b>${ic('warn')} Server at its limit:</b> ${esc(d.alerts.join(', '))} (threshold ${d.limit}%) — clients boot and load slower. <a class="alert-link" href="/benchmark" data-click="go" data-args='["benchmark"]'>Details</a>`;}
   const el=document.getElementById('b_res');if(!el)return;
   // Measured values first; a bar + % only where the whole is known (none for a VM's virtual network card).
   const row=(name,pct,txt)=>`<tr><td>${name}</td><td>${pct==null?'':
-    `<span class="meter"><i class="${pct>=d.limit?'hot':''}" style="width:${Math.min(100,pct).toFixed(0)}%"></i></span>${pct.toFixed(0)}%`}</td><td class="mono">${esc(txt)}</td></tr>`;
+    `<div class="progress d-inline-flex align-middle me-2" style="width:140px;height:8px"><div class="progress-bar${pct>=d.limit?' bg-danger':''}" style="width:${Math.min(100,pct).toFixed(0)}%"></div></div>${pct.toFixed(0)}%`}</td><td class="mono">${esc(txt)}</td></tr>`;
   const rate=b=>(b/1e6).toFixed(1)+' MB/s';
   const {cpu:c,ram:r,net:n,disk:k,space:s}=d;
-  el.innerHTML=`<table style="width:auto"><tbody>
+  el.innerHTML=`<table class="table table-sm w-auto mb-0"><tbody>
     ${row('CPU',c.pct,`${c.cores} cores${c.load!=null?`, load ${c.load.toFixed(2)} (1 min)`:''}`)}
     ${row('RAM',r.pct,`${gbs(r.used)} used of ${gbs(r.total)} (+ ${gbs(r.cache)} page cache, given back when needed)`)}
     ${row('Network',n.pct,`${n.iface||'?'}: out ${rate(n.tx)}, in ${rate(n.rx)}`+(n.link?`, link ${n.link>=1000?n.link/1000+' Gbit/s':n.link+' Mbit/s'}`:'')
@@ -635,12 +644,28 @@ function bSelAll(el){document.querySelectorAll('.b_sel').forEach(x=>x.checked=el
 // ---- helpers ----
 function v(id){return document.getElementById(id).value.trim()}
 function mk(body){return {method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body)}}
-// Non-blocking notification. Replaces toast() so errors can't be hidden by "prevent additional dialogs".
-let toastT;
-function toast(msg,err){let t=document.getElementById('toast');
-  if(!t){t=document.createElement('div');t.id='toast';document.body.appendChild(t);}
-  t.textContent=msg;t.className='show'+(err?' err':'');
-  clearTimeout(toastT);toastT=setTimeout(()=>{t.className=t.className.replace('show','').trim();},err?6000:3500);}
+// Non-blocking notification (Bootstrap toast, bottom right); errors stay longer and in red.
+function toast(msg,err){const t=document.getElementById('toast');
+  document.getElementById('toast_text').textContent=msg;
+  t.classList.toggle('text-danger-emphasis',!!err);t.classList.toggle('bg-danger-subtle',!!err);t.classList.toggle('border-danger',!!err);
+  bootstrap.Toast.getInstance(t)?.dispose();   // the delay is fixed per instance
+  new bootstrap.Toast(t,{delay:err?6000:3500}).show();}
+// The app's dialog (#dlg in index.html) instead of prompt() / confirm(), which a browser lets the user silence.
+// ask(): the typed text, or null on Cancel / Esc (multi = a textarea). sure(): true on OK. Both resolve once the
+// dialog is fully hidden, so the caller can open it again at once (asking again after a bad value).
+function dialog(title,text,value,multi){
+  const $=id=>document.getElementById(id),m=$('dlg'),f=$(multi?'dlg_area':'dlg_input');
+  $('dlg_title').textContent=title;$('dlg_text').textContent=text||'';$('dlg_text').hidden=!text;
+  $('dlg_input').hidden=$('dlg_area').hidden=true;
+  if(value!=null){f.hidden=false;f.value=value;}
+  return new Promise(done=>{let ok=false;
+    $('dlg_form').onsubmit=e=>{e.preventDefault();ok=true;bootstrap.Modal.getInstance(m).hide();};
+    m.addEventListener('shown.bs.modal',()=>(value!=null?f:$('dlg_ok')).focus(),{once:true});
+    m.addEventListener('hidden.bs.modal',()=>done(value!=null?(ok?f.value:null):ok),{once:true});
+    bootstrap.Modal.getOrCreateInstance(m).show();});
+}
+const ask=(title,text,value,multi)=>dialog(title,text,value??'',multi);
+const sure=text=>dialog('Confirm',text);
 
 // ---- admin login (auth.rs) ----
 // Login lives on its own page (/login). This page is only served to a signed-in admin: the server redirects an
