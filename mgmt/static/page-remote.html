@@ -5,7 +5,12 @@
 
   <!-- Wall: a thumbnail of every machine running the agent; click one to control it. -->
   <div id="rm_wall_box" class="card card-body mb-3">
-    <h2 class="h6 text-uppercase text-body-secondary mb-3">All screens <span id="rm_wall_n" class="text-body-secondary"></span></h2>
+    <div class="d-flex flex-wrap gap-2 align-items-center mb-3">
+      <h2 class="h6 text-uppercase text-body-secondary mb-0 me-auto">All screens <span id="rm_wall_n" class="text-body-secondary"></span></h2>
+      <label class="visually-hidden" for="rm_go">Hostname</label>
+      <input class="form-control form-control-sm w-auto" id="rm_go" list="rm_hosts" placeholder="hostname" size="14" autocomplete="off">
+      <button class="btn btn-sm btn-primary" data-click="rmGo">Open</button>
+    </div>
     <div id="rm_wall" class="d-flex flex-wrap gap-3"></div>
     <div id="rm_wall_empty" class="mono small text-body-secondary d-none">no machine is running the remote agent yet</div>
   </div>
@@ -31,7 +36,7 @@
       <button class="btn btn-sm btn-outline-secondary" data-click="rmPaste" title="Put your clipboard on the machine and paste it (Ctrl+V)">Paste</button>
       <span id="rm_msg" class="msg"></span>
     </div>
-    <div class="small text-body-secondary mt-2">Click the screen to type into the machine. Use the buttons above for Ctrl+Alt+Del, the Windows key and Alt+Tab (or full screen to use your own keyboard for them). Games in exclusive full screen show black.</div>
+    <div class="small text-body-secondary mt-2">Click the screen to type into the machine. Use the buttons above for Ctrl+Alt+Del, the Windows key and Alt+Tab (or full screen to use your own keyboard for them). <b>Paste</b> sends your clipboard to the machine.</div>
   </div>
   <div id="rm_wrap" class="text-center"><canvas id="rm_canvas" tabindex="0" class="mw-100 border d-none" aria-label="Remote screen"></canvas></div>
   </div>

@@ -21,12 +21,18 @@ try {
     $of = $v.Path + 'broom\bootorder.txt'
     if (-not [IO.File]::Exists($of)) { return }
     # BroomFw (broom-fw.cs: UEFI variables): the release's broom-fw.dll, compiled by CI and checked by the stage on
-    # BROOMWIN like these scripts, copied to Temp (C: is reset every boot) and loaded from there - no C# compiler run on a
-    # machine someone is playing on. A local build ships only broom-fw.cs: compiled once per boot into the same Temp file.
-    $dll = "$env:SystemRoot\Temp\broom-fw.dll"
+    # BROOMWIN like these scripts, copied to Temp and loaded from there - no C# compiler run on a machine someone is
+    # playing on. A local build ships only broom-fw.cs: compiled into the same Temp file. The Temp name carries the
+    # source's sha256: C:\Windows\Temp is written while base is built and ends up in base, where a fixed name would keep
+    # that build for good.
     $src = $v.Path + 'broom\broom-fw.cs'
     $ship = $v.Path + 'broom\broom-fw.dll'
-    if (-not [IO.File]::Exists($dll) -and [IO.File]::Exists($ship)) { try { [IO.File]::Copy($ship, $dll, $true) } catch { } }
+    $from = if ([IO.File]::Exists($ship)) { $ship } else { $src }
+    $fs = [IO.File]::OpenRead($from)
+    try { $h = -join ([Security.Cryptography.SHA256]::Create().ComputeHash($fs)[0..7] | ForEach-Object { $_.ToString('x2') }) }
+    finally { $fs.Dispose() }
+    $dll = "$env:SystemRoot\Temp\broom-fw-$h.dll"
+    if (-not [IO.File]::Exists($dll) -and $from -eq $ship) { try { [IO.File]::Copy($ship, $dll, $true) } catch { } }
     try { Add-Type -Path $dll -ErrorAction Stop }
     catch {
       # Not shipped / cut off while written: compile it again; still failing -> in memory.

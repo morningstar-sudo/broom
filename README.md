@@ -13,6 +13,10 @@ Linux server, DHCP / TFTP / iSCSI / web admin built in. For internet cafés, gam
 - **Clean every boot** — Windows 11 Pro or Linux clients; writes go to the local SSD and are reset at the next boot.
 - **One file to deploy** — no dnsmasq, tftpd, targetcli; build the golden in a VM and upload it from the browser.
 - **Games disks** — update a game once, every PC gets it at its next boot.
+- **Remote control in the browser** — a live wall of every PC's screen; click one to take over mouse and keyboard.
+  Full-screen games show too. No VNC client to install, no port open on the PCs.
+- **Health at a glance** — CPU %, RAM %, temperatures and each disk's SMART status / bad sectors, for every PC and the
+  server.
 - **Snapshot / rollback, machine groups, web admin.** Free, Apache-2.0.
 
 **Guides:** [broom.hainth.edu.vn](https://broom.hainth.edu.vn/)
@@ -22,6 +26,10 @@ Linux server, DHCP / TFTP / iSCSI / web admin built in. For internet cafés, gam
 **Windows 11 client booted from Broom** — C: is the shared golden, G: a games disk:
 
 ![Windows 11 client network-booted by Broom, with a games disk mounted as G:](docs/images/client-games-disk.png)
+
+**Remote** — a client's screen in the web admin, controlled with the mouse and keyboard:
+
+![Broom web admin Remote page controlling a Windows 11 client](docs/images/remote-control.png)
 
 **FACEIT Anti-Cheat on a Broom client** — Secure Boot, IOMMU, TPM 2.0, TPM attestation and HVCI all pass:
 
@@ -69,8 +77,11 @@ What a Windows client loads on every boot, before Windows itself starts from its
 - **A new golden is downloaded once per machine** and checked (sha256) while it downloads — no second read of a
   multi-GB file. Machines that already have it download nothing.
 - Boot time end to end depends on the hardware (firmware POST and PXE, network, SSD, the golden's own Windows start):
-  measure yours on the **Benchmark** page — server disk, live iSCSI throughput, and per machine its boot time (every
-  boot) and disk / network read speed (on request, at its next boot).
+  measure yours on the **Benchmark** page — server disk, and per machine its boot time (every boot) and disk / network
+  read speed (on request, at its next boot). The **Server** page shows the live load and iSCSI throughput.
+- **After a publish, machines download the new golden in turns** — a few at a time at full speed (Windows → *Golden
+  downloads at once*; Auto = the server's link speed over 1 Gbit/s), so they come up one batch after the other
+  instead of all finishing together at the end.
 
 ## Requirements
 
@@ -164,6 +175,27 @@ then shows as lines under the images. Untick to go back to broom's own iPXE. TPM
 and IOMMU work on the clients too — broom-prep-win turns on VBS + HVCI in the golden (runs where the client has VT-x);
 drivers in the golden must be HVCI-compatible (e.g. the VMware `e1000` NIC driver is blocked — use `e1000e`).
 
+## Web admin
+
+The menu is grouped (each group folds; the one holding the open page stays open):
+
+| Group | Page | What it does |
+|---|---|---|
+| Monitor | **Machines** | every machine: on/off, health badge, license, Wake / Manage / Remote |
+| | **Remote** | live wall of every Windows machine's screen; click one to control it |
+| | **Server** | the server's CPU / RAM / network / disk load, its disk's SMART, live iSCSI; alert threshold, RAM reserve |
+| Manage | **Devices** | register / edit / import machines, a machine's detail (lease, license, drivers, health) |
+| | **Groups** | which images, games disks and drivers each group of machines gets |
+| Content | **Images** | goldens: upload, publish, cache (disk / RAM), versions, export, boot menu |
+| | **Games** | shared games disks and their update machine |
+| | **Drivers** | driver packages installed into each Windows machine's base |
+| Config | **Network** | DHCP server, Secure Boot clients, strict reset |
+| | **Windows** | guest user, SSD room, golden downloads at once |
+| | **Settings** | admin password, boot menu countdown |
+| Tools | **Benchmark** | server disk speed; per machine boot time and disk / network read speed |
+
+A banner on every page shows when the server stays at its resource limit (Server → *Resource alert*).
+
 ## Adding a golden
 
 Build the golden in a VM, power it off, then upload the whole VM folder (only `.vmx` / `.vmdk` are
@@ -224,7 +256,7 @@ Big writes come mostly from launchers updating games on the machines: let only t
 
 ## Games disks (Windows)
 
-Images → **Games disks**: disks on the server (`games/<name>/games.img`, sparse) for the Windows machines — game
+**Games** page: disks on the server (`games/<name>/games.img`, sparse) for the Windows machines — game
 libraries live there instead of in the golden. A machine gets every disk of its group plus those for all machines, each
 under its drive letter (two disks a machine could both get can't share one). The iSCSI daemon serves them read-only;
 each machine opens the `games.vhdx` inside through a differencing VHDX on its own SSD (`broom\games-<name>-child.vhdx`,
@@ -237,32 +269,45 @@ copy — the changed blocks become a layer over `games.img`. Each machine gets t
 already playing keep theirs. Once no machine has used an older version for 10 minutes, the layers are merged into
 `games.img` in the background. A new disk is formatted by its first update machine; the size can only grow (the update
 machine extends the drive on its next boot). No rollback for a games disk — back up its `games.img`.
+A disk's **Cache** button serves it from a copy in the server's RAM (loaded in the background, read from the file
+meanwhile) — it needs about as much free RAM as the games on it, since game files barely compress.
 
-The Windows scripts (`broom-done`, `broom-bootorder`, `broom-games`, `broom-watch`, `broom-vnc`) are the server's, not the images': written to
-`tftp/broom-scripts/` at every start and checked by the stage on every boot, so a new version reaches every machine
-without a publish. Images published before this version need **Publish** once to switch over.
+The Windows scripts (`broom-done`, `broom-bootorder`, `broom-games`, `broom-watch`) and the helpers they run
+(`broom-fw`, the `broom-vnc` agent) are the server's, not the images': written to `tftp/broom-scripts/` at every start
+and checked by the stage on every boot, so a new version reaches every machine without a publish. Images published
+before this version need **Publish** once to switch over.
 
 ## Remote (Windows)
 
-**Remote** (sidebar, or the Remote button on the Machines page): see and control a Windows machine from the browser.
-Each machine runs a small agent (`broom-vnc`) that dials out to the server and keeps one connection open; the machine
-opens no port, so no guest or other PC on the LAN can reach its screen. The page opens on a **wall** of thumbnails — one
-live screen per machine running the agent — and clicking one controls that machine. Mouse, keyboard and scroll work;
-click the screen first so keys go to the machine. Toolbar buttons send **Ctrl+Alt+Del**, the **Windows key** and
-**Alt+Tab** (the browser only lets your own keyboard send those in full screen); **Paste** puts your clipboard on the
-machine and pastes it.
-The agent also reports the machine's **health** (CPU %, RAM %, temperatures, and each disk's SMART status, temperature
-and bad-sector counts) — shown on the Machines page and in a machine's detail. Temperatures come from ACPI thermal
-zones (no kernel driver, so unlabeled and best-effort — some boards report none); disk health and bad sectors come
-from SMART (no surface scan). The server reads its own disk's SMART the same built-in way (shown on the Server page).
-Lower the quality on a busy network. The screen is captured with Desktop Duplication, so full-screen games show too;
-it falls back to GDI for the UAC / lock screen. On Chrome / Edge the single-machine view streams **H.264** (smooth, near
-RDP); it falls back to JPEG on other browsers or if the machine can't encode. The agent accepts only the server's
-connection and is served like the other Windows scripts, so it reaches every machine without a publish.
+**Remote** (Monitor group, or the **Remote** button on the Machines page) shows a **wall** of thumbnails — one live
+screen per Windows machine — and clicking one takes it over in the browser, nothing to install on the admin's side.
+Type a hostname to go straight to a machine (`/remote?host=PC-01` works as a bookmark).
 
-That same agent connection is the machine's presence signal: a machine with the agent connected shows **online**
-without a ping (the agent reopens the connection within 5 s of every boot). Machines without the agent — Linux clients,
-or a Windows machine still building its base — are pinged as before.
+- **Mouse, keyboard, scroll**: click the screen first so keys go to the machine (layout-independent: physical keys are
+  sent). Toolbar: **Ctrl+Alt+Del**, the **Windows key** and **Alt+Tab** (the browser only lets your own keyboard send
+  those in full screen), **Paste** (puts your clipboard on the machine and presses Ctrl+V), **Full screen**, quality.
+- **Full-screen games show**: the screen is captured with Desktop Duplication; the UAC prompt and the lock screen are
+  captured too (GDI on the secure desktop).
+- **Smooth on Chrome / Edge**: the single-machine view streams H.264 (decoded by the browser); other browsers, or a
+  machine that can't encode, get JPEG of only the changed parts. The wall uses small JPEG thumbnails, about one a
+  second.
+- **No port on the machines**: each one runs a small agent (`broom-vnc`, as SYSTEM in the console session) that dials
+  out to the server and keeps one connection open; only a signed-in admin can watch through the server. Nothing on the
+  machine shows that it is being watched — tell your guests if your rules need it.
+- The agent starts at every Windows boot, also while a base is being built (from the first logon on), and logs to
+  `C:\Windows\Temp\broom-vnc.log`. Linux clients have no agent.
+
+## Health monitoring
+
+- **Machines**: the agent reports every 15 s, over the same connection, the machine's CPU %, RAM %, temperatures and
+  each disk's health, temperature and **bad sectors** (SMART reallocated / pending sectors, predicted failure) — a
+  badge on the Machines page (red on a failing disk or a hot machine), everything in the machine's detail (Devices).
+  Temperatures come from ACPI thermal zones: no kernel driver (it would fight Secure Boot / HVCI and anti-cheats), so
+  they are unlabeled and best-effort — some boards report none. Bad sectors come from SMART: no surface scan.
+- **Online without ping**: a machine whose agent is connected shows online (the agent reconnects within 5 s of every
+  boot). Machines without it — Linux clients, a Windows machine before its first logon — are pinged as before.
+- **Server** page: the server's own load (CPU, RAM, network, image disk), its image disk's SMART (status, temperature,
+  bad sectors — read with the kernel's own NVMe / SATA pass-through, no smartmontools) and live iSCSI throughput.
 
 ## Versions, export
 
@@ -331,6 +376,9 @@ changes it and signs out every other session. A few properties are inherent to d
   update live: each publish gets a fresh RAM copy + target, and the old one is kept until its clients drop.
 - **Games disk writes** are allowed from that disk's update machine IP only (iSCSI has no other proof of who is
   connecting): a host faking that IP could write into the pending update. Check before saving; segment the LAN.
+- **Remote**: watching or controlling a machine needs the admin login (the browser's connection is also checked to
+  come from this web admin's own pages). The agents dial out and open no port; the server knows each one by its IP —
+  like the license, a host faking a registered machine's IP could pose as it (it would only feed a fake screen).
 
 ## Build
 
@@ -360,9 +408,10 @@ into `mgmt/ipxe/ipxe-src/` and builds `snponly.efi`, which is embedded in the bi
 Neither is committed. To change iPXE: commit inside `ipxe-src/`, regenerate the patches (command at the top of
 `mgmt/ipxe/build.sh`), rebuild.
 
-CI (`.github/workflows/build.yml`) runs `./build.sh --ipxe` on every push / PR, builds the Windows stage bundle
-(`bootrom-mgmt build-stage` on Ubuntu's generic kernel + shim-signed) and the assets bundle (`bootrom-mgmt
-pack-assets`), rebuilds the binary pinned to both (sha256 + URL appended to `mgmt/stage.pin` / `mgmt/assets.pin`,
+CI (`.github/workflows/build.yml`) runs `./build.sh --ipxe` on every push / PR, compiles `broom-fw.dll` and the
+`broom-vnc.exe` agent on a Windows runner (.NET Framework `csc`; a local build ships their C# source and the clients
+compile it), builds the Windows stage bundle (`bootrom-mgmt build-stage` on Ubuntu's generic kernel + shim-signed) and
+the assets bundle (`bootrom-mgmt pack-assets`), rebuilds the binary pinned to both (sha256 + URL appended to `mgmt/stage.pin` / `mgmt/assets.pin`,
 embedded in the binary; with a pin, `build.sh` leaves the assets out of it) and publishes `bootrom-mgmt`,
 `broom-stage.tar.gz`, `broom-assets.zip`, `snponly.efi` and `SHA256SUMS`; pushes to `main` are tagged
 with their push time in UTC (e.g. `2026-09-19T17-05-25Z`, also the release title) and released.
@@ -374,9 +423,11 @@ broom/
 ├── build.sh / build.cmd     # one-step build (Linux/WSL, or Windows→WSL)
 └── mgmt/                     # the app (Rust / axum, single binary, web UI embedded)
     ├── src/                  # boot menu, images + publish, overlay (Linux), winstage + vhdx (Windows),
-    │   │                     # dhcp / tftp / iscsi, machines, monitor + WOL, setup / preflight, auth
+    │   │                     # dhcp / tftp / iscsi, machines, monitor + WOL, vnc (Remote) + metrics,
+    │   │                     # sysmon (server load + SMART), setup / preflight, auth
     │   ├── iscsid/           # the iSCSI target daemon (protocol, SCSI, compressed RAM copies)
     │   └── db/               # storage: `Db` trait + SQLite (swap in another driver by adding a file)
+    ├── scripts/              # client side: Windows stage (stage.sh), broom-*.ps1, broom-fw.cs, broom-vnc.cs (agent)
     ├── static/               # web admin (embedded in the binary): index.html + app.js, page fragments, login
     └── ipxe/                 # IPXE_COMMIT + patches/ → build.sh → snponly.efi embedded in the binary;
                               # signed/ = official Secure Boot iPXE (fetch-signed.sh)
@@ -397,14 +448,19 @@ Any x86_64 Linux machine, run as root. Broom is a single static binary — nothi
 
 **How many machines?**
 Broom is built for small sites, about 10–30 machines per server. For bigger rooms the network is the limit: after a
-publish, machines download the new golden in turns, a few at a time at full speed (System → *Golden downloads at
+publish, machines download the new golden in turns, a few at a time at full speed (Windows → *Golden downloads at
 once*; Auto = the server's link speed over 1 Gbit/s), so they become usable one batch after the other. A larger room
 wants a 10 Gbit/s (or bonded) server link, an NVMe disk and plenty of RAM for the games; measure on the Benchmark page.
 
 **How are games handled?**
 Put game libraries on a games disk instead of the golden. Update them once from one machine; every machine gets the
 new version at its next boot, while machines already playing keep theirs. A games disk can be served from a copy in
-the server's RAM (**Cache** button on the Images page) — it needs about as much free RAM as the games on it.
+the server's RAM (**Cache** button on the Games page) — it needs about as much free RAM as the games on it.
+
+**Can I see and control the PCs from the counter?**
+Yes — the **Remote** page shows every Windows PC's screen live and lets you take one over in the browser (full-screen
+games included). The Machines page also shows each PC's CPU, RAM, temperature and disk health. See *Remote* and
+*Health monitoring*.
 
 **Does it work with anti-cheat (FACEIT)?**
 Yes — FACEIT Anti-Cheat runs on Broom clients with Secure Boot, TPM 2.0 and HVCI on (Network page → Secure Boot

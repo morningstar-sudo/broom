@@ -3,7 +3,7 @@ title: Broom — open-source diskless boot server for Windows 11 and Linux
 description: Free, open-source diskless boot server. Network-boot a room of Windows 11 or Linux PCs from one golden image, clean on every boot. Secure Boot without MOK. One static binary.
 seo: { type: WebSite }
 date: 2026-10-11T23:07:00+07:00
-last_modified_at: 2026-10-13
+last_modified_at: 2026-10-17
 ---
 
 **Broom** network-boots a room of PCs from **one golden image** — every reboot comes up clean. One static binary
@@ -35,7 +35,13 @@ enroll, no MokManager screen on any client. With TPM 2.0 + HVCI, [FACEIT Anti-Ch
 - **Clean every boot** — Windows 11 Pro or Linux clients; writes go to the local SSD and are reset at the next boot.
 - **One file to deploy** — no dnsmasq, tftpd, targetcli; build the golden in a VM and upload it from the browser.
 - **Games disks** — update a game once, every PC gets it at its next boot.
+- **Remote control in the browser** — a live wall of every PC's screen; click one to take over mouse and keyboard,
+  full-screen games included. No VNC client, no port open on the PCs.
+- **Health at a glance** — CPU, RAM, temperatures and each disk's SMART status and bad sectors, for every PC and the
+  server.
 - **Snapshot / rollback, machine groups, web admin.**
+
+![Broom web admin Remote page controlling a Windows 11 client](images/remote-control.webp){: width="1241" height="691"}
 
 ## Quick start
 

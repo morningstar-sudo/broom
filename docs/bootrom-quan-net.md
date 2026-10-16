@@ -3,7 +3,7 @@ title: Bootrom quán net miễn phí với Broom — boot không ổ cứng Wind
 description: "Bootrom quán net miễn phí, mã nguồn mở: máy chủ Linux một file, máy trạm Windows 11 boot qua mạng, sạch sau mỗi lần khởi động."
 lang: vi
 date: 2026-10-11T23:07:00+07:00
-last_modified_at: 2026-10-13
+last_modified_at: 2026-10-17
 faq:
   - q: Broom có miễn phí không?
     a: Có, giấy phép Apache-2.0, dùng cho quán kinh doanh được, không tính phí theo máy.
@@ -13,6 +13,8 @@ faq:
     a: Broom được làm cho phòng nhỏ, khoảng 10–30 máy mỗi máy chủ.
   - q: Có chạy được game có anti-cheat không?
     a: FACEIT Anti-Cheat chạy được với Secure Boot (không cần MOK), TPM 2.0 và HVCI — xem [hướng dẫn FACEIT](faceit-diskless.html).
+  - q: Chủ quán có xem được màn hình các máy không?
+    a: Có. Trang Remote hiện màn hình mọi máy trạm Windows cùng lúc; bấm vào một máy để điều khiển (chuột, bàn phím, Ctrl+Alt+Del, dán clipboard). Máy trạm không hiện thông báo khi đang bị xem — nếu quy định của quán cần, hãy báo cho khách.
   - q: So với CCBoot thì sao?
     a: Xem [Broom vs CCBoot](broom-vs-ccboot.html).
 ---
@@ -37,9 +39,16 @@ cũng mất sau khi restart.
   Save, cả phòng có bản mới ở lần boot sau; máy đang chơi vẫn dùng bản cũ đến khi restart.
 - **Bật Secure Boot không cần MOK** — cả chuỗi boot mạng đã được ký sẵn, không phải enroll khoá trên từng máy.
   Secure Boot, TPM 2.0, HVCI đều bật nên **chạy được FACEIT Anti-Cheat** ([chi tiết](faceit-diskless.md)).
+- **Xem và điều khiển máy trạm ngay trên web** — một màn hình chung hiện trực tiếp màn hình của mọi máy; bấm vào một
+  máy để dùng chuột, bàn phím như ngồi tại chỗ, kể cả khi khách đang chơi game toàn màn hình. Không cần cài VNC, máy
+  trạm không mở cổng nào.
+- **Theo dõi sức khoẻ máy** — CPU, RAM, nhiệt độ, tình trạng ổ cứng (SMART, bad sector) của từng máy trạm và của máy
+  chủ, báo đỏ khi ổ sắp hỏng hoặc máy quá nóng.
 - **Snapshot / rollback image** tức thì, **chia nhóm máy** (mỗi nhóm một menu boot, image, ổ game riêng),
   **Wake-on-LAN** và xem trạng thái máy trên web.
 - **Miễn phí, mã nguồn mở** (Apache-2.0) — không tính phí theo số máy, dùng cho quán kinh doanh được.
+
+![Trang Remote của Broom: điều khiển một máy trạm Windows 11 ngay trên trình duyệt](images/remote-control.webp){: width="1241" height="691"}
 
 ## Cần chuẩn bị
 
@@ -98,6 +107,15 @@ chia SSD. Bật máy: lần đầu máy tải image về SSD và tự restart m�
 Ở trang **Games**, tạo ổ game, chọn một **máy cập nhật**. Boot máy đó, cài hoặc cập nhật game trên ổ game,
 tắt máy đúng cách rồi bấm **Save**. Các máy khác nhận bản mới ở lần boot sau. Chỉ nên để máy cập nhật tải bản cập
 nhật game — launcher tự cập nhật trên máy khách sẽ làm đầy SSD và mất khi restart.
+
+## Xem và điều khiển máy trạm
+
+Mở trang **Remote** (nhóm Monitor): màn hình mọi máy trạm Windows hiện thành lưới, cập nhật liên tục. Bấm vào một máy
+(hoặc gõ tên máy rồi bấm **Open**) để điều khiển. Bấm vào màn hình trước khi gõ phím. Các nút trên thanh công cụ gửi
+**Ctrl+Alt+Del**, phím **Windows**, **Alt+Tab** và **Paste** (dán clipboard của bạn vào máy trạm). Trên Chrome / Edge
+hình chạy mượt (H.264); mạng đông thì hạ chất lượng xuống **Low**.
+
+Sức khoẻ từng máy (CPU, RAM, nhiệt độ, ổ cứng, bad sector) hiện ở trang **Machines**; của máy chủ ở trang **Server**.
 
 ## Câu hỏi thường gặp
 

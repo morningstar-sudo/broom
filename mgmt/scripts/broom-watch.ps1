@@ -10,11 +10,20 @@ $ErrorActionPreference = 'SilentlyContinue'
 # BROOMWIN's free space: GetDiskFreeSpaceEx (broom-fw.dll) on the volume path broom-bootorder.ps1 passes as -Vol - well
 # under a millisecond, and without the Storage module this process holds ~100 MB less all session. No DLL / no -Vol
 # (older bootorder script): Get-Volume as before.
+# Temp copies are named after their source's sha256: C:\Windows\Temp is written while base is built and so ends up in
+# base, where a fixed name would keep that build for good (a newer one from the server never copied over it).
+function Sha16($p) {
+  $s = [IO.File]::OpenRead($p)
+  try { -join ([Security.Cryptography.SHA256]::Create().ComputeHash($s)[0..7] | ForEach-Object { $_.ToString('x2') }) }
+  finally { $s.Dispose() }
+}
 $fw = $false
-if ($Vol) {
-  $dll = "$env:SystemRoot\Temp\broom-fw.dll"
-  if (-not [IO.File]::Exists($dll)) { try { [IO.File]::Copy("$Vol\broom\broom-fw.dll", $dll) } catch { } }
-  try { Add-Type -Path $dll -ErrorAction Stop; $fw = [BroomFw]::Free("$Vol\") -ge 0 } catch { }
+if ($Vol -and [IO.File]::Exists("$Vol\broom\broom-fw.dll")) {
+  try {
+    $dll = "$env:SystemRoot\Temp\broom-fw-" + (Sha16 "$Vol\broom\broom-fw.dll") + '.dll'
+    if (-not [IO.File]::Exists($dll)) { [IO.File]::Copy("$Vol\broom\broom-fw.dll", $dll, $true) }
+    Add-Type -Path $dll -ErrorAction Stop; $fw = [BroomFw]::Free("$Vol\") -ge 0
+  } catch { }
 }
 function FreeBytes {
   if ($fw) { return [BroomFw]::Free("$Vol\") }
@@ -32,21 +41,37 @@ function Report($free) {
 # Remote agent (vnc.rs): start broom-vnc.exe (SYSTEM, this session 0) -> it relaunches itself into the console session.
 # A Global mutex in the agent keeps it to one copy, so this is safe to call again. Local build (no exe shipped):
 # compile broom-vnc.cs once into Temp. No -Vol (older bootorder) -> skip.
-function StartAgent {
-  if (-not $Vol) { return }
-  $exe = "$env:SystemRoot\Temp\broom-vnc.exe"
-  if (-not [IO.File]::Exists($exe)) {
-    $src = "$Vol\broom\broom-vnc.exe"
-    if ([IO.File]::Exists($src)) { try { [IO.File]::Copy($src, $exe) } catch { } }
-    elseif ([IO.File]::Exists("$Vol\broom\broom-vnc.cs")) {
-      # The .NET Framework's own csc (in every Windows), same flags as CI. Not Add-Type: PowerShell 5.1 has no
-      # -CompilerOptions, and the agent needs /unsafe.
-      $csc = "$env:SystemRoot\Microsoft.NET\Framework64\v4.0.30319\csc.exe"
-      if (-not [IO.File]::Exists($csc)) { $csc = "$env:SystemRoot\Microsoft.NET\Framework\v4.0.30319\csc.exe" }
-      try { & $csc /nologo /unsafe /target:winexe /r:System.Drawing.dll /r:System.Windows.Forms.dll /r:System.Management.dll "/out:$exe" "$Vol\broom\broom-vnc.cs" | Out-Null } catch { }
-    }
+# The agent's Temp copy, named after its source's sha256 (see Sha16), worked out once: the source only changes at boot
+# (the stage). Release: the shipped exe; local build: compiled from broom-vnc.cs.
+$agentExe = $null
+if ($Vol) {
+  $ship = "$Vol\broom\broom-vnc.exe"; $cs = "$Vol\broom\broom-vnc.cs"
+  $from = if ([IO.File]::Exists($ship)) { $ship } elseif ([IO.File]::Exists($cs)) { $cs } else { $null }
+  if ($from) {
+    try {
+      $agentExe = "$env:SystemRoot\Temp\broom-vnc-" + (Sha16 $from) + '.exe'
+      if (-not [IO.File]::Exists($agentExe)) {
+        if ($from -eq $ship) { [IO.File]::Copy($ship, $agentExe, $true) }
+        else {
+          # The .NET Framework's own csc (in every Windows), same flags as CI. Not Add-Type: PowerShell 5.1 has no
+          # -CompilerOptions, and the agent needs /unsafe.
+          $csc = "$env:SystemRoot\Microsoft.NET\Framework64\v4.0.30319\csc.exe"
+          if (-not [IO.File]::Exists($csc)) { $csc = "$env:SystemRoot\Microsoft.NET\Framework\v4.0.30319\csc.exe" }
+          & $csc /nologo /unsafe /target:winexe /r:System.Drawing.dll /r:System.Windows.Forms.dll /r:System.Management.dll "/out:$agentExe" $cs | Out-Null
+        }
+      }
+    } catch { $agentExe = $null }
   }
-  if ([IO.File]::Exists($exe)) { try { Start-Process $exe -ArgumentList $Srv -WindowStyle Hidden } catch { } }
+}
+function StartAgent {
+  if (-not $agentExe -or -not [IO.File]::Exists($agentExe)) { return }
+  # An agent of another build still running (an older Temp copy, kept in base): stop it, or its mutex keeps this one
+  # out. Then its file can go.
+  Get-Process -Name 'broom-vnc*' -ErrorAction SilentlyContinue | Where-Object { $_.Path -and $_.Path -ne $agentExe } |
+    ForEach-Object { try { $_.Kill(); $_.WaitForExit(5000) | Out-Null } catch { } }
+  Get-ChildItem "$env:SystemRoot\Temp\broom-vnc*.exe" -ErrorAction SilentlyContinue | Where-Object { $_.FullName -ne $agentExe } |
+    ForEach-Object { Remove-Item -LiteralPath $_.FullName -Force -ErrorAction SilentlyContinue }
+  try { Start-Process $agentExe -ArgumentList $Srv -WindowStyle Hidden } catch { }
 }
 StartAgent
 # Boot time (Benchmark page): the desktop is up once explorer runs (guest logged on) -> tell the server, which times it

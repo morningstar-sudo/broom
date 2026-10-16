@@ -69,7 +69,7 @@ async function loadStatus(){
   allMachines=await j('/api/status');
   const online=allMachines.filter(m=>m.online).length;
   document.getElementById('onlinecount').textContent=online+'/'+allMachines.length+' online';
-  renderMachines();
+  if(curPage==='machines')renderMachines();
 }
 // Per-column filters (the second header row of the machine table). Text = case-insensitive "contains".
 const MF=['mf_host','mf_grp','mf_ip','mf_mac','mf_state','mf_lic','mf_reg'];
@@ -635,6 +635,8 @@ function openOne(host){
   rmConnect();
 }
 function rmBack(){history.pushState(null,'','/remote');loadRemote();}
+// Wall: open a machine by its hostname (typed or picked from the list).
+function rmGo(){const h=v('rm_go');if(h)remoteTo(h);}
 function rmSay(m){const e=document.getElementById('rm_msg');if(e)say(e,m);}
 function rmClose(silent){if(rmWs){rmWs.onclose=null;rmWs.close();rmWs=null;}rmCtx=null;rmCloseDec();
   const c=document.getElementById('rm_canvas');if(c)c.classList.add('d-none');if(!silent)rmSay(' disconnected');}
@@ -866,7 +868,7 @@ const ACTIONS={
   loadGroups,editGroup,closeGroup,saveGroup,createGroup,renameGroup,deleteGroup,
   loadServer,loadBench,loadBenchHist,benchServer,benchRequest:()=>benchAsk(false),benchCancel:()=>benchAsk(true),bSelAll,
   applyDhcp,savePw,saveCafe,setTimeout_,setZramReserve,setAlert,setSsd,gsMode,setGoldenStreams,logout,
-  remoteTo,rmConnect,rmClose,rmBack,rmQuality,rmFull,rmSas,rmWin,rmAltTab,rmPaste,loadRemote,
+  remoteTo,rmGo,rmConnect,rmClose,rmBack,rmQuality,rmFull,rmSas,rmWin,rmAltTab,rmPaste,loadRemote,
 };
 
 let started=false;
@@ -882,6 +884,8 @@ function startApp(){
   setInterval(()=>{if(lastPing&&Date.now()-lastPing>12000)setServer(false);},3000);
   if(location.pathname!=='/'+pageFromPath())history.replaceState(null,'','/'+pageFromPath());
   showPage(pageFromPath());
-  setInterval(()=>{if(curPage==='machines'&&!document.hidden)loadStatus();},15000);
+  // Every page shows the online count in the sidebar: keep it fresh everywhere (the Machines table redraws too).
+  if(pageFromPath()!=='machines')loadStatus().catch(()=>{});
+  setInterval(()=>{if(!document.hidden)loadStatus().catch(()=>{});},15000);
 }
 startApp();
