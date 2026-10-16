@@ -239,8 +239,9 @@ async fn login_js() -> impl axum::response::IntoResponse {
     )
 }
 
-/// Server events (SSE): "ping" on connect + every 5 s (keep-alive) for the sidebar dot — the browser marks
-/// the server offline on a connection error or when pings stop arriving; "job" {name,status} on every
+/// Server events (SSE): "ping" on connect + after 5 s without any other event (keep-alive) — the sidebar dot
+/// counts every event as "server up" and marks it offline on a connection error or when events stop arriving
+/// ("res" alone comes every 2 s, so pings are rare); "job" {name,status} on every
 /// image job change (publish / snapshot / rollback steps) — replaces polling /api/images/job.
 async fn events(
     axum::extract::State(st): axum::extract::State<SharedState>,

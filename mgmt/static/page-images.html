@@ -1,5 +1,5 @@
 <section id="page-images">
-  <div class="d-flex flex-wrap align-items-baseline gap-3 mb-4"><h1 class="h4 mb-0">Images</h1><p class="mb-0 small text-body-secondary">golden OS booted over the network</p>
+  <div class="d-flex flex-wrap align-items-baseline gap-3 mb-4"><h1 class="h4 mb-0">Images</h1>
     <span class="flex-grow-1"></span><button class="btn btn-sm btn-outline-secondary" data-click="loadImages" title="Refresh" aria-label="Refresh"><svg class="ic" aria-hidden="true"><use href="/icons.svg#refresh"/></svg></button></div>
   <div class="card card-body mb-3">
     <h2 class="h6 text-uppercase text-body-secondary mb-3">Image list</h2>
@@ -40,12 +40,5 @@
       <button class="btn btn-sm btn-primary" data-click="saveGames">Add / change</button>
       <span id="gm_msg" class="msg align-self-center"></span>
     </div>
-    <p class="form-text">Disks on the server for the Windows machines (Steam / launcher libraries go there); a machine gets
-      every disk of its group (Devices page) plus those set for all machines, each under its drive letter. Guests write
-      to their own SSD (thrown away at reboot); a games disk itself never changes. <b>To install / update games</b>: pick
-      the disk's update machine → (re)boot it: that drive is writable there → install → <b>shut it down properly</b> →
-      <b>Save</b>: a new version at once — each machine gets it at its next boot, machines already playing keep theirs.
-      A new disk is set up (formatted) by its first update machine. Size can only grow; the update machine extends the
-      drive on its next boot. Two disks the same machine gets need different letters.</p>
   </div>
 </section>

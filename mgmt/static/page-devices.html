@@ -1,5 +1,5 @@
 <section id="page-devices">
-  <div class="d-flex flex-wrap align-items-baseline gap-3 mb-4"><h1 class="h4 mb-0">Devices</h1><p class="mb-0 small text-body-secondary">edit machines, bulk actions, CSV</p>
+  <div class="d-flex flex-wrap align-items-baseline gap-3 mb-4"><h1 class="h4 mb-0">Devices</h1>
     <span class="flex-grow-1"></span>
     <button class="btn btn-sm btn-outline-secondary" data-click="href" data-args='["/api/machines/export.csv"]'>Export CSV</button>
     <label class="btn btn-sm btn-outline-secondary mb-0">Import CSV<input type="file" accept=".csv,text/csv" hidden data-change="dvImport"></label>
@@ -38,9 +38,7 @@
           <th><input class="form-control form-control-sm" id="dvf_notes" placeholder="notes"></th>
         </tr></thead>
       <tbody></tbody></table></div>
-    <p class="form-text">Click a row for details / edit. Import CSV columns (header row, any order): <code>mac</code> (required), <code>hostname</code>, <code>ip</code>, <code>group</code>, <code>notes</code>, <code>image</code>, <code>license_key</code> —
-      rows are matched by MAC (update) or added; a missing column keeps the stored value. Export never contains license keys.</p>
-  </div>
+    </div>
 
   <div class="card card-body mb-3">
     <h2 class="h6 text-uppercase text-body-secondary mb-3">Add machine</h2>

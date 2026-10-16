@@ -1,5 +1,5 @@
 <section id="page-network">
-  <div class="d-flex flex-wrap align-items-baseline gap-3 mb-4"><h1 class="h4 mb-0">Network</h1><p class="mb-0 small text-body-secondary">DHCP + PXE + reset policy</p></div>
+  <div class="d-flex flex-wrap align-items-baseline gap-3 mb-4"><h1 class="h4 mb-0">Network</h1></div>
   <div class="card card-body mb-3">
     <h2 class="h6 text-uppercase text-body-secondary mb-3">DHCP settings</h2>
     <div class="d-flex flex-wrap gap-3 align-items-end">
@@ -33,14 +33,5 @@
       <div class="form-check"><input class="form-check-input" id="dhcp_strict_reset" type="checkbox"><label class="form-check-label" for="dhcp_strict_reset">Windows starts only via PXE</label></div>
     </div>
     <div class="d-flex flex-wrap gap-2 align-items-center mt-3"><button class="btn btn-sm btn-primary" data-click="applyDhcp">Apply (restart DHCP/TFTP)</button> <span id="dhcp_msg" class="msg"></span></div>
-    <p class="form-text"><b>Off</b> (default): the LAN's DHCP server (router) hands out IPs. Point its PXE options here:
-      next-server / option 66 = <b id="pxe_srv">this server</b>, boot file / option 67 = <code>snponly.efi</code>
-      (Secure Boot clients: <code>sb/snponly-shim.efi</code>). broom serves iPXE over TFTP and the menu over HTTP.<br>
-      <b>On</b>: this server hands out IPs + PXE boot info on that interface — turn off any other DHCP server on the LAN first;
-      gateway and DNS are required.</p>
-    <p class="form-text"><b>Strict reset</b>: the SSD's Windows boot entries are kept out of the boot order and Windows removes its
-      boot loader from the SSD after each start, so a machine reaches Windows ONLY through PXE (every session reset).
-      Server or network down = the machines don't start Windows. Off: they still boot from the SSD (that session not reset;
-      the Machines page flags it).</p>
   </div>
 </section>

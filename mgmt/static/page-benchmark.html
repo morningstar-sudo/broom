@@ -1,11 +1,9 @@
 <section id="page-benchmark">
-  <div class="d-flex flex-wrap align-items-baseline gap-3 mb-4"><h1 class="h4 mb-0">Benchmark</h1><p class="mb-0 small text-body-secondary">server disk, iSCSI, client disk / network, boot time</p>
+  <div class="d-flex flex-wrap align-items-baseline gap-3 mb-4"><h1 class="h4 mb-0">Benchmark</h1>
     <span class="flex-grow-1"></span><button class="btn btn-sm btn-outline-secondary" data-click="loadBench" title="Refresh" aria-label="Refresh"><svg class="ic" aria-hidden="true"><use href="/icons.svg#refresh"/></svg></button></div>
   <div class="card card-body mb-3">
     <h2 class="h6 text-uppercase text-body-secondary mb-3">Server now</h2>
     <div id="b_res" class="msg">—</div>
-    <p class="form-text">Live, every 2 s. Red = at or above the alert threshold (Settings); held there for 6 s → a banner on
-      every page. Network % is of the boot card's link speed; a VM's virtual card has no real one (its host's port is the limit), so no % there.</p>
   </div>
   <div class="card card-body mb-3">
     <h2 class="h6 text-uppercase text-body-secondary mb-3">Server disk</h2>
@@ -16,13 +14,10 @@
       <button class="btn btn-sm btn-primary" data-click="benchServer">Run</button>
     </div>
     <div id="bench_msg" class="msg mt-2"></div>
-    <p class="form-text">Reads the biggest image straight from the disk (~20 s, page cache left alone). Clients booting meanwhile
-      get slower — run it when the room is quiet.</p>
   </div>
   <div class="card card-body mb-3">
     <h2 class="h6 text-uppercase text-body-secondary mb-3">iSCSI now</h2>
     <div id="b_iscsi" class="msg">—</div>
-    <p class="form-text">What clients read from the server, live (every second; Linux images, games disks).</p>
   </div>
   <div class="card card-body mb-3">
     <h2 class="h6 text-uppercase text-body-secondary mb-3">Clients</h2>
@@ -34,10 +29,6 @@
     <div class="table-responsive"><table class="table table-sm table-hover align-middle" id="b_clients">
       <thead><tr><th><input class="form-check-input" type="checkbox" data-change="bSelAll" title="all"></th><th>Machine</th><th>Boot</th><th>Disk read</th><th>Network</th><th>Measured</th></tr></thead>
       <tbody></tbody></table></div>
-    <p class="form-text"><b>Boot</b> = menu choice → desktop, on every boot (server clock; <i>stage</i> = the Windows stage's part).
-      <b>Disk</b> and <b>network</b> are measured on request, at the machine's next boot (wake or restart it): disk = reading
-      its own SSD (Windows) or its boot disk (Linux), network = 256 MB from the server. Many machines at once = the whole
-      room booting together.</p>
   </div>
   <div class="card card-body mb-3">
     <h2 class="h6 text-uppercase text-body-secondary mb-3">History</h2>

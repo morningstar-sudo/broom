@@ -1,5 +1,5 @@
 <section id="page-drivers">
-  <div class="d-flex flex-wrap align-items-baseline gap-3 mb-4"><h1 class="h4 mb-0">Drivers</h1><p class="mb-0 small text-body-secondary">custom Windows drivers installed into each machine's base</p>
+  <div class="d-flex flex-wrap align-items-baseline gap-3 mb-4"><h1 class="h4 mb-0">Drivers</h1>
     <span class="flex-grow-1"></span><button class="btn btn-sm btn-outline-secondary" data-click="loadDrivers" title="Refresh" aria-label="Refresh"><svg class="ic" aria-hidden="true"><use href="/icons.svg#refresh"/></svg></button></div>
   <div class="card card-body mb-3">
     <h2 class="h6 text-uppercase text-body-secondary mb-3">Upload a driver package (.zip)</h2>
@@ -19,11 +19,5 @@
       <thead><tr><th>Name</th><th>Size</th><th title="hardware IDs read from the .inf files — a machine with one of them gets the package">Hardware IDs</th>
         <th title="machines that get it now (hardware reported by their stage, group, or all)">Machines</th><th>All machines</th><th>Groups</th><th></th></tr></thead>
       <tbody></tbody></table></div>
-    <p class="form-text">A machine gets a package when <b>one of its devices matches</b> a hardware ID, the package is assigned to <b>its group</b> (Machines page),
-      or <b>All machines</b> is ticked. Changes apply on each machine's next boot: the stage downloads the packages and rebuilds its base once
-      (Windows installs the drivers that match its devices). Windows images only.</p>
-    <p class="form-text">Put the <b>graphics, chipset and network drivers</b> of every machine model here: they go into its base and load at
-      every boot. Windows Update does not install drivers on these machines (golden prep turns it off) — one it fetched during a session
-      would be gone at the next reset and installed again on every boot.</p>
   </div>
 </section>

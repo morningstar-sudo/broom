@@ -1,5 +1,5 @@
 <section id="page-system">
-  <div class="d-flex flex-wrap align-items-baseline gap-3 mb-4"><h1 class="h4 mb-0">Settings</h1><p class="mb-0 small text-body-secondary">admin password + guest user + boot menu + RAM cache</p></div>
+  <div class="d-flex flex-wrap align-items-baseline gap-3 mb-4"><h1 class="h4 mb-0">Settings</h1></div>
   <div class="card card-body mb-3">
     <h2 class="h6 text-uppercase text-body-secondary mb-3">Admin password</h2>
     <div class="d-flex flex-wrap gap-2 align-items-end">
@@ -9,7 +9,6 @@
       <button class="btn btn-sm btn-primary" data-click="savePw">Change</button>
       <span id="pw_msg" class="msg align-self-center"></span>
     </div>
-    <p class="form-text">Changing the password signs out every other browser (all old sessions stop working). This one stays signed in.</p>
   </div>
   <div class="card card-body mb-3">
     <h2 class="h6 text-uppercase text-body-secondary mb-3">Guest user (Windows)</h2>
@@ -19,7 +18,6 @@
       <button class="btn btn-sm btn-primary" data-click="saveCafe">Save</button>
       <span id="cafe_msg" class="msg align-self-center"></span>
     </div>
-    <p class="form-text">The user is created + set to autologon in the Windows golden when the Windows prep command (Images page) runs in the VM. Changes here only apply to goldens prepared <b>afterwards</b> (run prep again → upload). Linux golden: the user already exists in the image.</p>
   </div>
   <div class="card card-body mb-3">
     <h2 class="h6 text-uppercase text-body-secondary mb-3">Countdown boot menu</h2>
@@ -34,24 +32,15 @@
       <div><label class="form-label small mb-1" for="ssd_reboot">Restart below</label><div class="input-group input-group-sm"><input class="form-control" id="ssd_reboot" type="number" min="1" style="width:80px"><span class="input-group-text">GB</span></div></div>
       <button class="btn btn-sm btn-outline-primary" data-click="setSsd">Save</button> <span id="ssd_msg" class="msg align-self-center"></span>
     </div>
-    <p class="form-text">Everything a guest writes (C:, games drives) lands on the machine's SSD until the next boot. At each
-      boot the stage frees <b>Keep free</b> GB (parked images, unused the longest first). During the session a watchdog
-      checks the SSD every 15 s: below <b>Warn</b> it tells the guest (and the Machines page shows <i>SSD full</i>); below
-      <b>Restart</b> it restarts the machine after 60 s — otherwise Windows would crash with a blue screen once the SSD is
-      full. Big writes come mostly from launchers updating games on the machines: let only the games disk's update
-      machine update them. Applies at each machine's next boot.</p>
   </div>
   <div class="card card-body mb-3">
     <h2 class="h6 text-uppercase text-body-secondary mb-3">Server resource alert</h2>
     <div class="d-flex flex-wrap gap-2 align-items-center"><div class="input-group input-group-sm w-auto"><input class="form-control" id="alert_pct" type="number" min="50" max="99" style="width:80px"><span class="input-group-text">%</span></div>
       <button class="btn btn-sm btn-outline-primary" data-click="setAlert">Save</button> <span id="al_msg" class="msg"></span></div>
-    <p class="form-text">A banner shows on every page while the server's CPU, RAM, boot network card or image disk (busy time or
-      space) stays at or above this for 6 s — clients boot and load slower then. Live numbers: Benchmark page.</p>
   </div>
   <div class="card card-body mb-3">
     <h2 class="h6 text-uppercase text-body-secondary mb-3">RAM cache — RAM reserved for the server</h2>
     <div class="d-flex flex-wrap gap-2 align-items-center"><div class="input-group input-group-sm w-auto"><input class="form-control" id="zram_reserve" type="number" min="0" style="width:100px"><span class="input-group-text">MB</span></div>
       <button class="btn btn-sm btn-outline-primary" data-click="setZramReserve">Save</button> <span id="zr_msg" class="msg"></span></div>
-    <p class="form-text">Loading a golden into the <b>RAM</b> cache (compressed copy: Linux = the iSCSI target serves it, Windows = golden.vhdx downloads come from it, the disk is never read) claims its RAM before loading: the golden's data (holes not counted) at its worst-case compressed size. Refused if that <code>+ reserve > available RAM</code> → never runs out halfway; what compression saves is given back once loaded. Reserve = RAM kept for the OS + serving. Not enough → the image falls back to <code>disk</code> by itself.</p>
   </div>
 </section>

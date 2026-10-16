@@ -438,7 +438,6 @@ async function loadDhcp(){const c=await j('/api/dhcp');
   ['mode','iface','server_ip','subnet','netmask','range_start','range_end','gateway'].forEach(k=>{const e=document.getElementById('dhcp_'+k);if(e)e.value=c[k]||'';});
   for(const k of ['ipxe_signed','strict_reset','rapid_commit','ipxe_fast','authoritative','send_hostname']){const e=document.getElementById('dhcp_'+k);if(e)e.checked=!!c[k];}
   setDns(c.dns);
-  const ps=document.getElementById('pxe_srv');if(ps&&c.server_ip)ps.textContent=c.server_ip;
   const dm=document.getElementById('dhcp_mode');if(dm)dm.onchange=toggleFull;toggleFull();}
 function toggleFull(){const dm=document.getElementById('dhcp_mode');if(!dm)return;
   for(const id of ['full_only','full_only_opts']){const e=document.getElementById(id);if(e)e.style.display=dm.value==='full'?'':'none';}}
@@ -543,10 +542,12 @@ async function setAlert(){const m=document.getElementById('al_msg');
   try{await j('/api/config/alert',mk({pct:+document.getElementById('alert_pct').value}));say(m,' ✓ saved');}catch(e){say(m,' ✗ '+e.message);}}
 async function setZramReserve(){await j('/api/config/zram-reserve',mk({mb:+document.getElementById('zram_reserve').value}));say(document.getElementById('zr_msg'),' ✓ saved');}
 
-// ---- server liveness (SSE /api/events: "ping" on connect + every 5 s) ----
-// Green on ping; red on connection error or no ping for 12 s (e.g. server powered off, half-open link).
-// EventSource reconnects by itself → green again on the next ping.
+// ---- server liveness (SSE /api/events) ----
+// Any event counts: "ping" comes on connect and only after 5 s without other events (axum's keep-alive restarts
+// its timer on every event, and "res" arrives every 2 s). Red on connection error or nothing for 12 s (e.g. server
+// powered off, half-open link). EventSource reconnects by itself → green again on the next event.
 let lastPing=0;
+const alive=()=>{lastPing=Date.now();setServer(true);};
 function setServer(up){const d=document.getElementById('srvdot');
   d.classList.toggle('up',up);d.classList.toggle('down',!up);d.title=up?'server online':'server offline';}
 
@@ -694,9 +695,9 @@ let started=false;
 function startApp(){
   if(started)return; started=true;
   const srvEvents=new EventSource('/api/events');
-  srvEvents.addEventListener('ping',()=>{lastPing=Date.now();setServer(true);});
-  srvEvents.addEventListener('job',e=>{const d=JSON.parse(e.data);showJob(d.name,d.status);});
-  srvEvents.addEventListener('res',e=>showRes(JSON.parse(e.data)));
+  srvEvents.addEventListener('ping',alive);
+  srvEvents.addEventListener('job',e=>{alive();const d=JSON.parse(e.data);showJob(d.name,d.status);});
+  srvEvents.addEventListener('res',e=>{alive();showRes(JSON.parse(e.data));});
   srvEvents.onerror=()=>setServer(false);
   // (Re)connected: job events sent while the link was down are lost → ask for the status of every followed job.
   srvEvents.onopen=()=>{for(const n in jobWatch)j('/api/images/job?name='+encodeURIComponent(n)).then(r=>showJob(n,r.status)).catch(()=>{});};
