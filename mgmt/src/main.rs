@@ -577,6 +577,7 @@ async fn main() {
         // /tftp/... -> <home>/tftp/... (e.g. http://SERVER/tftp/broom-stage/vmlinuz); a Windows golden set to RAM
         // from its RAM copy.
         .route("/tftp/broom-win/{name}/golden.vhdx", get(goldenram::get))
+        .route("/api/golden-slot", get(goldenram::slot))
         // 1 MB reads (default 64 KB): every boot of every client fetches its kernel + initrd here.
         .nest_service(
             "/tftp",

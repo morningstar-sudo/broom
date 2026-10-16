@@ -8,6 +8,10 @@
 // once. Clients connect to the newest gen when they boot; a client already playing keeps its gen until it reboots.
 // Once no client has used an older gen for a while, the layers are merged into games.img in the background — safe
 // while clients of the newest gen read: merging only writes blocks a layer covers, and they read those from the layer.
+//
+// RAM option, per disk: games.img copied into RAM (ramimg.rs) in the background, served from the file meanwhile. The
+// copy stays right while layers sit on top of it (a merge only rewrites blocks the layers cover); once a merge drops
+// those layers the disk goes back to the file at once and the copy is loaded again.
 use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -35,6 +39,12 @@ pub struct Config {
     /// IP of the disk's update machine (None = no update running).
     #[serde(default)]
     pub update_ip: Option<String>,
+    /// Serve games.img from a copy in RAM.
+    #[serde(default)]
+    pub ram: bool,
+    /// RAM bytes that must stay free next to the copy (not loaded otherwise).
+    #[serde(default)]
+    pub reserve: u64,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
@@ -55,6 +65,11 @@ pub struct Info {
     /// Bytes read by clients since the disk was set up (benchmark page). 0 from a daemon of a build without it.
     #[serde(default)]
     pub read_bytes: u64,
+    /// Served from its RAM copy now / the copy is being loaded.
+    #[serde(default)]
+    pub ram: bool,
+    #[serde(default)]
+    pub ram_loading: bool,
 }
 
 /// What a session of one gen reads: games.img under `layers` (oldest first); `ov` = its writes (the update machine).
@@ -85,6 +100,9 @@ struct State {
     update_users: usize,
     /// Merging the layers up to this gen: older gens are no longer served.
     merging: Option<u64>,
+    /// Merges done: a RAM copy loaded across one is stale.
+    merges: u64,
+    ram_loading: bool,
 }
 
 /// The disks, by name.
@@ -122,6 +140,75 @@ fn open_lun(cfg: &Config) -> Result<Arc<Lun>, String> {
         sessions: AtomicUsize::new(0),
         read_bytes: AtomicU64::new(0),
     }))
+}
+
+/// The disk's games.img now served from `data` (sessions already in keep theirs); the read counter goes on.
+fn swap_lun(s: &mut State, data: super::Data) {
+    let read = s.lun.read_bytes.load(std::sync::atomic::Ordering::Relaxed);
+    s.lun = Arc::new(Lun {
+        iqn: s.cfg.iqn.clone(),
+        size: s.lun.size,
+        data,
+        sessions: AtomicUsize::new(0),
+        read_bytes: AtomicU64::new(read),
+    });
+}
+
+/// Back to reading games.img (RAM option off, or the copy went stale).
+fn to_file(s: &mut State) -> Result<(), String> {
+    if s.lun.is_ram() {
+        let f = std::fs::File::open(&s.cfg.path).map_err(|e| format!("{}: {e}", s.cfg.path))?;
+        swap_lun(s, super::Data::File(f));
+    }
+    Ok(())
+}
+
+/// Disk `name` set to RAM and not in RAM yet → load the copy on a thread, swapped in when done unless games.img changed
+/// meanwhile (a merge, the disk grew → loaded again). Not enough RAM → stays on the file.
+fn load_ram(name: &str) {
+    let Some((path, reserve, merges)) = with(|d| {
+        let s = d.get_mut(name)?;
+        if !s.cfg.ram || s.ram_loading || s.lun.is_ram() {
+            return None;
+        }
+        s.ram_loading = true;
+        Some((s.cfg.path.clone(), s.cfg.reserve, s.merges))
+    }) else {
+        return;
+    };
+    let name = name.to_string();
+    std::thread::spawn(move || {
+        let r = super::ramimg::RamImage::load(&path, reserve);
+        let (again, unused) = with(|d| {
+            let Some(s) = d.get_mut(&name) else {
+                return (false, r.ok());
+            };
+            s.ram_loading = false;
+            match r {
+                Ok(img)
+                    if s.cfg.ram
+                        && s.cfg.path == path
+                        && s.merges == merges
+                        && s.lun.size == img.size() =>
+                {
+                    swap_lun(s, super::Data::Ram(img));
+                    tracing::info!("games disk {name}: served from RAM");
+                    (false, None)
+                }
+                Ok(img) => (s.cfg.ram, Some(img)),
+                Err(e) => {
+                    tracing::warn!(
+                        "games disk {name}: not loaded into RAM ({e}) → served from the file"
+                    );
+                    (false, None)
+                }
+            }
+        });
+        drop(unused); // outside the lock: unmapping a big copy takes a while
+        if again {
+            load_ram(&name);
+        }
+    });
 }
 
 /// Blocking read of gen view `layers` (oldest first) over games.img.
@@ -219,6 +306,9 @@ fn set_one(cfg: Config) -> Result<(), String> {
                     s.update = None;
                 }
                 s.cfg = cfg;
+                if !s.cfg.ram {
+                    to_file(s)?;
+                }
             }
             _ => {
                 let lun = open_lun(&cfg)?;
@@ -236,12 +326,15 @@ fn set_one(cfg: Config) -> Result<(), String> {
                     update: None,
                     update_users: 0,
                     merging: None,
+                    merges: 0,
+                    ram_loading: false,
                 };
                 d.insert(name.clone(), s);
             }
         }
         Ok(())
     })?;
+    load_ram(&name);
     // A merge cut off by a crash / restart: games.img is half merged, only the newest gen reads it right → finish now.
     if dir.join("merging").exists() {
         tracing::warn!("games disk {name}: finishing a merge cut off earlier");
@@ -416,6 +509,12 @@ pub fn merge_if_idle(name: &str, grace: Duration) {
         match r {
             Ok(()) => {
                 // Sessions holding these layers keep reading them (open files) — same bytes as games.img now.
+                // A RAM copy holds the old bytes under those layers: new sessions read the file until it is loaded again.
+                s.merges += 1;
+                if let Err(e) = to_file(s) {
+                    tracing::error!("games disk {name}: {e}");
+                    return; // layers kept: still served right from the stale copy; retried at the next tick
+                }
                 s.base_ver = target;
                 s.layers.retain(|l| l.ver > target);
                 for (g, _) in &layers {
@@ -427,6 +526,7 @@ pub fn merge_if_idle(name: &str, grace: Duration) {
             Err(e) => tracing::error!("games disk {name}: merge failed (retried later): {e}"),
         }
     });
+    load_ram(name);
 }
 
 /// Freeze the update into a new gen, served at once (machines get it at their next boot). The update machine must be
@@ -517,6 +617,8 @@ pub fn info() -> Vec<Info> {
                 update_connected: s.update_users > 0,
                 merging: s.merging.is_some(),
                 read_bytes: s.lun.read_bytes.load(std::sync::atomic::Ordering::Relaxed),
+                ram: s.lun.is_ram(),
+                ram_loading: s.ram_loading,
             })
             .collect()
     })

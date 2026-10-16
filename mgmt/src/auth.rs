@@ -236,6 +236,7 @@ fn is_public(method: &axum::http::Method, path: &str) -> bool {
         "/api/games/for",
         "/api/ssd-low",
         "/api/client-config",
+        "/api/golden-slot",
         "/api/bench/pending",
         "/api/bench/blob",
         "/api/bench/report",

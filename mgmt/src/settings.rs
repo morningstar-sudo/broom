@@ -19,6 +19,7 @@ pub fn routes() -> Router<SharedState> {
         .route("/api/config/zram-reserve", post(set_zram_reserve))
         .route("/api/config/alert", post(set_alert))
         .route("/api/config/ssd", post(set_ssd))
+        .route("/api/config/golden-streams", post(set_golden_streams))
         .route("/api/client-config", get(client_config))
         .route("/api/dhcp", get(get_dhcp).post(set_dhcp))
         .route("/api/cafe-user", get(get_cafe_user).post(set_cafe_user))
@@ -87,6 +88,8 @@ async fn set_cafe_user(
 /// System page values (same defaults as their readers: boot.rs, publish.rs).
 async fn get_config(State(st): State<SharedState>) -> Json<serde_json::Value> {
     let (room, warn, reboot) = ssd_limits(&st);
+    let (streams, _, link) = crate::goldenram::streams(&st);
+    let (active, waiting) = crate::goldenram::queue_stats();
     Json(serde_json::json!({
         "boot_timeout": st.db.get_config("boot_timeout", "3").parse::<u64>().unwrap_or(3),
         "zram_reserve_mb": st.db.get_config("zram_reserve_mb", "2048").parse::<u64>().unwrap_or(2048),
@@ -94,6 +97,14 @@ async fn get_config(State(st): State<SharedState>) -> Json<serde_json::Value> {
         "ssd_room_gb": room,
         "ssd_warn_gb": warn,
         "ssd_reboot_gb": reboot,
+        "golden_streams": streams,
+        "golden_streams_auto": crate::goldenram::limit_for("auto", link.as_ref().and_then(|l| l.1)),
+        "golden_link": link.map(|(i, s)| match s {
+            Some(m) => format!("{i} {} Gbit/s", m as f64 / 1000.0),
+            None => format!("{i}, speed unknown"),
+        }),
+        "golden_active": active,
+        "golden_waiting": waiting,
     }))
 }
 
@@ -194,6 +205,30 @@ async fn set_alert(
         .set_config("alert_pct", &b.pct.to_string())
         .map_err(ise)?;
     tracing::info!("server resource alert threshold set to {}%", b.pct);
+    Ok(ok())
+}
+
+#[derive(Deserialize)]
+struct GoldenStreams {
+    value: String,
+}
+
+/// Windows golden downloads at once (goldenram.rs queue): "auto" (from the server's link speed) or a number set by the
+/// admin, 0 = no queue. POST /api/config/golden-streams {value}
+async fn set_golden_streams(
+    State(st): State<SharedState>,
+    Json(b): Json<GoldenStreams>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let v = b.value.trim().to_ascii_lowercase();
+    let max = crate::goldenram::MAX_STREAMS;
+    if v != "auto" && !v.parse::<usize>().is_ok_and(|n| n <= max) {
+        return Err(crate::api::bad(format!(
+            "golden downloads at once: auto or 0–{max} (0 = no queue)"
+        )));
+    }
+    st.db.set_config("golden_streams", &v).map_err(ise)?;
+    crate::goldenram::refresh_limit(&st);
+    tracing::info!("golden downloads at once: {v}");
     Ok(ok())
 }
 

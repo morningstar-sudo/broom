@@ -145,7 +145,7 @@ fn data_blocks(f: &std::fs::File, size: u64) -> u64 {
 
 pub struct RamImage {
     arena: Arena,
-    /// Per block: (offset in the arena, compressed length); length 0 = all zero.
+    /// Per block: (offset in the arena, compressed length); length 0 = all zero, BLOCK = stored as is.
     index: Vec<(u64, u32)>,
     size: u64,
     cache: Mutex<Cache>,
@@ -215,10 +215,17 @@ impl RamImage {
                 buf.chunks(BLOCK)
                     .map(|b| {
                         if b.iter().all(|&x| x == 0) {
-                            Ok(Vec::new())
-                        } else {
-                            z.compress(b).map_err(|e| format!("zstd: {e}"))
+                            return Ok(Vec::new());
                         }
+                        let c = z.compress(b).map_err(|e| format!("zstd: {e}"))?;
+                        if c.len() < b.len() {
+                            return Ok(c);
+                        }
+                        // Not smaller (already compressed data: games, media) → kept as is, a whole block (the last
+                        // one padded): length BLOCK marks it, reads copy it without unpacking.
+                        let mut raw = b.to_vec();
+                        raw.resize(BLOCK, 0);
+                        Ok(raw)
                     })
                     .collect::<Result<Vec<_>, String>>()
             })?;
@@ -261,8 +268,11 @@ impl RamImage {
         while !buf.is_empty() {
             let (i, at) = ((off / BLOCK as u64) as usize, (off % BLOCK as u64) as usize);
             let n = (BLOCK - at).min(buf.len());
-            if self.index[i].1 == 0 {
+            let (packed, len) = self.index[i];
+            if len == 0 {
                 buf[..n].fill(0);
+            } else if len as usize == BLOCK {
+                buf[..n].copy_from_slice(self.arena.get(packed as usize + at, n));
             } else {
                 buf[..n].copy_from_slice(&self.block(i)?[at..at + n]);
             }

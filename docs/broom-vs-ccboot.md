@@ -2,7 +2,7 @@
 title: Broom vs CCBoot — open-source alternative for diskless internet cafés
 description: How Broom, a free open-source diskless boot server, compares with CCBoot and other commercial diskless software, and where Broom is still behind.
 date: 2026-10-11T23:07:00+07:00
-last_modified_at: 2026-10-13
+last_modified_at: 2026-10-16
 ---
 
 [← Broom](index.md)
@@ -44,7 +44,8 @@ change between versions; check their own documentation for current details.
 - **Young project** — fewer sites in production, no commercial support.
 - **Windows 11 Pro only** on the Windows side, and **UEFI** PCs only.
 - **Each PC needs an SSD** for Windows images (Linux images can run without one).
-- **Sized for small sites** — about 10–30 PCs per server.
+- **Sized for small sites** — about 10–30 PCs per server; bigger rooms need a faster server link (golden downloads
+  are queued so PCs come up in batches) and are not yet measured in production.
 - **Web admin in English** only.
 
 If those fit your site, Broom gives you a diskless café without licence fees. Start with

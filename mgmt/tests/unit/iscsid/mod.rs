@@ -188,19 +188,22 @@ async fn games_disk_versions() {
         iqn: "iqn.test:games-b".into(),
         path: img2.to_string_lossy().into(),
         update_ip: None,
+        ..Default::default()
     };
-    let cfg = |ip: Option<&str>| {
+    let cfg = |ip: Option<&str>, ram: bool| {
         vec![
             games::Config {
                 name: "t".into(),
                 iqn: iqn.into(),
                 path: img.to_string_lossy().into(),
                 update_ip: ip.map(Into::into),
+                ram,
+                ..Default::default()
             },
             other.clone(),
         ]
     };
-    games::set(cfg(Some("127.0.0.1"))).unwrap();
+    games::set(cfg(Some("127.0.0.1"), false)).unwrap();
     let mut all = games::iqns();
     all.sort();
     assert_eq!(
@@ -267,7 +270,7 @@ async fn games_disk_versions() {
     assert!(games::save("t").is_err(), "update machine still connected");
     drop(s);
 
-    games::set(cfg(None)).unwrap(); // update mode off: every session read-only
+    games::set(cfg(None, false)).unwrap(); // update mode off: every session read-only
     let mut old = tokio::net::TcpStream::connect(addr).await.unwrap();
     login(&mut old, g0).await;
     assert!(
@@ -304,6 +307,9 @@ async fn games_disk_versions() {
     assert_eq!(info_of("t").layers, 1, "not merged while g0 is in use");
     drop(old);
     wait_games(|i| i.old_sessions == 0).await;
+    // RAM option on: the copy is loaded under the layer (games.img still holds the old bytes there).
+    games::set(cfg(None, true)).unwrap();
+    wait_games(|i| i.ram).await;
     games::merge_if_idle("t", std::time::Duration::ZERO);
     let i = info_of("t");
     assert_eq!((i.ver, i.layers, i.merging), (1, 0, false), "merged");
@@ -316,13 +322,30 @@ async fn games_disk_versions() {
         read_blocks(&mut s, 41, 2, 8, 256).await == data,
         "g1 session unaffected by the merge"
     );
+    drop(s); // (a new login below from the same test initiator would replace it)
+    // (Loaded again on a thread already: a 1 MB copy may be back before this line, so only the bytes are checked.)
+    let mut fresh = tokio::net::TcpStream::connect(addr).await.unwrap();
+    login(&mut fresh, g1).await;
+    assert!(
+        read_blocks(&mut fresh, 50, 1, 8, 256).await == data,
+        "a new session right after the merge reads the merged bytes"
+    );
+    wait_games(|i| i.ram).await;
+    let mut fresh2 = tokio::net::TcpStream::connect(addr).await.unwrap();
+    login(&mut fresh2, g1).await;
+    assert!(
+        read_blocks(&mut fresh2, 60, 1, 8, 256).await == data,
+        "and from the RAM copy loaded again"
+    );
+    drop((fresh, fresh2));
+    games::set(cfg(None, false)).unwrap();
+    assert!(!info_of("t").ram, "RAM option off → the file");
     let mut late = tokio::net::TcpStream::connect(addr).await.unwrap();
     assert_eq!(
         login(&mut late, g0).await.bhs[36],
         0x02,
         "g0 no longer served"
     );
-    drop(s);
     games::set(Vec::new()).unwrap();
     let _ = std::fs::remove_dir_all(&d);
 }

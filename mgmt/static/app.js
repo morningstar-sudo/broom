@@ -461,13 +461,14 @@ async function loadGames(){const g=await j('/api/games');const tb=document.query
       <td class="mono">${s?s.sessions+(s.old_sessions?` <span title="still on an older version until they reboot">(${s.old_sessions} older)</span>`:''):''}</td>
       <td><select class="form-select form-select-sm d-inline-block w-auto" data-change="setGamesUpdate" data-args="${esc(JSON.stringify([d.name]))}">${opts(d.update)}</select>${d.update!=null&&!x.update_ip?' <span class="text-danger" title="no fixed IP or lease known">no IP</span>':''}${s&&s.update_connected?' <span class="text-success">'+ic('dot','')+' writable</span>':''}</td>
       <td class="mono">${s&&s.update_bytes?gbs(s.update_bytes)+` <button class="btn btn-sm btn-outline-primary" ${act('saveGamesUpdate',d.name)}>Save</button> <button class="btn btn-sm btn-outline-secondary" ${act('discardGamesUpdate',d.name)}>Discard</button>`:'—'}</td>
-      <td><button class="btn btn-sm btn-outline-secondary" ${act('editGames',d.name)}>Edit</button> <button class="btn btn-sm btn-outline-danger" ${act('delGames',d.name)}>Delete</button></td></tr>`;}).join('')
+      <td><button class="btn btn-sm btn-outline-secondary" ${act('toggleGamesRam',d.name,!d.ram)} title="RAM: the disk is served from a copy in the server's RAM (loaded in the background; needs about as much free RAM as the games on it — games barely compress). Disk: read from games.img (the page cache keeps what is played most).">${d.ram?(s&&s.ram?'Cache: RAM':(s&&s.ram_loading?'Cache: RAM (loading…)':'Cache: RAM (not loaded)')):'Cache: disk'}</button> <button class="btn btn-sm btn-outline-secondary" ${act('editGames',d.name)}>Edit</button> <button class="btn btn-sm btn-outline-danger" ${act('delGames',d.name)}>Delete</button></td></tr>`;}).join('')
     ||'<tr><td colspan="9" class="mono">no games disk yet</td></tr>';
   const m=document.getElementById('gm_msg');if(m&&g.error)say(m,' ✗ not served: '+g.error);}
 async function gamesCall(url,body,q){if(q&&!await sure(q))return;const m=document.getElementById('gm_msg');
   try{const r=await j(url,mk(body));say(m,' ✓ '+(r.status||'saved'));}catch(e){say(m,' ✗ '+e.message);}loadGames();}
 const saveGames=()=>gamesCall('/api/games/disk',{name:v('gm_name'),letter:v('gm_letter'),size_gb:+v('gm_size'),groups:[v('gm_groups')]});
 const setGamesUpdate=(name,el)=>gamesCall('/api/games/update',{name,id:el.value?+el.value:null});
+const toggleGamesRam=(name,ram)=>gamesCall('/api/games/cache',{name,ram},ram?'Serve games disk '+name+' from RAM? It is loaded in the background (served from the disk meanwhile) and needs about as much free RAM as the games on it; not enough RAM → it stays on the disk (see the log).':null);
 const saveGamesUpdate=name=>gamesCall('/api/games/save',{name},'Save the update of '+name+' as its new version? Its update machine must be shut down. Each machine gets it at its next boot.');
 const discardGamesUpdate=name=>gamesCall('/api/games/discard',{name},'Throw the update of '+name+' away?');
 const delGames=name=>gamesCall('/api/games/delete',{name},'Delete games disk '+name+' and EVERY game on it? Machines using it keep it until they reboot.');
@@ -519,7 +520,8 @@ async function loadCafe(){
   j('/api/config').then(c=>{const t=document.getElementById('timeout'),z=document.getElementById('zram_reserve');
     if(t)t.value=c.boot_timeout;if(z)z.value=c.zram_reserve_mb;
     const al=document.getElementById('alert_pct');if(al)al.value=c.alert_pct;
-    for(const k of ['room','warn','reboot']){const e=document.getElementById('ssd_'+k);if(e)e.value=c['ssd_'+k+'_gb'];}}).catch(()=>{});
+    for(const k of ['room','warn','reboot']){const e=document.getElementById('ssd_'+k);if(e)e.value=c['ssd_'+k+'_gb'];}
+    showGoldenStreams(c);}).catch(()=>{});
   const c=await j('/api/cafe-user');
   const u=document.getElementById('cafe_user');if(u)u.value=c.user||'';
   const p=document.getElementById('cafe_password');if(p)p.placeholder=c.password_set?'(unchanged)':'set a password';}
@@ -538,6 +540,17 @@ async function setTimeout_(){await j('/api/config/timeout',mk({seconds:+document
 async function setSsd(){const m=document.getElementById('ssd_msg');
   try{await j('/api/config/ssd',mk({room_gb:+v('ssd_room'),warn_gb:+v('ssd_warn'),reboot_gb:+v('ssd_reboot')}));say(m,' ✓ saved');}
   catch(e){say(m,' ✗ '+e.message);}}
+// Golden download queue: "auto" (number from the link speed) or the admin's number; 0 = no queue.
+let gsAuto=8;
+function showGoldenStreams(c){const sel=document.getElementById('gs_mode');if(!sel)return;
+  gsAuto=c.golden_streams_auto;const auto=c.golden_streams==='auto';sel.value=auto?'auto':'manual';
+  document.getElementById('gs_n').value=auto?gsAuto:c.golden_streams;gsMode();
+  document.getElementById('gs_info').textContent=`Auto: ${gsAuto} (${c.golden_link||'no network interface found'}). Now: ${c.golden_active} downloading, ${c.golden_waiting} waiting.`;}
+function gsMode(){const auto=document.getElementById('gs_mode').value==='auto',n=document.getElementById('gs_n');
+  n.disabled=auto;if(auto)n.value=gsAuto;}
+async function setGoldenStreams(){const m=document.getElementById('gs_msg');
+  const value=document.getElementById('gs_mode').value==='auto'?'auto':String(+v('gs_n'));
+  try{await j('/api/config/golden-streams',mk({value}));say(m,' ✓ saved');}catch(e){say(m,' ✗ '+e.message);}}
 async function setAlert(){const m=document.getElementById('al_msg');
   try{await j('/api/config/alert',mk({pct:+document.getElementById('alert_pct').value}));say(m,' ✓ saved');}catch(e){say(m,' ✗ '+e.message);}}
 async function setZramReserve(){await j('/api/config/zram-reserve',mk({mb:+document.getElementById('zram_reserve').value}));say(document.getElementById('zr_msg'),' ✓ saved');}
@@ -684,11 +697,11 @@ const ACTIONS={
   loadDevices,dvOpen,dvSave,dvDelete,dvClose,dvBulk,dvRegister,dvImport,dvAdd,dvRender,
   loadImages,addImage,setDefault,toggleCache,toggleBase,toggleSsd,togglePreload,editImgGroups,republish,showVersions,exportImage,editBoot,delImage,
   snapshotImage,rollbackImage,versionToImage,deleteVersion,
-  loadGames,saveGames,setGamesUpdate,saveGamesUpdate,discardGamesUpdate,editGames,delGames,
+  loadGames,saveGames,setGamesUpdate,toggleGamesRam,saveGamesUpdate,discardGamesUpdate,editGames,delGames,
   loadDrivers,uploadDriver,saveDrvTargets,delDriver,
   loadGroups,editGroup,closeGroup,saveGroup,createGroup,renameGroup,deleteGroup,
   loadBench,loadBenchHist,benchServer,benchRequest:()=>benchAsk(false),benchCancel:()=>benchAsk(true),bSelAll,
-  applyDhcp,savePw,saveCafe,setTimeout_,setZramReserve,setAlert,setSsd,logout,
+  applyDhcp,savePw,saveCafe,setTimeout_,setZramReserve,setAlert,setSsd,gsMode,setGoldenStreams,logout,
 };
 
 let started=false;

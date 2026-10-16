@@ -8,6 +8,7 @@ fn drive_letters_clash_only_for_shared_machines() {
         letter: letter.into(),
         groups: groups.iter().map(|g| g.to_string()).collect(),
         update: None,
+        ram: false,
     };
     assert!(
         clash(&d("a", "G", &[]), &d("b", "G", &["VIP"])),

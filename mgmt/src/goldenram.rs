@@ -6,13 +6,20 @@
 // The golden being served keeps image.img open: a new upload / rollback renamed over it changes nothing until the
 // publish that installs the new golden. An image published by an older version (a real golden.vhdx file, no
 // golden.id) is served from that file until it is published again.
+//
+// Download queue: TCP shares the link evenly, so a whole room downloading at once would all finish at the very end.
+// At most `limit` downloads run at once instead (each at a client's full speed), so machines finish one batch after
+// the other. The stage asks GET /api/golden-slot until it says "go"; a machine is known by its IP.
 use parking_lot::Mutex;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
+use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, LazyLock};
+use std::time::{Duration, Instant};
 
 use axum::body::Body;
-use axum::extract::{Path, Request};
+use axum::extract::{ConnectInfo, Path, Request, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 
@@ -110,6 +117,7 @@ fn dir(name: &str) -> PathBuf {
 /// client downloads again), plus its RAM copy when set to RAM. image.img changed since (an upload whose publish did not
 /// finish) → not served until published.
 pub fn restore_all(st: &SharedState) {
+    refresh_limit(st);
     for img in st.db.images().unwrap_or_default() {
         if img.os != "windows" || img.boot_script.is_none() {
             continue;
@@ -148,6 +156,148 @@ pub fn restore_all(st: &SharedState) {
     }
 }
 
+/// A place granted ("go") and not used yet, or left by a cut download (wget -c resumes it): kept this long.
+const HOLD: Duration = Duration::from_secs(60);
+/// A waiting machine that stopped asking for this long (powered off, gave up) leaves the queue.
+const STALE: Duration = Duration::from_secs(30);
+/// Highest number of downloads at once an admin can set.
+pub const MAX_STREAMS: usize = 256;
+
+#[derive(Default)]
+pub struct Queue {
+    /// Downloads at once; 0 = no queue.
+    limit: usize,
+    /// Downloads running, per machine.
+    active: HashMap<IpAddr, usize>,
+    held: HashMap<IpAddr, Instant>,
+    waiting: VecDeque<(IpAddr, Instant)>,
+}
+
+#[derive(Debug, PartialEq)]
+pub enum Slot {
+    Go,
+    /// Place in the queue (1 = next), machines waiting.
+    Wait(usize, usize),
+}
+
+impl Queue {
+    fn expire(&mut self, now: Instant) {
+        self.held.retain(|_, t| now.duration_since(*t) < HOLD);
+        self.waiting.retain(|(_, t)| now.duration_since(*t) < STALE);
+    }
+
+    /// The stage asks for its turn.
+    fn decide(&mut self, ip: IpAddr, now: Instant) -> Slot {
+        self.expire(now);
+        if self.limit == 0 || self.active.contains_key(&ip) {
+            return Slot::Go;
+        }
+        if let Some(t) = self.held.get_mut(&ip) {
+            *t = now;
+            return Slot::Go;
+        }
+        let free = self
+            .limit
+            .saturating_sub(self.active.len() + self.held.len());
+        let pos = match self.waiting.iter().position(|w| w.0 == ip) {
+            Some(p) => {
+                self.waiting[p].1 = now;
+                p
+            }
+            None => {
+                self.waiting.push_back((ip, now));
+                self.waiting.len() - 1
+            }
+        };
+        if pos < free {
+            self.waiting.remove(pos);
+            self.held.insert(ip, now);
+            return Slot::Go;
+        }
+        Slot::Wait(pos + 1, self.waiting.len())
+    }
+
+    /// A download starts: only with a place (or no queue).
+    fn start(&mut self, ip: IpAddr, now: Instant) -> bool {
+        self.expire(now);
+        if self.limit != 0 && !self.active.contains_key(&ip) && self.held.remove(&ip).is_none() {
+            return false;
+        }
+        *self.active.entry(ip).or_default() += 1;
+        true
+    }
+
+    /// A download ended; `done` = all of it sent, else the place is held for the resume.
+    fn finish(&mut self, ip: IpAddr, now: Instant, done: bool) {
+        if let Some(n) = self.active.get_mut(&ip) {
+            *n -= 1;
+            if *n == 0 {
+                self.active.remove(&ip);
+            }
+        }
+        if !done && !self.active.contains_key(&ip) {
+            self.held.insert(ip, now);
+        }
+    }
+}
+
+static QUEUE: LazyLock<Mutex<Queue>> = LazyLock::new(Default::default);
+
+/// Downloads at once for config value `cfg`: a number (0 = no queue, at most MAX_STREAMS), else auto = the server's
+/// link speed over a client's 1 Gbit/s, 4–64; 8 when the speed is unknown (virtual NIC).
+pub fn limit_for(cfg: &str, link_mbit: Option<u64>) -> usize {
+    match cfg.trim().parse::<usize>() {
+        Ok(n) => n.min(MAX_STREAMS),
+        Err(_) => link_mbit.map_or(8, |m| (m / 1000).clamp(4, 64) as usize),
+    }
+}
+
+/// Config value (default "auto"), the limit it gives now, and the boot NIC with its speed.
+pub fn streams(st: &SharedState) -> (String, usize, Option<(String, Option<u64>)>) {
+    let cfg = st.db.get_config("golden_streams", "auto");
+    let link = crate::sysmon::boot_link(&st.db.get_config("dhcp_iface", ""));
+    let n = limit_for(&cfg, link.as_ref().and_then(|l| l.1));
+    (cfg, n, link)
+}
+
+/// Read the limit again (start, settings change, each slot request: a NIC change or a bond port follows by itself).
+pub fn refresh_limit(st: &SharedState) {
+    let n = streams(st).1;
+    QUEUE.lock().limit = n;
+}
+
+/// (downloads running, machines waiting).
+pub fn queue_stats() -> (usize, usize) {
+    let q = QUEUE.lock();
+    (q.active.values().sum(), q.waiting.len())
+}
+
+/// GET /api/golden-slot (public: the Windows stage, before it downloads a golden) → "go" or "wait <place> <of>".
+pub async fn slot(
+    State(st): State<SharedState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+) -> String {
+    refresh_limit(&st);
+    match QUEUE.lock().decide(peer.ip(), Instant::now()) {
+        Slot::Go => "go\n".into(),
+        Slot::Wait(p, n) => format!("wait {p} {n}\n"),
+    }
+}
+
+/// One running download; gives its place back when the response body is dropped (sent, or the client went away).
+struct Permit {
+    ip: IpAddr,
+    done: AtomicBool,
+}
+
+impl Drop for Permit {
+    fn drop(&mut self) {
+        QUEUE
+            .lock()
+            .finish(self.ip, Instant::now(), self.done.load(Ordering::Relaxed));
+    }
+}
+
 /// One byte range of `Range: bytes=...` → (first, last) inclusive. None = no / multi / unsupported range → whole file.
 /// Err = not satisfiable (416).
 fn range(h: Option<&HeaderValue>, size: u64) -> Result<Option<(u64, u64)>, ()> {
@@ -177,26 +327,61 @@ fn range(h: Option<&HeaderValue>, size: u64) -> Result<Option<(u64, u64)>, ()> {
     Ok(Some((first, last)))
 }
 
+/// A place for this download; None = no place (the stage asks /api/golden-slot first; this only enforces it).
+fn permit(ip: IpAddr) -> Option<Arc<Permit>> {
+    QUEUE.lock().start(ip, Instant::now()).then(|| {
+        Arc::new(Permit {
+            ip,
+            done: AtomicBool::new(false),
+        })
+    })
+}
+
+fn queue_full() -> Response {
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        [(header::RETRY_AFTER, "10")],
+        "download queue full: ask /api/golden-slot\n",
+    )
+        .into_response()
+}
+
 /// GET /tftp/broom-win/{name}/golden.vhdx — the served golden (RAM copy or made from image.img); an image published
 /// by an older version: its golden.vhdx file.
-pub async fn get(Path(name): Path<String>, req: Request) -> Response {
+pub async fn get(
+    Path(name): Path<String>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    req: Request,
+) -> Response {
     let Some(g) = crate::images::valid_name(&name)
         .then(|| served(&name))
         .flatten()
     else {
+        use futures_util::StreamExt;
         use tower::ServiceExt;
+        let Some(p) = permit(peer.ip()) else {
+            return queue_full();
+        };
         return match tower_http::services::ServeFile::new(dir(&name).join("golden.vhdx"))
             .oneshot(req)
             .await
         {
-            Ok(r) => r.into_response(),
+            Ok(r) => {
+                // The place goes with the body (no "done": a short file is rare enough to hold it a minute).
+                let (parts, body) = r.into_response().into_parts();
+                let body = body.into_data_stream().map(move |c| {
+                    let _ = &p;
+                    c
+                });
+                Response::from_parts(parts, Body::from_stream(body))
+            }
             Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
         };
     };
-    serve(g, req.headers())
+    serve(g, req.headers(), peer.ip())
 }
 
-fn serve(img: Arc<Golden>, headers: &HeaderMap) -> Response {
+fn serve(img: Arc<Golden>, headers: &HeaderMap, ip: IpAddr) -> Response {
     let size = img.size();
     let (status, first, last) = match range(headers.get(header::RANGE), size) {
         Ok(Some((a, b))) => (StatusCode::PARTIAL_CONTENT, a, b),
@@ -210,14 +395,23 @@ fn serve(img: Arc<Golden>, headers: &HeaderMap) -> Response {
         }
     };
     let len = if size == 0 { 0 } else { last - first + 1 };
+    let Some(p) = permit(ip) else {
+        return queue_full();
+    };
+    if len == 0 {
+        p.done.store(true, Ordering::Relaxed);
+    }
     // 1 MB at a time, read (disk) / unpacked (RAM) off the async threads; the next MB is read while one is sent.
     use futures_util::StreamExt;
     let end = first + len;
     let body = futures_util::stream::iter((first..end).step_by(1 << 20))
         .map(move |at| {
             let img = img.clone();
+            let n = (end - at).min(1 << 20) as usize;
+            if at + n as u64 == end {
+                p.done.store(true, Ordering::Relaxed);
+            }
             async move {
-                let n = (end - at).min(1 << 20) as usize;
                 tokio::task::spawn_blocking(move || {
                     let mut buf = vec![0u8; n];
                     img.read_at(at, &mut buf).map(|_| buf)

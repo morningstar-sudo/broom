@@ -25,6 +25,7 @@ pub fn routes() -> Router<SharedState> {
         .route("/api/games/disk", post(upsert))
         .route("/api/games/delete", post(delete))
         .route("/api/games/update", post(set_update))
+        .route("/api/games/cache", post(set_cache))
         .route("/api/games/save", post(save))
         .route("/api/games/discard", post(discard))
         .route("/api/games/for", get(for_client))
@@ -41,6 +42,9 @@ pub struct Disk {
     /// Its update machine (machine id).
     #[serde(default)]
     pub update: Option<i64>,
+    /// Served from a copy in the server's RAM (the iSCSI daemon) instead of reading games.img.
+    #[serde(default)]
+    pub ram: bool,
 }
 
 pub(crate) fn disks(st: &SharedState) -> Vec<Disk> {
@@ -79,6 +83,8 @@ fn configs(st: &SharedState) -> Vec<Config> {
             iqn: format!("{base}:games-{}", d.name),
             path: img(&d.name).to_string_lossy().into(),
             update_ip: d.update.and_then(|id| ip_of(st, id)),
+            ram: d.ram,
+            reserve: crate::publish::ram_reserve(st),
             name: d.name,
         })
         .collect()
@@ -198,6 +204,7 @@ async fn upsert(
         letter,
         groups,
         update: old.and_then(|i| list[i].update),
+        ram: old.is_some_and(|i| list[i].ram),
     };
     if let Some(o) = list.iter().find(|o| clash(&d, o)) {
         return Err(bad(format!(
@@ -301,6 +308,33 @@ async fn set_update(
         ),
         None => tracing::info!("games disk {}: update mode off", b.name),
     }
+    sync_now(st).await?;
+    Ok(ok())
+}
+
+#[derive(Deserialize)]
+struct CacheBody {
+    name: String,
+    ram: bool,
+}
+
+/// POST /api/games/cache {name, ram} — serve the disk from a copy in RAM (loaded in the background, read from the
+/// file meanwhile; not enough RAM → stays on the file) or from games.img.
+async fn set_cache(
+    State(st): State<SharedState>,
+    Json(b): Json<CacheBody>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    find(&st, &b.name)?;
+    let mut list = disks(&st);
+    for d in list.iter_mut().filter(|d| d.name == b.name) {
+        d.ram = b.ram;
+    }
+    put(&st, &list)?;
+    tracing::info!(
+        "games disk {}: cache {}",
+        b.name,
+        if b.ram { "RAM" } else { "disk" }
+    );
     sync_now(st).await?;
     Ok(ok())
 }

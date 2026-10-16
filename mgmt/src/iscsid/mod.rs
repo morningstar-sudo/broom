@@ -143,6 +143,10 @@ impl Lun {
         })
     }
 
+    pub fn is_ram(&self) -> bool {
+        matches!(self.data, Data::Ram(_))
+    }
+
     /// Blocking read (disk I/O, or unpacking many RAM blocks): run it off the async threads.
     pub fn read_at(&self, off: u64, buf: &mut [u8]) -> Result<(), String> {
         match &self.data {

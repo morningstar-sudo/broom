@@ -218,6 +218,18 @@ done
 cd /
 
 gb(){ echo "$1" | awk '{ printf "%.1f GB", $1 / 1073741824 }'; }
+# Golden download queue (server: goldenram.rs): a few machines at a time, at full speed. "go" or "wait <place> <of>";
+# nothing (a server without the queue) = go. slot_once: one ask, 0 = go. wait_slot: asks every 10 s until go.
+slot_once(){
+  r=$(wget -q -T 10 -O - "http://$SRV/api/golden-slot" 2>/dev/null)
+  case "$r" in wait*) return 1;; *) return 0;; esac
+}
+wait_slot(){
+  while ! slot_once; do
+    log "download queue: $(echo "$r" | awk '{ print "place " $2 " of " $3 }') -> waiting for a free place"
+    sleep 10
+  done
+}
 fsize(){ ls -ln "$1" 2>/dev/null | awk '{ print $5 }'; }
 
 # 1. Golden hash mismatch → download the whole golden again. No delta: one sequential write into free space (nothing
@@ -271,13 +283,15 @@ if [ "$(cat $B/golden.sha256 2>/dev/null)" != "$HASH" ]; then
     # Fresh golden: sha256 WHILE downloading (tee) → no re-read of the whole file afterwards; counted only with the
     # right length too (tee goes on after a write error, e.g. disk full). Cut midway → the file stays; -c below
     # resumes it and the whole-file check runs at the end.
+    [ "$f" = golden.vhdx ] && wait_slot
     if [ "$f" = golden.vhdx ] && [ ! -s $D/$f ]; then
       h=$( (cd $D && getfile -O - $U) | tee $D/$f | sha256sum | cut -c1-64 )
       [ "$h" = "$HASH" ] && [ "$(fsize $D/$f)" = "$size" ] && touch $D/golden.hashed
     fi
     # cd + relative -O: the bar shows the file name ("golden.vhdx"), not the long dl-<hash> path cut short.
     if [ "$f" != golden.vhdx ] || [ ! -f $D/golden.hashed ]; then
-      ( cd $D && getfile -c -O $f $U ) || { rm -f $D/$f; ( cd $D && getfile -O $f $U ); } || die "download $f"
+      [ "$f" = golden.vhdx ] && wait_slot
+      ( cd $D && getfile -c -O $f $U ) || { rm -f $D/$f; [ "$f" = golden.vhdx ] && wait_slot; ( cd $D && getfile -O $f $U ); } || die "download $f"
     fi
     if [ "$f" = golden.vhdx ] && [ "$(fsize $D/$f)" != "$size" ]; then
       rm -f $D/$f $D/golden.hashed; die "golden.vhdx is not complete (disk full?) -> fix, then exit to retry"
@@ -354,6 +368,8 @@ if [ -s /run/broom-cache-list ]; then
     ok=1
     for f in golden.vhdx base-template.vhdx child-template.vhdx child-template.off efi.tar.gz; do
       [ -f $P/$f.ok ] && continue
+      # A preload never waits in the download queue: server busy -> next boot.
+      if [ "$f" = golden.vhdx ] && ! slot_once; then log "preload $n: server download queue full -> next boot"; ok=""; break; fi
       ( cd $P && getfile -c -O $f $U/$f ) || { rm -f $P/$f; ( cd $P && getfile -O $f $U/$f ); } || { ok=""; break; }
       touch $P/$f.ok
     done

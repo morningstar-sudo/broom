@@ -374,11 +374,15 @@ and the server load low. Linux images can run with no disk at all (golden over i
 Any x86_64 Linux machine, run as root. Broom is a single static binary — nothing else to install.
 
 **How many machines?**
-Broom is built for small sites, about 10–30 machines per server.
+Broom is built for small sites, about 10–30 machines per server. For bigger rooms the network is the limit: after a
+publish, machines download the new golden in turns, a few at a time at full speed (System → *Golden downloads at
+once*; Auto = the server's link speed over 1 Gbit/s), so they become usable one batch after the other. A larger room
+wants a 10 Gbit/s (or bonded) server link, an NVMe disk and plenty of RAM for the games; measure on the Benchmark page.
 
 **How are games handled?**
 Put game libraries on a games disk instead of the golden. Update them once from one machine; every machine gets the
-new version at its next boot, while machines already playing keep theirs.
+new version at its next boot, while machines already playing keep theirs. A games disk can be served from a copy in
+the server's RAM (**Cache** button on the Images page) — it needs about as much free RAM as the games on it.
 
 **Does it work with anti-cheat (FACEIT)?**
 Yes — FACEIT Anti-Cheat runs on Broom clients with Secure Boot, TPM 2.0 and HVCI on (Network page → Secure Boot

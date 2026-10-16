@@ -121,6 +121,18 @@ fn link_mbit(iface: &str) -> Option<u64> {
         .map(|s| s as u64)
 }
 
+/// The boot NIC and its real link speed in Mbit/s (None: the NIC doesn't say, or a virtual NIC makes it up). A bond
+/// reports the sum of its ports.
+pub(crate) fn boot_link(configured: &str) -> Option<(String, Option<u64>)> {
+    let iface = boot_iface(configured)?;
+    let speed = if virtual_nic(&iface).is_some() {
+        None
+    } else {
+        link_mbit(&iface)
+    };
+    Some((iface, speed))
+}
+
 /// The hypervisor this server runs under (DMI), None on bare metal.
 fn hypervisor() -> Option<&'static str> {
     static H: LazyLock<Option<&'static str>> = LazyLock::new(|| {
