@@ -27,10 +27,10 @@ async fn agents_and_viewers() {
 
     let (v1, mut v1q) = mpsc::channel(QUEUE);
     assert!(attach(mac, 10, v1));
-    to_agent.send(start_msg(60)).await.unwrap();
+    to_agent.send(start_msg(60, 0)).await.unwrap();
     assert_eq!(
         text(agent_q.recv().await.unwrap()),
-        r#"{"op":"start","q":60}"#
+        r#"{"op":"start","q":60,"w":0}"#
     );
     assert!(to_viewer(mac, a1, Message::Binary(vec![1, 2].into())));
     assert!(matches!(v1q.recv().await, Some(Message::Binary(b)) if b[..] == [1, 2]));

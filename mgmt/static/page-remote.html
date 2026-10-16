@@ -1,8 +1,19 @@
 <section id="page-remote">
   <div class="d-flex flex-wrap align-items-baseline gap-3 mb-3"><h1 class="h4 mb-0">Remote</h1>
-    <span class="small text-body-secondary">See and control a Windows machine. Its screen shows a "Remote support connected" bar while you watch.</span></div>
+    <span class="small text-body-secondary">See and control a Windows machine.</span>
+    <span class="flex-grow-1"></span><button class="btn btn-sm btn-outline-secondary" data-click="loadRemote" title="Refresh" aria-label="Refresh"><svg class="ic" aria-hidden="true"><use href="/icons.svg#refresh"/></svg></button></div>
+
+  <!-- Wall: a thumbnail of every machine running the agent; click one to control it. -->
+  <div id="rm_wall_box" class="card card-body mb-3">
+    <h2 class="h6 text-uppercase text-body-secondary mb-3">All screens <span id="rm_wall_n" class="text-body-secondary"></span></h2>
+    <div id="rm_wall" class="d-flex flex-wrap gap-3"></div>
+    <div id="rm_wall_empty" class="mono small text-body-secondary d-none">no machine is running the remote agent yet</div>
+  </div>
+
+  <div id="rm_one" class="d-none">
   <div class="card card-body mb-3">
     <div class="d-flex flex-wrap gap-2 align-items-center">
+      <button class="btn btn-sm btn-outline-secondary" data-click="rmBack" title="Back to all screens">&larr; All</button>
       <label class="visually-hidden" for="rm_host">Hostname</label>
       <input class="form-control form-control-sm w-auto" id="rm_host" list="rm_hosts" placeholder="hostname" size="16" autocomplete="off">
       <datalist id="rm_hosts"></datalist>
@@ -23,4 +34,5 @@
     <div class="small text-body-secondary mt-2">Click the screen to type into the machine. Use the buttons above for Ctrl+Alt+Del, the Windows key and Alt+Tab (or full screen to use your own keyboard for them). Games in exclusive full screen show black.</div>
   </div>
   <div id="rm_wrap" class="text-center"><canvas id="rm_canvas" tabindex="0" class="mw-100 border d-none" aria-label="Remote screen"></canvas></div>
+  </div>
 </section>

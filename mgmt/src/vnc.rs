@@ -200,6 +200,9 @@ struct ViewQuery {
     /// JPEG quality 20–95 (default 60).
     #[serde(default)]
     q: Option<u8>,
+    /// Scale the screen down to this width (the wall's thumbnails); 0 / absent = full size.
+    #[serde(default)]
+    w: Option<u16>,
 }
 
 /// The browser's Origin names this server (a WebSocket is not covered by the same-origin policy: a page elsewhere
@@ -233,11 +236,12 @@ async fn view(
             .into_response();
     };
     let quality = q.q.unwrap_or(60).clamp(20, 95);
-    ws.on_upgrade(move |s| run_view(s, mac, host, to_agent, quality, peer))
+    let width = q.w.unwrap_or(0);
+    ws.on_upgrade(move |s| run_view(s, mac, host, to_agent, quality, width, peer))
 }
 
-fn start_msg(q: u8) -> Message {
-    Message::Text(format!("{{\"op\":\"start\",\"q\":{q}}}").into())
+fn start_msg(q: u8, w: u16) -> Message {
+    Message::Text(format!("{{\"op\":\"start\",\"q\":{q},\"w\":{w}}}").into())
 }
 
 async fn run_view(
@@ -246,11 +250,12 @@ async fn run_view(
     host: String,
     to_agent: mpsc::Sender<Message>,
     quality: u8,
+    width: u16,
     peer: SocketAddr,
 ) {
     let (vq, mut queue) = mpsc::channel::<Message>(QUEUE);
     let vid = NEXT.fetch_add(1, Ordering::Relaxed);
-    if !attach(&mac, vid, vq) || to_agent.send(start_msg(quality)).await.is_err() {
+    if !attach(&mac, vid, vq) || to_agent.send(start_msg(quality, width)).await.is_err() {
         return;
     }
     tracing::info!("remote: {host} opened from {}", peer.ip());

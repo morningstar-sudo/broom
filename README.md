@@ -246,14 +246,18 @@ without a publish. Images published before this version need **Publish** once to
 
 **Remote** (sidebar, or the Remote button on the Machines page): see and control a Windows machine from the browser.
 Each machine runs a small agent (`broom-vnc`) that dials out to the server and keeps one connection open; the machine
-opens no port, so no guest or other PC on the LAN can reach its screen. Open the page, type (or pick) the machine's
-hostname, and Connect. Mouse, keyboard and scroll work; click the screen first so keys go to the machine. Toolbar
-buttons send **Ctrl+Alt+Del**, the **Windows key** and **Alt+Tab** (the browser only lets your own keyboard send those
-in full screen); **Paste** puts your clipboard on the machine and pastes it. While you watch, a red "Remote support
-connected" bar shows on the machine so the user knows. Lower the quality on a busy network. Limit: a game running in
-*exclusive* full screen shows black (the agent captures the desktop, not the game's own output) — borderless /
-windowed games are fine. The agent accepts only the server's connection and is served like the other Windows scripts,
-so it reaches every machine without a publish.
+opens no port, so no guest or other PC on the LAN can reach its screen. The page opens on a **wall** of thumbnails — one
+live screen per machine running the agent — and clicking one controls that machine. Mouse, keyboard and scroll work;
+click the screen first so keys go to the machine. Toolbar buttons send **Ctrl+Alt+Del**, the **Windows key** and
+**Alt+Tab** (the browser only lets your own keyboard send those in full screen); **Paste** puts your clipboard on the
+machine and pastes it.
+Lower the quality on a busy network. The screen is captured with Desktop Duplication, so full-screen games show too;
+it falls back to GDI for the UAC / lock screen. The agent accepts only the server's connection and is served like the
+other Windows scripts, so it reaches every machine without a publish.
+
+That same agent connection is the machine's presence signal: a machine with the agent connected shows **online**
+without a ping (the agent reopens the connection within 5 s of every boot). Machines without the agent — Linux clients,
+or a Windows machine still building its base — are pinged as before.
 
 ## Versions, export
 

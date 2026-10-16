@@ -93,11 +93,17 @@ async fn status(State(st): State<SharedState>) -> Json<Vec<MachineStatus>> {
         .into_iter()
         .map(|(mac, (ip, hostname, registered))| (mac, ip, hostname, registered))
         .collect();
+    // A machine running the remote agent (vnc.rs) holds a connection to us and reopens it within 5 s of every boot, so
+    // that connection is its presence signal — no ping needed for it. Ping covers the rest: Linux clients, and Windows
+    // machines before their agent is up (a new machine, or one still building its base).
     // At most 32 pings at once: each holds a blocking thread up to PING_WAIT, and the list can hold many machines (it
     // also shows every MAC seen PXE-booting) — they must not crowd out logins and jobs on the blocking pool. Each IP
     // once, however many MACs list it.
-    let ips: std::collections::HashSet<String> =
-        entries.iter().filter_map(|e| e.1.clone()).collect();
+    let ips: std::collections::HashSet<String> = entries
+        .iter()
+        .filter(|e| !crate::vnc::connected(&e.0))
+        .filter_map(|e| e.1.clone())
+        .collect();
     let mut set = tokio::task::JoinSet::new();
     let slots = std::sync::Arc::new(tokio::sync::Semaphore::new(32));
     for ip in ips {
@@ -119,9 +125,10 @@ async fn status(State(st): State<SharedState>) -> Json<Vec<MachineStatus>> {
             up.insert(ip);
         }
     }
+    // Online = its agent is connected, or (no agent) it answered a ping.
     let online: Vec<bool> = entries
         .iter()
-        .map(|e| e.1.as_ref().is_some_and(|ip| up.contains(ip)))
+        .map(|e| crate::vnc::connected(&e.0) || e.1.as_ref().is_some_and(|ip| up.contains(ip)))
         .collect();
     let not_reset = st.not_reset.lock().clone();
     let ssd_low = st.ssd_low.lock().clone();
@@ -140,7 +147,7 @@ async fn status(State(st): State<SharedState>) -> Json<Vec<MachineStatus>> {
                 notes: m.and_then(|m| m.notes),
                 not_reset: not_reset.get(&mac).copied(),
                 ssd_low: ssd_low.get(&mac).copied(),
-                remote: online && crate::vnc::connected(&mac),
+                remote: crate::vnc::connected(&mac),
                 mac,
                 ip,
                 hostname,

@@ -9,6 +9,7 @@
 using System;
 using System.Collections.Generic;
 using System.Drawing;
+using System.Drawing.Drawing2D;
 using System.Drawing.Imaging;
 using System.IO;
 using System.Net.WebSockets;
@@ -50,8 +51,11 @@ public static class BroomVnc {
   [StructLayout(LayoutKind.Sequential)] struct MOUSEINPUT { public int dx; public int dy; public uint data; public uint flags; public uint time; public IntPtr extra; }
   [StructLayout(LayoutKind.Sequential)] struct KEYBDINPUT { public ushort vk; public ushort scan; public uint flags; public uint time; public IntPtr extra; }
 
-  static int VX, VY, VW, VH;   // virtual desktop origin + size
+  static int VX, VY, VW, VH;   // capture origin + size (virtual desktop for GDI, the output for Desktop Duplication)
   static volatile int Quality = 60;
+  static volatile int MaxW = 0;   // > 0: scale the frame down to this width (the wall's thumbnails)
+  static Dupl _dupl;              // Desktop Duplication, re-created after it is lost; null = use GDI
+  static int _ddNext;             // TickCount before which not to retry Desktop Duplication
   // The previous frame's 16-row bands, so SendFrame can diff (a reference type: async can't take a ref parameter).
   class FrameState { public byte[][] Prev; }
 
@@ -124,8 +128,8 @@ public static class BroomVnc {
         string text = System.Text.Encoding.UTF8.GetString(msg.ToArray());
         msg.Clear();
         string op = Field(text, "op");
-        if (op == "start") { Quality = Clamp(IntField(text, "q", 60), 20, 95); fr.Prev = null; streaming = true; Drain(frameReady); frameReady.Release(); Banner(true); }
-        else if (op == "stop") { streaming = false; Banner(false); }
+        if (op == "start") { Quality = Clamp(IntField(text, "q", 60), 20, 95); MaxW = IntField(text, "w", 0); fr.Prev = null; streaming = true; Drain(frameReady); frameReady.Release(); }
+        else if (op == "stop") { streaming = false; }
         else if (op == "ack") { if (frameReady.CurrentCount == 0) frameReady.Release(); }
         else if (op == "mouse") { Mouse(IntField(text, "x", 0), IntField(text, "y", 0), IntField(text, "b", 0)); }
         else if (op == "wheel") { Wheel(IntField(text, "d", 0)); }
@@ -134,7 +138,6 @@ public static class BroomVnc {
         else if (op == "clip") { SetClip(ReadString(text, "text")); }
       }
       streaming = false;
-      Banner(false);
       cts.Cancel();
       try { await capture; } catch { }
     }
@@ -154,21 +157,57 @@ public static class BroomVnc {
     t.Join(2000);
   }
 
-  // Grab the input desktop every frame: the one showing now (UAC prompt / lock screen / the user's) -> screen follows.
-  static IntPtr Grab() {
-    IntPtr d = OpenInputDesktop(0, false, 0x0100 | 0x0001); // DESKTOP_SWITCHDESKTOP | DESKTOP_READOBJECTS
-    if (d != IntPtr.Zero) SetThreadDesktop(d);
-    return d;
+  // One screen grab, cursor drawn in, VX/VY/VW/VH set. null = no new frame (skip). Desktop Duplication is tried first
+  // (it captures exclusive-fullscreen games, which GDI shows black); GDI covers what it can't (the secure desktop /
+  // UAC prompt, and the moment a game switches modes). Scaled down to MaxW for the wall's thumbnails.
+  static Bitmap Capture() {
+    int cap; Bitmap raw = DuplCapture(out cap);
+    if (cap == 1) return null;              // Desktop Duplication: no change since the last frame
+    if (raw == null) raw = GdiCapture();    // unavailable / lost this frame -> GDI
+    if (raw == null) return null;
+    int mw = MaxW;
+    if (mw > 0 && raw.Width > mw) {
+      int w = mw, h = Math.Max(1, (int)((long)raw.Height * mw / raw.Width));
+      var small = new Bitmap(w, h, PixelFormat.Format32bppRgb);
+      using (var g = Graphics.FromImage(small)) {
+        g.InterpolationMode = InterpolationMode.Low;
+        g.DrawImage(raw, 0, 0, w, h);
+      }
+      raw.Dispose(); VW = w; VH = h; return small;
+    }
+    return raw;
   }
 
-  static async Task<bool> SendFrame(ClientWebSocket ws, SemaphoreSlim sendLock, FrameState fr) {
-    byte[][] prev = fr.Prev;
+  // Desktop Duplication (DXGI). cap: 0 got a frame, 1 no change, 2 unavailable (use GDI). Lost (fullscreen / desktop
+  // switch) -> dropped and retried after a short wait, GDI covering meanwhile.
+  static Bitmap DuplCapture(out int cap) {
+    cap = 2;
+    int now = Environment.TickCount;
+    if (_dupl == null) {
+      if (now - _ddNext < 0) return null;
+      try { var d = new Dupl(); if (d.Init()) _dupl = d; else { d.Dispose(); _ddNext = now + 1500; return null; } }
+      catch { _ddNext = now + 1500; return null; }
+    }
+    int r; Bitmap bmp = _dupl.Grab(out r);
+    if (r == 0 && bmp != null) {
+      VX = _dupl.Left; VY = _dupl.Top; VW = _dupl.W; VH = _dupl.H;
+      using (var g = Graphics.FromImage(bmp)) { IntPtr hdc = g.GetHdc(); DrawCursor(hdc); g.ReleaseHdc(hdc); }
+      cap = 0; return bmp;
+    }
+    if (r == 1) { cap = 1; return null; }   // timeout: nothing changed
+    _dupl.Dispose(); _dupl = null; _ddNext = now + 800;  // lost: GDI this frame, retry soon
+    return null;
+  }
+
+  // GDI capture of the whole virtual desktop. The input desktop is grabbed each time so a UAC / lock screen follows.
+  static Bitmap GdiCapture() {
     VX = GetSystemMetrics(SM_XVIRTUAL); VY = GetSystemMetrics(SM_YVIRTUAL);
     VW = GetSystemMetrics(SM_CXVIRTUAL); VH = GetSystemMetrics(SM_CYVIRTUAL);
-    if (VW <= 0 || VH <= 0) return false;
-    IntPtr desk = Grab();
+    if (VW <= 0 || VH <= 0) return null;
+    IntPtr desk = OpenInputDesktop(0, false, 0x0100 | 0x0001); // DESKTOP_SWITCHDESKTOP | DESKTOP_READOBJECTS
+    if (desk != IntPtr.Zero) SetThreadDesktop(desk);
     try {
-      using (var bmp = new Bitmap(VW, VH, PixelFormat.Format32bppRgb))
+      var bmp = new Bitmap(VW, VH, PixelFormat.Format32bppRgb);
       using (var g = Graphics.FromImage(bmp)) {
         IntPtr hdc = g.GetHdc();
         bool ok;
@@ -177,39 +216,45 @@ public static class BroomVnc {
           ok = BitBlt(hdc, 0, 0, VW, VH, src, VX, VY, SRCCOPY | CAPTUREBLT);
           screen.ReleaseHdc(src);
         }
-        DrawCursor(hdc);
-        g.ReleaseHdc(hdc);
-        if (!ok) return false;
-
-        // Changed-strip detection: 16-row bands compared to the previous frame -> the bounding rectangle of the
-        // bands that differ. First frame (prev == null) or a size change -> whole screen + the size header.
-        bool first = prev == null || prev.Length != (VH + 15) / 16;
-        var data = bmp.LockBits(new Rectangle(0, 0, VW, VH), ImageLockMode.ReadOnly, PixelFormat.Format32bppRgb);
-        int bands = (VH + 15) / 16, stride = data.Stride;
-        var cur = new byte[bands][];
-        int top = -1, bottom = -1;
-        for (int b = 0; b < bands; b++) {
-          int y0 = b * 16, rows = Math.Min(16, VH - y0);
-          var band = new byte[rows * stride];
-          Marshal.Copy(data.Scan0 + y0 * stride, band, 0, band.Length);
-          cur[b] = band;
-          if (first || !Same(band, prev[b])) { if (top < 0) top = y0; bottom = y0 + rows; }
-        }
-        bmp.UnlockBits(data);
-        fr.Prev = cur;
-        if (top < 0) return false; // nothing changed
-
-        if (first) await Send(ws, sendLock, Header2(VW, VH));
-        var rect = new Rectangle(0, top, VW, bottom - top);
-        using (var sub = bmp.Clone(rect, PixelFormat.Format24bppRgb))
-        using (var ms = new MemoryStream()) {
-          sub.Save(ms, Jpeg(), JpegParams(Quality));
-          await Send(ws, sendLock, FrameMsg(0, top, VW, bottom - top, ms.ToArray()));
-        }
-        return true;
+        DrawCursor(hdc); g.ReleaseHdc(hdc);
+        if (!ok) { bmp.Dispose(); return null; }
       }
+      return bmp;
     } finally {
       if (desk != IntPtr.Zero) CloseDesktop(desk);
+    }
+  }
+
+  static async Task<bool> SendFrame(ClientWebSocket ws, SemaphoreSlim sendLock, FrameState fr) {
+    byte[][] prev = fr.Prev;
+    using (var bmp = Capture()) {
+      if (bmp == null) return false;
+      int w = bmp.Width, h = bmp.Height;
+      // Changed-strip detection: 16-row bands compared to the previous frame -> the bounding rectangle of the bands
+      // that differ. First frame (prev == null) or a size change -> whole screen + the size header.
+      bool first = prev == null || prev.Length != (h + 15) / 16;
+      var data = bmp.LockBits(new Rectangle(0, 0, w, h), ImageLockMode.ReadOnly, PixelFormat.Format32bppRgb);
+      int bands = (h + 15) / 16, stride = data.Stride;
+      var cur = new byte[bands][];
+      int top = -1, bottom = -1;
+      for (int b = 0; b < bands; b++) {
+        int y0 = b * 16, rows = Math.Min(16, h - y0);
+        var band = new byte[rows * stride];
+        Marshal.Copy(data.Scan0 + y0 * stride, band, 0, band.Length);
+        cur[b] = band;
+        if (first || !Same(band, prev[b])) { if (top < 0) top = y0; bottom = y0 + rows; }
+      }
+      bmp.UnlockBits(data);
+      fr.Prev = cur;
+      if (top < 0) return false; // nothing changed
+
+      if (first) await Send(ws, sendLock, Header2(w, h));
+      using (var sub = bmp.Clone(new Rectangle(0, top, w, bottom - top), PixelFormat.Format24bppRgb))
+      using (var ms = new MemoryStream()) {
+        sub.Save(ms, Jpeg(), JpegParams(Quality));
+        await Send(ws, sendLock, FrameMsg(0, top, w, bottom - top, ms.ToArray()));
+      }
+      return true;
     }
   }
 
@@ -292,31 +337,6 @@ public static class BroomVnc {
     SendInput(1, inp, Marshal.SizeOf(typeof(INPUT)));
   }
 
-  // ---- a changing-on-the-machine banner so the guest sees they are watched ----
-  static Form _banner;
-  static Thread _bannerThread;
-  static void Banner(bool on) {
-    if (on && _banner == null) {
-      _bannerThread = new Thread(() => {
-        _banner = new Form {
-          FormBorderStyle = FormBorderStyle.None, StartPosition = FormStartPosition.Manual,
-          TopMost = true, ShowInTaskbar = false, BackColor = Color.FromArgb(200, 40, 40),
-          Width = 320, Height = 26,
-        };
-        _banner.Left = (Screen.PrimaryScreen.Bounds.Width - _banner.Width) / 2; _banner.Top = 0;
-        var l = new Label { Dock = DockStyle.Fill, Text = "Remote support connected", ForeColor = Color.White,
-          TextAlign = ContentAlignment.MiddleCenter, Font = new Font("Segoe UI", 9) };
-        _banner.Controls.Add(l);
-        Application.Run(_banner);
-      });
-      _bannerThread.SetApartmentState(ApartmentState.STA);
-      _bannerThread.IsBackground = true;
-      _bannerThread.Start();
-    } else if (!on && _banner != null) {
-      try { _banner.Invoke(new Action(() => _banner.Close())); } catch { }
-      _banner = null;
-    }
-  }
 
   // ---- tiny JSON field readers (the server sends flat objects) ----
   static string Field(string json, string key) {
@@ -401,6 +421,116 @@ public static class BroomVnc {
       case "PageDown": return 0xE051; case "Insert": return 0xE052; case "Delete": return 0xE053;
       case "MetaLeft": return 0xE05B; case "MetaRight": return 0xE05C; case "ContextMenu": return 0xE05D;
       default: return 0;
+    }
+  }
+
+  // ---- Desktop Duplication (DXGI) ----
+  // The composed desktop, including exclusive-fullscreen games that GDI shows black. Raw COM interop (no SharpDX: the
+  // client compiles this one file with csc, no packages), so interfaces are called by their vtable index. Captures the
+  // primary output; a UAC / lock screen makes it lose access -> the caller falls back to GDI.
+  [DllImport("d3d11.dll")] static extern int D3D11CreateDevice(IntPtr adapter, int driverType, IntPtr software, uint flags, IntPtr levels, uint numLevels, uint sdk, out IntPtr device, out int level, out IntPtr ctx);
+  [DllImport("kernel32.dll", EntryPoint="RtlMoveMemory")] static extern void CopyMemory(IntPtr dst, IntPtr src, int n);
+
+  [UnmanagedFunctionPointer(CallingConvention.StdCall)] delegate int QiFn(IntPtr self, ref Guid iid, out IntPtr ppv);
+  [UnmanagedFunctionPointer(CallingConvention.StdCall)] delegate int RelFn(IntPtr self);
+  [UnmanagedFunctionPointer(CallingConvention.StdCall)] delegate int GetAdapterFn(IntPtr self, out IntPtr a);
+  [UnmanagedFunctionPointer(CallingConvention.StdCall)] delegate int EnumOutputsFn(IntPtr self, uint i, out IntPtr o);
+  [UnmanagedFunctionPointer(CallingConvention.StdCall)] delegate int OutDescFn(IntPtr self, out DXGI_OUTPUT_DESC d);
+  [UnmanagedFunctionPointer(CallingConvention.StdCall)] delegate int DuplicateFn(IntPtr self, IntPtr dev, out IntPtr dupl);
+  [UnmanagedFunctionPointer(CallingConvention.StdCall)] delegate int AcquireFn(IntPtr self, uint ms, out DXGI_OUTDUPL_FRAME_INFO info, out IntPtr res);
+  [UnmanagedFunctionPointer(CallingConvention.StdCall)] delegate int CreateTexFn(IntPtr self, ref D3D11_TEXTURE2D_DESC d, IntPtr init, out IntPtr tex);
+  [UnmanagedFunctionPointer(CallingConvention.StdCall)] delegate void CopyResFn(IntPtr self, IntPtr dst, IntPtr src);
+  [UnmanagedFunctionPointer(CallingConvention.StdCall)] delegate int MapFn(IntPtr self, IntPtr res, uint sub, uint type, uint flags, out D3D11_MAPPED_SUBRESOURCE m);
+  [UnmanagedFunctionPointer(CallingConvention.StdCall)] delegate void UnmapFn(IntPtr self, IntPtr res, uint sub);
+  [UnmanagedFunctionPointer(CallingConvention.StdCall)] delegate void TexDescFn(IntPtr self, out D3D11_TEXTURE2D_DESC d);
+
+  [StructLayout(LayoutKind.Sequential)] struct RECTi { public int left, top, right, bottom; }
+  [StructLayout(LayoutKind.Sequential, CharSet=CharSet.Unicode)] struct DXGI_OUTPUT_DESC { [MarshalAs(UnmanagedType.ByValTStr, SizeConst=32)] public string DeviceName; public RECTi DesktopCoordinates; public int AttachedToDesktop; public int Rotation; public IntPtr Monitor; }
+  [StructLayout(LayoutKind.Sequential)] struct POINTi { public int x, y; }
+  [StructLayout(LayoutKind.Sequential)] struct PTR_POS { public POINTi Position; public int Visible; }
+  [StructLayout(LayoutKind.Sequential)] struct DXGI_OUTDUPL_FRAME_INFO { public long LastPresentTime, LastMouseUpdateTime; public uint AccumulatedFrames; public int RectsCoalesced, ProtectedContentMaskedOut; public PTR_POS PointerPosition; public uint TotalMetadataBufferSize, PointerShapeBufferSize; }
+  [StructLayout(LayoutKind.Sequential)] struct SAMPLE_DESC { public uint Count, Quality; }
+  [StructLayout(LayoutKind.Sequential)] struct D3D11_TEXTURE2D_DESC { public uint Width, Height, MipLevels, ArraySize, Format; public SAMPLE_DESC SampleDesc; public uint Usage, BindFlags, CPUAccessFlags, MiscFlags; }
+  [StructLayout(LayoutKind.Sequential)] struct D3D11_MAPPED_SUBRESOURCE { public IntPtr pData; public uint RowPitch, DepthPitch; }
+
+  static Guid IID_IDXGIDevice = new Guid("54ec77fa-1377-44e6-8c32-88fd5f44c84c");
+  static Guid IID_IDXGIOutput1 = new Guid("00cddea8-939b-4b83-a340-a685226666cc");
+  static Guid IID_ID3D11Texture2D = new Guid("6f15aaf2-d208-4e89-9ab4-489535d34f9c");
+  const int DXGI_WAIT_TIMEOUT = unchecked((int)0x887A0027);
+
+  static T Vt<T>(IntPtr obj, int i) {
+    IntPtr vtbl = Marshal.ReadIntPtr(obj);
+    return (T)(object)Marshal.GetDelegateForFunctionPointer(Marshal.ReadIntPtr(vtbl, i * IntPtr.Size), typeof(T));
+  }
+  static void Rel(IntPtr p) { if (p != IntPtr.Zero) Vt<RelFn>(p, 2)(p); }
+
+  class Dupl : IDisposable {
+    IntPtr device, ctx, dupl, staging;
+    int sw, sh; uint sfmt;
+    public int W, H, Left, Top;
+
+    public bool Init() {
+      int lvl;
+      if (D3D11CreateDevice(IntPtr.Zero, 1, IntPtr.Zero, 0, IntPtr.Zero, 0, 7, out device, out lvl, out ctx) != 0) return false; // HARDWARE, SDK 7
+      IntPtr dxgi; Guid gd = IID_IDXGIDevice;
+      if (Vt<QiFn>(device, 0)(device, ref gd, out dxgi) != 0) return false;
+      IntPtr adapter; int hr = Vt<GetAdapterFn>(dxgi, 7)(dxgi, out adapter); Rel(dxgi); if (hr != 0) return false;
+      IntPtr output; hr = Vt<EnumOutputsFn>(adapter, 7)(adapter, 0, out output); Rel(adapter); if (hr != 0) return false;
+      DXGI_OUTPUT_DESC od; Vt<OutDescFn>(output, 7)(output, out od);
+      Left = od.DesktopCoordinates.left; Top = od.DesktopCoordinates.top;
+      IntPtr out1; Guid g1 = IID_IDXGIOutput1; hr = Vt<QiFn>(output, 0)(output, ref g1, out out1); Rel(output); if (hr != 0) return false;
+      hr = Vt<DuplicateFn>(out1, 22)(out1, device, out dupl); Rel(out1);
+      return hr == 0 && dupl != IntPtr.Zero;
+    }
+
+    void EnsureStaging(int w, int h, uint fmt) {
+      if (staging != IntPtr.Zero && sw == w && sh == h && sfmt == fmt) return;
+      if (staging != IntPtr.Zero) { Rel(staging); staging = IntPtr.Zero; }
+      var d = new D3D11_TEXTURE2D_DESC { Width = (uint)w, Height = (uint)h, MipLevels = 1, ArraySize = 1, Format = fmt,
+        Usage = 3, BindFlags = 0, CPUAccessFlags = 0x20000, MiscFlags = 0 }; // STAGING, CPU_ACCESS_READ
+      d.SampleDesc.Count = 1;
+      Vt<CreateTexFn>(device, 5)(device, ref d, IntPtr.Zero, out staging);
+      sw = w; sh = h; sfmt = fmt;
+    }
+
+    // r: 0 got a frame, 1 timeout (no change), 2 lost / error.
+    public Bitmap Grab(out int r) {
+      r = 2;
+      DXGI_OUTDUPL_FRAME_INFO info; IntPtr res;
+      int hr = Vt<AcquireFn>(dupl, 8)(dupl, 100, out info, out res);
+      if (hr == DXGI_WAIT_TIMEOUT) { r = 1; return null; }
+      if (hr != 0) return null;
+      Bitmap bmp = null;
+      try {
+        IntPtr tex; Guid gt = IID_ID3D11Texture2D;
+        if (Vt<QiFn>(res, 0)(res, ref gt, out tex) != 0) return null;
+        try {
+          D3D11_TEXTURE2D_DESC desc; Vt<TexDescFn>(tex, 10)(tex, out desc);
+          W = (int)desc.Width; H = (int)desc.Height;
+          EnsureStaging(W, H, desc.Format);
+          if (staging == IntPtr.Zero) return null;
+          Vt<CopyResFn>(ctx, 47)(ctx, staging, tex);
+          D3D11_MAPPED_SUBRESOURCE map;
+          if (Vt<MapFn>(ctx, 14)(ctx, staging, 0, 1, 0, out map) != 0) return null; // MAP_READ
+          try {
+            bmp = new Bitmap(W, H, PixelFormat.Format32bppRgb);
+            var bd = bmp.LockBits(new Rectangle(0, 0, W, H), ImageLockMode.WriteOnly, PixelFormat.Format32bppRgb);
+            int rowBytes = W * 4;
+            for (int y = 0; y < H; y++)
+              CopyMemory(IntPtr.Add(bd.Scan0, y * bd.Stride), IntPtr.Add(map.pData, y * (int)map.RowPitch), rowBytes);
+            bmp.UnlockBits(bd);
+          } finally { Vt<UnmapFn>(ctx, 15)(ctx, staging, 0); }
+        } finally { Rel(tex); }
+      } finally {
+        Vt<RelFn>(dupl, 14)(dupl); // ReleaseFrame
+        Rel(res);
+      }
+      r = 0; return bmp;
+    }
+
+    public void Dispose() {
+      Rel(staging); Rel(dupl); Rel(ctx); Rel(device);
+      staging = dupl = ctx = device = IntPtr.Zero;
     }
   }
 }

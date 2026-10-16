@@ -31,7 +31,7 @@ const fragCache={};
 let curPage=null;
 async function showPage(p){
   if(iscsiES&&p!=='benchmark'){iscsiES.close();iscsiES=null;}
-  if(p!=='remote'&&rmWs){rmWs.onclose=null;rmWs.close();rmWs=null;rmCtx=null;}
+  if(p!=='remote'){if(rmWs){rmWs.onclose=null;rmWs.close();rmWs=null;rmCtx=null;}closeWall();}
   document.querySelectorAll('nav a').forEach(x=>x.classList.toggle('active',x.dataset.page===p));
   if(fragCache[p]===undefined){
     try{const r=await fetch('/ui/'+p);
@@ -559,23 +559,64 @@ async function setZramReserve(){await j('/api/config/zram-reserve',mk({mb:+docum
 
 // ---- remote (vnc.rs): watch + control a Windows machine over a WebSocket ----
 let rmWs=null, rmCtx=null, rmW=0, rmH=0;
+const rmProto=()=>location.protocol==='https:'?'wss:':'ws:';
 async function loadRemote(){
-  try{const hosts=await j('/api/vnc/agents');
-    document.getElementById('rm_hosts').innerHTML=hosts.map(h=>`<option value="${esc(h)}">`).join('');}catch(e){}
+  let hosts=[];
+  try{hosts=await j('/api/vnc/agents');}catch(e){}
+  document.getElementById('rm_hosts').innerHTML=hosts.map(h=>`<option value="${esc(h)}">`).join('');
   const q=new URLSearchParams(location.search).get('host');
-  if(q){document.getElementById('rm_host').value=q;rmConnect();}
+  if(q){openOne(q);}else{showWall(hosts);}
 }
-// Machines page: open the Remote page for this host.
+// Wall: a low-rate thumbnail of every machine running the agent; click one to control it.
+let rmWall=[];
+function closeWall(){for(const w of rmWall){w.onclose=null;w.close();}rmWall=[];}
+function showWall(hosts){
+  closeWall();rmClose(true);
+  document.getElementById('rm_one').classList.add('d-none');
+  document.getElementById('rm_wall_box').classList.remove('d-none');
+  document.getElementById('rm_wall_n').textContent=hosts.length?'('+hosts.length+')':'';
+  document.getElementById('rm_wall_empty').classList.toggle('d-none',hosts.length>0);
+  const grid=document.getElementById('rm_wall');grid.innerHTML='';
+  for(const h of hosts){
+    const fig=document.createElement('figure');fig.className='m-0 text-center';fig.style.cursor='pointer';
+    fig.title='Control '+h;fig.onclick=()=>remoteTo(h);
+    const cv=document.createElement('canvas');cv.width=320;cv.height=180;
+    cv.className='border rounded';cv.style.width='320px';cv.style.height='auto';cv.style.background='#111';
+    const cap=document.createElement('figcaption');cap.className='small mono mt-1';cap.textContent=h;
+    fig.appendChild(cv);fig.appendChild(cap);grid.appendChild(fig);
+    wallTile(h,cv);
+  }
+}
+// One thumbnail stream: low quality, scaled to 320px wide, acked slowly so it refreshes ~1/s.
+function wallTile(host,cv){
+  const ws=new WebSocket(`${rmProto()}//${location.host}/api/vnc/view?host=${encodeURIComponent(host)}&q=35&w=320`);
+  ws.binaryType='arraybuffer';rmWall.push(ws);
+  let ctx=null,tw=0,th=0;
+  ws.onmessage=ev=>{const b=new Uint8Array(ev.data);
+    if(b[0]===2){tw=b[1]|b[2]<<8;th=b[3]|b[4]<<8;cv.width=tw;cv.height=th;ctx=cv.getContext('2d');return;}
+    if(b[0]===1&&ctx){const x=b[1]|b[2]<<8,y=b[3]|b[4]<<8;
+      createImageBitmap(new Blob([b.subarray(9)],{type:'image/jpeg'})).then(bm=>{ctx.drawImage(bm,x,y);bm.close();
+        setTimeout(()=>{if(ws.readyState===1)ws.send('{"op":"ack"}');},1000);}).catch(()=>{});}};
+  ws.onerror=()=>{};
+}
+// Machines page or a wall tile: open the Remote page controlling this host.
 function remoteTo(host){history.pushState(null,'','/remote?host='+encodeURIComponent(host||''));showPage('remote');}
-function rmSay(m){say(document.getElementById('rm_msg'),m);}
-function rmClose(){if(rmWs){rmWs.onclose=null;rmWs.close();rmWs=null;}rmCtx=null;
-  const c=document.getElementById('rm_canvas');if(c)c.classList.add('d-none');rmSay(' disconnected');}
+function openOne(host){
+  closeWall();
+  document.getElementById('rm_wall_box').classList.add('d-none');
+  document.getElementById('rm_one').classList.remove('d-none');
+  document.getElementById('rm_host').value=host;
+  rmConnect();
+}
+function rmBack(){history.pushState(null,'','/remote');loadRemote();}
+function rmSay(m){const e=document.getElementById('rm_msg');if(e)say(e,m);}
+function rmClose(silent){if(rmWs){rmWs.onclose=null;rmWs.close();rmWs=null;}rmCtx=null;
+  const c=document.getElementById('rm_canvas');if(c)c.classList.add('d-none');if(!silent)rmSay(' disconnected');}
 function rmConnect(){
-  rmClose();
+  rmClose(true);
   const host=document.getElementById('rm_host').value.trim();if(!host){rmSay(' ✗ enter a hostname');return;}
   const q=+document.getElementById('rm_q').value;
-  const proto=location.protocol==='https:'?'wss:':'ws:';
-  const ws=new WebSocket(`${proto}//${location.host}/api/vnc/view?host=${encodeURIComponent(host)}&q=${q}`);
+  const ws=new WebSocket(`${rmProto()}//${location.host}/api/vnc/view?host=${encodeURIComponent(host)}&q=${q}`);
   ws.binaryType='arraybuffer';rmWs=ws;rmSay(' connecting…');
   const canvas=document.getElementById('rm_canvas');
   ws.onopen=()=>{rmSay(' connected');canvas.classList.remove('d-none');canvas.focus();};
@@ -774,7 +815,7 @@ const ACTIONS={
   loadGroups,editGroup,closeGroup,saveGroup,createGroup,renameGroup,deleteGroup,
   loadBench,loadBenchHist,benchServer,benchRequest:()=>benchAsk(false),benchCancel:()=>benchAsk(true),bSelAll,
   applyDhcp,savePw,saveCafe,setTimeout_,setZramReserve,setAlert,setSsd,gsMode,setGoldenStreams,logout,
-  remoteTo,rmConnect,rmClose,rmQuality,rmFull,rmSas,rmWin,rmAltTab,rmPaste,
+  remoteTo,rmConnect,rmClose,rmBack,rmQuality,rmFull,rmSas,rmWin,rmAltTab,rmPaste,loadRemote,
 };
 
 let started=false;
