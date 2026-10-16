@@ -33,6 +33,7 @@ async function showPage(p){
   if(iscsiES&&p!=='server'){iscsiES.close();iscsiES=null;}
   if(p!=='remote'){if(rmWs){rmWs.onclose=null;rmWs.close();rmWs=null;rmCtx=null;}rmCloseDec();closeWall();}
   document.querySelectorAll('nav a').forEach(x=>x.classList.toggle('active',x.dataset.page===p));
+  const grp=document.querySelector(`nav a[data-page="${p}"]`)?.closest('details');if(grp)grp.open=true; // its group shows
   if(fragCache[p]===undefined){
     try{const r=await fetch('/ui/'+p);
       if(r.status===401){location.replace('/login');return;} // session expired: never cache the "login required" text
@@ -54,6 +55,13 @@ document.querySelectorAll('nav a').forEach(a=>a.onclick=e=>{
   showPage(a.dataset.page);
 });
 window.onpopstate=()=>showPage(pageFromPath());
+// Menu groups: folded by default, each one's open/closed remembered in this browser (localStorage may be off: then
+// everything just starts folded, the current page's group open).
+document.querySelectorAll('nav details[data-group]').forEach(d=>{
+  const k='navgrp:'+d.dataset.group;
+  try{if(localStorage.getItem(k)==='1')d.open=true;}catch(e){}
+  d.addEventListener('toggle',()=>{try{localStorage.setItem(k,d.open?'1':'0');}catch(e){}});
+});
 
 // ---- machines (filter + client-side paging) ----
 let allMachines=[], mPage=1; const M_PAGE=15;

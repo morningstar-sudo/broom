@@ -2,8 +2,14 @@
 
 /* Sidebar: a fixed column from lg up (below that it is an offcanvas, index.html). */
 @media (min-width:992px){
-  #sidebar{width:216px;flex-shrink:0;position:sticky;top:0;height:100vh}
+  /* Taller menu than the window → it scrolls inside its own column (the background stays full height). */
+  #sidebar{width:216px;flex-shrink:0;position:sticky;top:0;height:100vh;overflow-y:auto}
 }
+/* Menu groups (index.html): <details> folds; the arrow turns when open. */
+.nav-group>summary{cursor:pointer;list-style:none;user-select:none}
+.nav-group>summary::-webkit-details-marker{display:none}
+.nav-group>summary::before{content:'\25B8';display:inline-block;width:1em;transition:transform .15s}
+.nav-group[open]>summary::before{transform:rotate(90deg)}
 #sidebar .dot{display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--bs-secondary-color);
   margin-right:6px;vertical-align:middle}
 #sidebar .dot.up{background:var(--bs-success)}
