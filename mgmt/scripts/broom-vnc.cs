@@ -43,7 +43,9 @@ public static class BroomVnc {
   const int SM_XVIRTUAL=76, SM_YVIRTUAL=77, SM_CXVIRTUAL=78, SM_CYVIRTUAL=79;
   const int SRCCOPY=0x00CC0020, CAPTUREBLT=0x40000000, DI_NORMAL=3;
 
-  [StructLayout(LayoutKind.Sequential)] struct STARTUPINFO { public int cb; public string res1; public string desktop; public string title; public int x, y, xs, ys, xc, yc, fill, flags; public short show, res2; public IntPtr res3, in_, out_, err; }
+  // CharSet.Unicode: CreateProcessAsUser here is the W function, so lpDesktop must be UTF-16; marshaled as ANSI it
+  // names no desktop and the child dies while user32 loads (0xC0000142), before any of our code runs.
+  [StructLayout(LayoutKind.Sequential, CharSet=CharSet.Unicode)] struct STARTUPINFO { public int cb; public string res1; public string desktop; public string title; public int x, y, xs, ys, xc, yc, fill, flags; public short show, res2; public IntPtr res3, in_, out_, err; }
   [StructLayout(LayoutKind.Sequential)] struct PROCESS_INFORMATION { public IntPtr process, thread; public uint pid, tid; }
 
   [StructLayout(LayoutKind.Sequential)] struct CURSORINFO { public int cbSize; public int flags; public IntPtr hCursor; public int x; public int y; }
@@ -67,8 +69,11 @@ public static class BroomVnc {
     if (args.Length < 1) return;
     // broom-watch starts us as SYSTEM, which lands in session 0 (no desktop to capture or send input to). Relaunch
     // ourselves as SYSTEM inside the console session (where the guest's desktop is), then this copy exits.
+    // Anything that escapes (a crash before the first log line would otherwise leave no trace) goes to the log.
+    AppDomain.CurrentDomain.UnhandledException += (s, e) => Log("crash: " + e.ExceptionObject);
     uint console = WTSGetActiveConsoleSessionId();
     uint mine; ProcessIdToSessionId(GetCurrentProcessId(), out mine);
+    if (mine == console) Log("start in session " + mine);
     if (console == 0xFFFFFFFF) { Log("no console session yet"); return; } // broom-watch retries
     if (mine != console) {
       // broom-watch calls us every 15 s: an agent already running (its mutex exists) -> nothing to start.
@@ -81,7 +86,7 @@ public static class BroomVnc {
     // One agent per machine: a second launch (a stale watch task) exits.
     bool fresh;
     using (var mutex = new Mutex(true, "Global\\broom-vnc-agent", out fresh)) {
-      if (!fresh) return;
+      if (!fresh) { Log("another agent already runs - exiting"); return; }
       Log("agent started in session " + mine + ", server " + args[0]);
       try { SetProcessDPIAware(); } catch { }
       string url = "ws://" + args[0] + "/api/vnc/agent";
@@ -136,8 +141,18 @@ public static class BroomVnc {
       var si = new STARTUPINFO(); si.cb = Marshal.SizeOf(typeof(STARTUPINFO)); si.desktop = "winsta0\\default";
       PROCESS_INFORMATION pi;
       string exe = Application.ExecutablePath;
-      if (CreateProcessAsUser(dup, exe, "\"" + exe + "\" " + srv, IntPtr.Zero, IntPtr.Zero, false, 0x08000000, IntPtr.Zero, null, ref si, out pi)) {
-        Log("relaunched into session " + session + " (pid " + pi.pid + ")");
+      // broom-watch is a Task Scheduler task: we sit in its job object, and a child in another session left in that job
+      // can be ended at once. Break away from it (CREATE_BREAKAWAY_FROM_JOB); a job that forbids it -> as before.
+      const uint NO_WINDOW = 0x08000000, BREAKAWAY = 0x01000000;
+      bool ok = CreateProcessAsUser(dup, exe, "\"" + exe + "\" " + srv, IntPtr.Zero, IntPtr.Zero, false, NO_WINDOW | BREAKAWAY, IntPtr.Zero, null, ref si, out pi);
+      string how = "out of the task's job";
+      if (!ok) {
+        int e = Marshal.GetLastWin32Error();
+        how = "inside the task's job (breakaway refused: error " + e + ")";
+        ok = CreateProcessAsUser(dup, exe, "\"" + exe + "\" " + srv, IntPtr.Zero, IntPtr.Zero, false, NO_WINDOW, IntPtr.Zero, null, ref si, out pi);
+      }
+      if (ok) {
+        Log("relaunched into session " + session + " (pid " + pi.pid + ", " + how + ")");
         CloseHandle(pi.process); CloseHandle(pi.thread);
       } else Log("relaunch: CreateProcessAsUser error " + Marshal.GetLastWin32Error());
     } finally {
