@@ -308,7 +308,7 @@ fn nvme_health(disk: &str) -> Option<DiskHealth> {
         timeout_ms: u32,
         result: u32,
     }
-    const NVME_ADMIN: libc::c_ulong = 0xC048_4E41; // _IOWR('N', 0x41, nvme_admin_cmd) — 72-byte struct
+    const NVME_ADMIN: u32 = 0xC048_4E41; // _IOWR('N', 0x41, nvme_admin_cmd) — 72-byte struct
     let mut buf = [0u8; 512];
     let mut cmd = AdminCmd {
         opcode: 0x02,      // Get Log Page
@@ -319,7 +319,7 @@ fn nvme_health(disk: &str) -> Option<DiskHealth> {
         ..Default::default()
     };
     // SAFETY: cmd.addr points at buf (512 bytes, data_len); f is a valid fd. The ioctl fills buf.
-    if unsafe { libc::ioctl(f.as_raw_fd(), NVME_ADMIN, &mut cmd) } != 0 {
+    if unsafe { libc::ioctl(f.as_raw_fd(), NVME_ADMIN as libc::Ioctl, &mut cmd) } != 0 {
         return None;
     }
     let crit = buf[0];
@@ -364,7 +364,7 @@ fn sata_health(disk: &str) -> Option<DiskHealth> {
         duration: u32,
         info: u32,
     }
-    const SG_IO: libc::c_ulong = 0x2285;
+    const SG_IO: u32 = 0x2285;
     let mut data = [0u8; 512];
     let mut sense = [0u8; 32];
     // ATA PASS-THROUGH(16): PIO data-in, 1 sector from the device; READ SMART DATA at LBA mid/high 0x4F/0xC2.
@@ -383,7 +383,9 @@ fn sata_health(disk: &str) -> Option<DiskHealth> {
     h.sbp = sense.as_mut_ptr() as u64;
     h.timeout = 5000;
     // SAFETY: the pointers in h stay valid for the call; f is a valid fd. The ioctl fills `data`.
-    if unsafe { libc::ioctl(f.as_raw_fd(), SG_IO, &mut h) } != 0 || h.host_status != 0 {
+    if unsafe { libc::ioctl(f.as_raw_fd(), SG_IO as libc::Ioctl, &mut h) } != 0
+        || h.host_status != 0
+    {
         return None;
     }
     let (realloc, pending, temp) = parse_ata_smart(&data);
