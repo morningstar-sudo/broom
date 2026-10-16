@@ -29,6 +29,23 @@ try {
 function Report($free) {
   try { Invoke-WebRequest -UseBasicParsing -TimeoutSec 5 -Method Post -Uri "http://$Srv/api/ssd-low?free=$free" | Out-Null } catch { }
 }
+# Remote agent (vnc.rs): start broom-vnc.exe (SYSTEM, this session 0) -> it relaunches itself into the console session.
+# A Global mutex in the agent keeps it to one copy, so this is safe to call again. Local build (no exe shipped):
+# compile broom-vnc.cs once into Temp. No -Vol (older bootorder) -> skip.
+function StartAgent {
+  if (-not $Vol) { return }
+  $exe = "$env:SystemRoot\Temp\broom-vnc.exe"
+  if (-not [IO.File]::Exists($exe)) {
+    $src = "$Vol\broom\broom-vnc.exe"
+    if ([IO.File]::Exists($src)) { try { [IO.File]::Copy($src, $exe) } catch { } }
+    elseif ([IO.File]::Exists("$Vol\broom\broom-vnc.cs")) {
+      try { Add-Type -Path "$Vol\broom\broom-vnc.cs" -OutputAssembly $exe -OutputType WindowsApplication `
+              -ReferencedAssemblies System.Drawing, System.Windows.Forms -ErrorAction Stop } catch { }
+    }
+  }
+  if ([IO.File]::Exists($exe)) { try { Start-Process $exe -ArgumentList $Srv -WindowStyle Hidden } catch { } }
+}
+StartAgent
 # Boot time (Benchmark page): the desktop is up once explorer runs (guest logged on) -> tell the server, which times it
 # from the menu choice on its own clock. Checked every second for up to 15 minutes, then the watchdog goes on.
 for ($i = 0; $i -lt 900; $i++) {
@@ -56,5 +73,6 @@ while ($true) {
       if (-not $reported) { Report $free; $reported = $true }
     }
   }
+  StartAgent   # re-ensure the remote agent is up (guest killed it, or it crashed)
   Start-Sleep 15
 }

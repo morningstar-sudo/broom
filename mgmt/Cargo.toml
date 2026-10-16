@@ -9,7 +9,7 @@ name = "bootrom-mgmt"
 path = "src/main.rs"
 
 [dependencies]
-axum = "0.8.9"
+axum = { version = "0.8.9", features = ["ws"] }   # ws: Remote page (vnc.rs)
 tokio = { version = "1.53.1", features = ["full"] }
 tower-http = { version = "0.7.1", features = ["fs"] }
 tower = { version = "0.5", features = ["util"] }   # oneshot: a RAM-cached golden falls back to ServeFile (goldenram.rs)

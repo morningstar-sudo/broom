@@ -26,11 +26,12 @@ for(const ev of ['click','change','input'])document.addEventListener(ev,e=>{
 });
 
 // ---- tabs: load HTML fragments on demand (/ui/<page>) + only load data for the tab being viewed ----
-const loaders={machines:loadStatus,devices:loadDevices,groups:loadGroups,benchmark:loadBench,images:()=>{loadImages();loadGames();},drivers:loadDrivers,network:loadDhcp,system:loadCafe};
+const loaders={machines:loadStatus,devices:loadDevices,groups:loadGroups,benchmark:loadBench,images:()=>{loadImages();loadGames();},drivers:loadDrivers,network:loadDhcp,system:loadCafe,remote:loadRemote};
 const fragCache={};
 let curPage=null;
 async function showPage(p){
   if(iscsiES&&p!=='benchmark'){iscsiES.close();iscsiES=null;}
+  if(p!=='remote'&&rmWs){rmWs.onclose=null;rmWs.close();rmWs=null;rmCtx=null;}
   document.querySelectorAll('nav a').forEach(x=>x.classList.toggle('active',x.dataset.page===p));
   if(fragCache[p]===undefined){
     try{const r=await fetch('/ui/'+p);
@@ -88,7 +89,8 @@ function renderMachines(){
        <td class="mono" title="${esc(m.license_result||'')}">${licCell(m)}</td>
        <td><div class="d-flex gap-1">${m.registered
           ? `<button class="btn btn-sm btn-outline-secondary" ${act('wake',m.mac)}>Wake</button>
-             <button class="btn btn-sm btn-outline-secondary" ${act('manage',m.id)}>Manage</button>`
+             <button class="btn btn-sm btn-outline-secondary" ${act('manage',m.id)}>Manage</button>
+             ${m.remote?`<button class="btn btn-sm btn-outline-primary" ${act('remoteTo',m.hostname)} title="See and control this machine">Remote</button>`:''}`
           : `<button class="btn btn-sm btn-outline-primary" ${act('regMachine',m.mac,m.ip,m.hostname)}>Register</button>`}</div></td>
      </tr>`).join('') || '<tr><td colspan=7 class="mono">no matching machines</td></tr>';
   document.getElementById('m_count').textContent=rows.length+' machines';
@@ -555,6 +557,76 @@ async function setAlert(){const m=document.getElementById('al_msg');
   try{await j('/api/config/alert',mk({pct:+document.getElementById('alert_pct').value}));say(m,' ✓ saved');}catch(e){say(m,' ✗ '+e.message);}}
 async function setZramReserve(){await j('/api/config/zram-reserve',mk({mb:+document.getElementById('zram_reserve').value}));say(document.getElementById('zr_msg'),' ✓ saved');}
 
+// ---- remote (vnc.rs): watch + control a Windows machine over a WebSocket ----
+let rmWs=null, rmCtx=null, rmW=0, rmH=0;
+async function loadRemote(){
+  try{const hosts=await j('/api/vnc/agents');
+    document.getElementById('rm_hosts').innerHTML=hosts.map(h=>`<option value="${esc(h)}">`).join('');}catch(e){}
+  const q=new URLSearchParams(location.search).get('host');
+  if(q){document.getElementById('rm_host').value=q;rmConnect();}
+}
+// Machines page: open the Remote page for this host.
+function remoteTo(host){history.pushState(null,'','/remote?host='+encodeURIComponent(host||''));showPage('remote');}
+function rmSay(m){say(document.getElementById('rm_msg'),m);}
+function rmClose(){if(rmWs){rmWs.onclose=null;rmWs.close();rmWs=null;}rmCtx=null;
+  const c=document.getElementById('rm_canvas');if(c)c.classList.add('d-none');rmSay(' disconnected');}
+function rmConnect(){
+  rmClose();
+  const host=document.getElementById('rm_host').value.trim();if(!host){rmSay(' ✗ enter a hostname');return;}
+  const q=+document.getElementById('rm_q').value;
+  const proto=location.protocol==='https:'?'wss:':'ws:';
+  const ws=new WebSocket(`${proto}//${location.host}/api/vnc/view?host=${encodeURIComponent(host)}&q=${q}`);
+  ws.binaryType='arraybuffer';rmWs=ws;rmSay(' connecting…');
+  const canvas=document.getElementById('rm_canvas');
+  ws.onopen=()=>{rmSay(' connected');canvas.classList.remove('d-none');canvas.focus();};
+  ws.onclose=()=>{if(rmWs===ws){rmWs=null;rmSay(' ✗ connection closed (agent gone or another viewer took over)');canvas.classList.add('d-none');}};
+  ws.onerror=()=>rmSay(' ✗ could not connect (no agent for that host?)');
+  ws.onmessage=ev=>{
+    const b=new Uint8Array(ev.data);
+    if(b[0]===2){rmW=b[1]|b[2]<<8;rmH=b[3]|b[4]<<8;canvas.width=rmW;canvas.height=rmH;rmCtx=canvas.getContext('2d');return;}
+    if(b[0]===1&&rmCtx){
+      const x=b[1]|b[2]<<8,y=b[3]|b[4]<<8;
+      createImageBitmap(new Blob([b.subarray(9)],{type:'image/jpeg'})).then(bm=>{
+        if(rmCtx)rmCtx.drawImage(bm,x,y);bm.close();
+        if(rmWs===ws&&ws.readyState===1)ws.send('{"op":"ack"}');
+      }).catch(()=>{if(rmWs===ws&&ws.readyState===1)ws.send('{"op":"ack"}');});
+    }
+  };
+  // Mouse: canvas pixels -> screen pixels (canvas is scaled by CSS). b = button bitmask.
+  const send=o=>{if(rmWs===ws&&ws.readyState===1)ws.send(JSON.stringify(o));};
+  const pos=e=>{const r=canvas.getBoundingClientRect();
+    return[Math.round((e.clientX-r.left)/r.width*rmW),Math.round((e.clientY-r.top)/r.height*rmH)];};
+  const btn=e=>(e.buttons&1)|(e.buttons&2)|(e.buttons&4); // same bit layout as Windows
+  canvas.onmousemove=e=>{const[x,y]=pos(e);send({op:'mouse',x,y,b:btn(e)});};
+  canvas.onmousedown=e=>{e.preventDefault();canvas.focus();const[x,y]=pos(e);send({op:'mouse',x,y,b:btn(e)});};
+  canvas.onmouseup=e=>{const[x,y]=pos(e);send({op:'mouse',x,y,b:btn(e)});};
+  canvas.oncontextmenu=e=>e.preventDefault();
+  canvas.onwheel=e=>{e.preventDefault();send({op:'wheel',d:e.deltaY<0?1:-1});};
+  canvas.onkeydown=e=>{e.preventDefault();send({op:'key',code:e.code,down:true});};
+  canvas.onkeyup=e=>{e.preventDefault();send({op:'key',code:e.code,down:false});};
+}
+function rmSend(o){if(rmWs&&rmWs.readyState===1)rmWs.send(JSON.stringify(o));}
+function rmQuality(){rmSend({op:'start',q:+document.getElementById('rm_q').value});}
+// Send a chord: press the codes in order, release in reverse. The buttons work even when the browser won't let the
+// page capture these keys from the physical keyboard (only full screen does).
+function rmChord(codes){for(const c of codes)rmSend({op:'key',code:c,down:true});
+  for(let i=codes.length-1;i>=0;i--)rmSend({op:'key',code:codes[i],down:false});}
+function rmSas(){rmSend({op:'sas'});}
+function rmWin(){rmChord(['MetaLeft']);}
+function rmAltTab(){rmChord(['AltLeft','Tab']);}
+async function rmPaste(){
+  let text='';
+  try{text=await navigator.clipboard.readText();}       // needs a secure context; LAN http usually lacks it
+  catch(e){text=prompt('Clipboard not available in the browser here. Paste the text to send:')||'';}
+  if(!text)return;
+  rmSend({op:'clip',text});                               // set the machine's clipboard, then Ctrl+V on it
+  setTimeout(()=>rmChord(['ControlLeft','KeyV']),150);
+  rmSay(' pasted '+text.length+' chars');
+}
+function rmFull(){const c=document.getElementById('rm_canvas');if(!c)return;
+  if(c.requestFullscreen)c.requestFullscreen().then(()=>{if(navigator.keyboard&&navigator.keyboard.lock)navigator.keyboard.lock();}).catch(()=>{});}
+// Leaving the Remote page closes the socket (showPage calls this via the leave hook below).
+
 // ---- server liveness (SSE /api/events) ----
 // Any event counts: "ping" comes on connect and only after 5 s without other events (axum's keep-alive restarts
 // its timer on every event, and "res" arrives every 2 s). Red on connection error or nothing for 12 s (e.g. server
@@ -702,6 +774,7 @@ const ACTIONS={
   loadGroups,editGroup,closeGroup,saveGroup,createGroup,renameGroup,deleteGroup,
   loadBench,loadBenchHist,benchServer,benchRequest:()=>benchAsk(false),benchCancel:()=>benchAsk(true),bSelAll,
   applyDhcp,savePw,saveCafe,setTimeout_,setZramReserve,setAlert,setSsd,gsMode,setGoldenStreams,logout,
+  remoteTo,rmConnect,rmClose,rmQuality,rmFull,rmSas,rmWin,rmAltTab,rmPaste,
 };
 
 let started=false;

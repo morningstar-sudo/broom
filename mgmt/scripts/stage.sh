@@ -337,11 +337,12 @@ else
   log "no files.sha256 on the server for $NAME (published by an older version) -> Publish again to check the boot files"
 fi
 if wget -q -O /run/broom-scripts.sha256 http://$SRV/tftp/broom-scripts/scripts.sha256 2>/dev/null && [ -s /run/broom-scripts.sha256 ]; then
-  check_list /run/broom-scripts.sha256 http://$SRV/tftp/broom-scripts broom-done.ps1 broom-bootorder.ps1 broom-games.ps1 broom-watch.ps1 broom-fw.cs broom-fw.dll
-  # broom-fw.dll (the SYSTEM task loads it) only as the server ships it: none listed (a local build) -> none kept.
-  grep -q '  broom-fw.dll$' /run/broom-scripts.sha256 || rm -f $B/broom-fw.dll
+  check_list /run/broom-scripts.sha256 http://$SRV/tftp/broom-scripts broom-done.ps1 broom-bootorder.ps1 broom-games.ps1 broom-watch.ps1 broom-fw.cs broom-fw.dll broom-vnc.cs broom-vnc.exe
+  # broom-fw.dll / broom-vnc.exe (SYSTEM loads / runs them) only as the server ships them: none listed (a local build)
+  # -> none kept.
+  for x in broom-fw.dll broom-vnc.exe; do grep -q "  $x\$" /run/broom-scripts.sha256 || rm -f $B/$x; done
 else
-  log "no scripts.sha256 on the server -> Windows scripts not checked this boot"; rm -f $B/broom-fw.dll
+  log "no scripts.sha256 on the server -> Windows scripts not checked this boot"; rm -f $B/broom-fw.dll $B/broom-vnc.exe
 fi
 
 # 1c. Preload: the other Windows images of this machine set to preload (cache-list lines "preload name hash windows")

@@ -97,6 +97,12 @@ pub(super) fn broom_fw_cs() -> &'static str {
     crate::assets::text("scripts/broom-fw.cs")
 }
 
+/// The Remote agent (vnc.rs) for broom-watch.ps1: its C# source, compiled by the client when the release ships no
+/// broom-vnc.exe (assets::optional).
+pub(super) fn broom_vnc_cs() -> &'static str {
+    crate::assets::text("scripts/broom-vnc.cs")
+}
+
 /// /broom-prep-win: embeds the guest user/password (config shared with Linux).
 pub fn prep_script(db: &dyn Db) -> String {
     let user = db.get_config("ltsp_user", "guest");

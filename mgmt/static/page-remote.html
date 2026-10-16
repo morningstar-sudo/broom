@@ -1,0 +1,26 @@
+<section id="page-remote">
+  <div class="d-flex flex-wrap align-items-baseline gap-3 mb-3"><h1 class="h4 mb-0">Remote</h1>
+    <span class="small text-body-secondary">See and control a Windows machine. Its screen shows a "Remote support connected" bar while you watch.</span></div>
+  <div class="card card-body mb-3">
+    <div class="d-flex flex-wrap gap-2 align-items-center">
+      <label class="visually-hidden" for="rm_host">Hostname</label>
+      <input class="form-control form-control-sm w-auto" id="rm_host" list="rm_hosts" placeholder="hostname" size="16" autocomplete="off">
+      <datalist id="rm_hosts"></datalist>
+      <button class="btn btn-sm btn-primary" data-click="rmConnect">Connect</button>
+      <button class="btn btn-sm btn-outline-secondary" data-click="rmClose">Disconnect</button>
+      <label class="visually-hidden" for="rm_q">Quality</label>
+      <select class="form-select form-select-sm w-auto" id="rm_q" data-change="rmQuality" title="JPEG quality: lower = faster on a busy network">
+        <option value="35">Low</option><option value="60" selected>Medium</option><option value="85">High</option>
+      </select>
+      <button class="btn btn-sm btn-outline-secondary" data-click="rmFull" title="Full screen: also passes Win / Alt+Tab from your keyboard (Chrome, Edge)">Full screen</button>
+      <span class="vr"></span>
+      <button class="btn btn-sm btn-outline-secondary" data-click="rmSas" title="Send Ctrl+Alt+Del to the machine">Ctrl+Alt+Del</button>
+      <button class="btn btn-sm btn-outline-secondary" data-click="rmWin" title="Send the Windows key">&#8862; Win</button>
+      <button class="btn btn-sm btn-outline-secondary" data-click="rmAltTab" title="Send Alt+Tab">Alt+Tab</button>
+      <button class="btn btn-sm btn-outline-secondary" data-click="rmPaste" title="Put your clipboard on the machine and paste it (Ctrl+V)">Paste</button>
+      <span id="rm_msg" class="msg"></span>
+    </div>
+    <div class="small text-body-secondary mt-2">Click the screen to type into the machine. Use the buttons above for Ctrl+Alt+Del, the Windows key and Alt+Tab (or full screen to use your own keyboard for them). Games in exclusive full screen show black.</div>
+  </div>
+  <div id="rm_wrap" class="text-center"><canvas id="rm_canvas" tabindex="0" class="mw-100 border d-none" aria-label="Remote screen"></canvas></div>
+</section>

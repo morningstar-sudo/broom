@@ -19,7 +19,8 @@ mod stage;
 
 pub use prep::prep_script;
 use prep::{
-    boot_storage_done, broom_bootorder, broom_done, broom_fw_cs, broom_games, broom_watch, has_stub,
+    boot_storage_done, broom_bootorder, broom_done, broom_fw_cs, broom_games, broom_vnc_cs,
+    broom_watch, has_stub,
 };
 #[cfg(feature = "external-assets")]
 pub(crate) use stage::download;
@@ -40,16 +41,17 @@ fn stage_dir() -> String {
 
 type Script = (&'static str, fn() -> &'static str);
 /// The Windows scripts the stage puts in BROOMWIN broom\ (the golden only holds fixed stubs that run them).
-const SCRIPTS: [Script; 5] = [
+const SCRIPTS: [Script; 6] = [
     ("broom-done.ps1", broom_done),
     ("broom-bootorder.ps1", broom_bootorder),
     ("broom-games.ps1", broom_games),
     ("broom-watch.ps1", broom_watch),
     ("broom-fw.cs", broom_fw_cs),
+    ("broom-vnc.cs", broom_vnc_cs),
 ];
-/// Compiled broom-fw.cs, next to the scripts when this release has it (CI). Not listed = the stage removes BROOMWIN's
-/// copy: a DLL the SYSTEM task loads must never be one a guest left there.
-const FW_DLL: &str = "broom-fw.dll";
+/// Compiled broom-fw.cs / broom-vnc.cs, next to the scripts when this release has them (CI). Not listed = the stage
+/// removes BROOMWIN's copy: a DLL / exe SYSTEM runs must never be one a guest left there.
+const BINARIES: [&str; 2] = ["broom-fw.dll", "broom-vnc.exe"];
 
 /// At start: the Windows scripts of this version into tftp/broom-scripts/ + their scripts.sha256, which the stage
 /// checks BROOMWIN's copies against on every boot — like the stage itself, a new mgmt version reaches every client at
@@ -62,10 +64,12 @@ pub fn install_scripts() -> Result<(), String> {
         .iter()
         .map(|(f, body)| (*f, body().replace('\n', "\r\n").into_bytes().into()))
         .collect();
-    match crate::assets::optional(&format!("scripts/{FW_DLL}")) {
-        Some(dll) => files.push((FW_DLL, dll.into())),
-        None => {
-            let _ = std::fs::remove_file(dir.join(FW_DLL)); // of another release
+    for b in BINARIES {
+        match crate::assets::optional(&format!("scripts/{b}")) {
+            Some(bin) => files.push((b, bin.into())),
+            None => {
+                let _ = std::fs::remove_file(dir.join(b)); // of another release
+            }
         }
     }
     let mut sums = String::new();

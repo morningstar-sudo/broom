@@ -36,6 +36,7 @@ mod tftp;
 mod versions;
 mod vhdx;
 mod vmdk;
+mod vnc;
 mod winstage;
 mod wol;
 
@@ -289,7 +290,7 @@ async fn events(
 async fn ui_page(axum::extract::Path(p): axum::extract::Path<String>) -> Html<&'static str> {
     Html(match p.as_str() {
         "machines" | "images" | "network" | "system" | "drivers" | "devices" | "groups"
-        | "benchmark" => assets::text(&format!("static/page-{p}.html")),
+        | "benchmark" | "remote" => assets::text(&format!("static/page-{p}.html")),
         _ => "",
     })
 }
@@ -558,6 +559,7 @@ async fn main() {
         .route("/devices", get(index))
         .route("/groups", get(index))
         .route("/benchmark", get(index))
+        .route("/remote", get(index))
         .route("/ui/{page}", get(ui_page)) // fragment tab on-demand
         .route("/api/events", get(events)) // SSE: server liveness (sidebar dot) + image job status
         .route("/boot.ipxe", get(boot::render)) // iPXE menu
@@ -572,6 +574,7 @@ async fn main() {
         .merge(devices::routes()) // Devices page: edit / bulk / CSV / detail
         .merge(monitor::routes()) // online status, Wake-on-LAN
         .merge(bench::routes()) // Benchmark page + client measurements
+        .merge(vnc::routes()) // Remote page: screen + mouse/keys of a Windows machine
         .merge(auth::routes()) // admin login
         // Serve boot assets over HTTP (kernel/initrd much faster than TFTP).
         // /tftp/... -> <home>/tftp/... (e.g. http://SERVER/tftp/broom-stage/vmlinuz); a Windows golden set to RAM

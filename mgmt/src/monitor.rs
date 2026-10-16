@@ -38,6 +38,8 @@ struct MachineStatus {
     not_reset: Option<u64>,
     /// SSD almost full during the session: (bytes free, unix time), until the next PXE boot.
     ssd_low: Option<(u64, u64)>,
+    /// Its remote agent is connected (Remote page).
+    remote: bool,
 }
 
 /// Machines = registered (machines table) + discovered via DHCP (leases table, dhcp.rs) or a PXE boot (pxe_ip).
@@ -138,6 +140,7 @@ async fn status(State(st): State<SharedState>) -> Json<Vec<MachineStatus>> {
                 notes: m.and_then(|m| m.notes),
                 not_reset: not_reset.get(&mac).copied(),
                 ssd_low: ssd_low.get(&mac).copied(),
+                remote: online && crate::vnc::connected(&mac),
                 mac,
                 ip,
                 hostname,

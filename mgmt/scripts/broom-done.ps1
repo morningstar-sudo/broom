@@ -33,6 +33,20 @@ if ([IO.Directory]::Exists($dd)) {
   if (Test-Path $tmp) { & pnputil /add-driver "$tmp\*.inf" /subdirs /install | Out-Null }
   Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue
 }
+# Network up sooner at every boot (games disk, boot report): Energy Efficient Ethernet off on the wired cards (its
+# link-up takes seconds longer, some cards drop the link right after) and no duplicate-address probe before using the
+# IPv4 address (the server hands each address out once). Here because the client's own cards only exist from now on
+# (drivers above); kept in base. -NoRestart: no link drop now (the license below needs it), the restart that saves
+# base applies it. Keywords: the standard one + the usual Intel / Realtek names; a card without them is left alone.
+# Let a service (the Remote agent, SYSTEM) send Ctrl+Alt+Del via SendSAS. 1 = services only.
+reg add 'HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System' /v SoftwareSASGeneration /t REG_DWORD /d 1 /f | Out-Null
+step 'network: Energy Efficient Ethernet off, no duplicate-address probe'
+foreach ($n in (Get-NetAdapter -Physical -ErrorAction SilentlyContinue)) {
+  foreach ($kw in '*EEE', 'EEELinkAdvertisement', 'AdvancedEEE', 'EnableGreenEthernet') {
+    try { Set-NetAdapterAdvancedProperty -Name $n.Name -RegistryKeyword $kw -RegistryValue 0 -NoRestart -ErrorAction Stop } catch { }
+  }
+  try { Set-NetIPInterface -InterfaceIndex $n.ifIndex -AddressFamily IPv4 -DadTransmits 0 -ErrorAction Stop } catch { step "$($n.Name): duplicate-address probe kept ($_)" }
+}
 # Machine name from the server (stage writes broom\host.txt): rename -> takes effect after the restart that saves base.
 $h = $v.Path + 'broom\host.txt'
 if ([IO.File]::Exists($h)) {

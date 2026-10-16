@@ -238,9 +238,22 @@ already playing keep theirs. Once no machine has used an older version for 10 mi
 `games.img` in the background. A new disk is formatted by its first update machine; the size can only grow (the update
 machine extends the drive on its next boot). No rollback for a games disk — back up its `games.img`.
 
-The Windows scripts (`broom-done`, `broom-bootorder`, `broom-games`, `broom-watch`) are the server's, not the images': written to
+The Windows scripts (`broom-done`, `broom-bootorder`, `broom-games`, `broom-watch`, `broom-vnc`) are the server's, not the images': written to
 `tftp/broom-scripts/` at every start and checked by the stage on every boot, so a new version reaches every machine
 without a publish. Images published before this version need **Publish** once to switch over.
+
+## Remote (Windows)
+
+**Remote** (sidebar, or the Remote button on the Machines page): see and control a Windows machine from the browser.
+Each machine runs a small agent (`broom-vnc`) that dials out to the server and keeps one connection open; the machine
+opens no port, so no guest or other PC on the LAN can reach its screen. Open the page, type (or pick) the machine's
+hostname, and Connect. Mouse, keyboard and scroll work; click the screen first so keys go to the machine. Toolbar
+buttons send **Ctrl+Alt+Del**, the **Windows key** and **Alt+Tab** (the browser only lets your own keyboard send those
+in full screen); **Paste** puts your clipboard on the machine and pastes it. While you watch, a red "Remote support
+connected" bar shows on the machine so the user knows. Lower the quality on a busy network. Limit: a game running in
+*exclusive* full screen shows black (the agent captures the desktop, not the game's own output) — borderless /
+windowed games are fine. The agent accepts only the server's connection and is served like the other Windows scripts,
+so it reaches every machine without a publish.
 
 ## Versions, export
 

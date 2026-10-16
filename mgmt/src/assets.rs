@@ -31,6 +31,7 @@ assets!(
     "static/page-devices.html",
     "static/page-groups.html",
     "static/page-benchmark.html",
+    "static/page-remote.html",
     "ipxe/snponly.efi",
     "ipxe/signed/snponly-shim.efi",
     "ipxe/signed/snponly.efi",
@@ -46,11 +47,13 @@ assets!(
     "scripts/broom-watch.ps1",
     "scripts/broom-stub.ps1",
     "scripts/broom-fw.cs",
+    "scripts/broom-vnc.cs",
 );
 
 /// Assets only a release has: built by CI on another OS and added to its broom-assets.zip (a local build has none).
-/// broom-fw.dll: broom-fw.cs compiled on a Windows runner, so the clients never run the C# compiler for it.
-const OPTIONAL: &[&str] = &["scripts/broom-fw.dll"];
+/// broom-fw.dll / broom-vnc.exe: broom-fw.cs / broom-vnc.cs compiled on a Windows runner, so the clients never run the
+/// C# compiler for them.
+const OPTIONAL: &[&str] = &["scripts/broom-fw.dll", "scripts/broom-vnc.exe"];
 
 /// An asset of OPTIONAL: Some in a release whose zip has it.
 pub fn optional(name: &str) -> Option<&'static [u8]> {

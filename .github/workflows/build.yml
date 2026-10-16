@@ -46,10 +46,15 @@ jobs:
         run: |
           & "$env:WINDIR\Microsoft.NET\Framework64\v4.0.30319\csc.exe" /nologo /target:library /optimize+ /out:broom-fw.dll mgmt\scripts\broom-fw.cs
           if ($LASTEXITCODE -ne 0) { exit 1 }
+          # The Remote agent (vnc.rs): a window-less exe broom-watch.ps1 starts as SYSTEM in the console session.
+          & "$env:WINDIR\Microsoft.NET\Framework64\v4.0.30319\csc.exe" /nologo /target:winexe /optimize+ /r:System.Drawing.dll /r:System.Windows.Forms.dll /out:broom-vnc.exe mgmt\scripts\broom-vnc.cs
+          if ($LASTEXITCODE -ne 0) { exit 1 }
       - uses: actions/upload-artifact@v4
         with:
           name: broom-fw
-          path: broom-fw.dll
+          path: |
+            broom-fw.dll
+            broom-vnc.exe
           if-no-files-found: error
 
   build:
@@ -192,12 +197,12 @@ jobs:
           path: mgmt/scripts
 
       # Web UI, iPXE, scripts → broom-assets.zip, packed by the binary that still embeds them (assets.rs keeps the list),
-      # + broom-fw.dll from the Windows job (assets.rs OPTIONAL: only a release has it). The sha256 is the final zip's.
+      # + broom-fw.dll / broom-vnc.exe from the Windows job (assets.rs OPTIONAL: only a release has them). The sha256 is the final zip's.
       - name: Assets bundle
         id: assets
         run: |
           mgmt/dist/bootrom-mgmt pack-assets "$PWD/stage-out/broom-assets.zip"
-          (cd mgmt && zip -q -X "$OLDPWD/stage-out/broom-assets.zip" scripts/broom-fw.dll)
+          (cd mgmt && zip -q -X "$OLDPWD/stage-out/broom-assets.zip" scripts/broom-fw.dll scripts/broom-vnc.exe)
           sha=$(sha256sum stage-out/broom-assets.zip | cut -d' ' -f1)
           echo "broom-assets.zip sha256 $sha"
           echo "sha=$sha" >> "$GITHUB_OUTPUT"
