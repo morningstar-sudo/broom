@@ -12,6 +12,7 @@ using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.Drawing.Imaging;
 using System.IO;
+using System.Management;
 using System.Net.WebSockets;
 using System.Runtime.InteropServices;
 using System.Threading;
@@ -54,6 +55,9 @@ public static class BroomVnc {
   static int VX, VY, VW, VH;   // capture origin + size (virtual desktop for GDI, the output for Desktop Duplication)
   static volatile int Quality = 60;
   static volatile int MaxW = 0;   // > 0: scale the frame down to this width (the wall's thumbnails)
+  static volatile int WantH264 = 0; // the viewer asked for H.264
+  static int Codec = 0;           // what we are sending: 0 JPEG, 1 H.264 (decided on the first frame after start)
+  static H264 _h264;              // the encoder while Codec == 1
   static Dupl _dupl;              // Desktop Duplication, re-created after it is lost; null = use GDI
   static int _ddNext;             // TickCount before which not to retry Desktop Duplication
   // The previous frame's 16-row bands, so SendFrame can diff (a reference type: async can't take a ref parameter).
@@ -118,6 +122,13 @@ public static class BroomVnc {
           if (!sent) { frameReady.Release(); await Task.Delay(50); } // nothing changed: free the slot, look again soon
         }
       });
+      // Hardware health pushed over this same connection (metrics.rs), whether or not anyone is watching.
+      var health = Task.Run(async () => {
+        while (ws.State == WebSocketState.Open) {
+          try { string j = BuildMetrics(); if (j != null) await SendText(ws, sendLock, j); } catch { }
+          await Task.Delay(15000);
+        }
+      });
       var buf = new byte[8192];
       var msg = new List<byte>();
       while (ws.State == WebSocketState.Open) {
@@ -128,7 +139,7 @@ public static class BroomVnc {
         string text = System.Text.Encoding.UTF8.GetString(msg.ToArray());
         msg.Clear();
         string op = Field(text, "op");
-        if (op == "start") { Quality = Clamp(IntField(text, "q", 60), 20, 95); MaxW = IntField(text, "w", 0); fr.Prev = null; streaming = true; Drain(frameReady); frameReady.Release(); }
+        if (op == "start") { Quality = Clamp(IntField(text, "q", 60), 20, 95); MaxW = IntField(text, "w", 0); WantH264 = Field(text, "codec") == "h264" ? 1 : 0; Codec = -1; if (_h264 != null) { _h264.Dispose(); _h264 = null; } fr.Prev = null; streaming = true; Drain(frameReady); frameReady.Release(); }
         else if (op == "stop") { streaming = false; }
         else if (op == "ack") { if (frameReady.CurrentCount == 0) frameReady.Release(); }
         else if (op == "mouse") { Mouse(IntField(text, "x", 0), IntField(text, "y", 0), IntField(text, "b", 0)); }
@@ -140,7 +151,15 @@ public static class BroomVnc {
       streaming = false;
       cts.Cancel();
       try { await capture; } catch { }
+      try { await health; } catch { }
     }
+  }
+
+  static async Task SendText(ClientWebSocket ws, SemaphoreSlim sendLock, string s) {
+    var data = System.Text.Encoding.UTF8.GetBytes(s);
+    await sendLock.WaitAsync();
+    try { await ws.SendAsync(new ArraySegment<byte>(data), WebSocketMessageType.Text, true, CancellationToken.None); }
+    finally { sendLock.Release(); }
   }
 
   static void Drain(SemaphoreSlim s) { while (s.CurrentCount > 0) s.Wait(0); }
@@ -244,10 +263,42 @@ public static class BroomVnc {
         cur[b] = band;
         if (first || !Same(band, prev[b])) { if (top < 0) top = y0; bottom = y0 + rows; }
       }
-      bmp.UnlockBits(data);
       fr.Prev = cur;
-      if (top < 0) return false; // nothing changed
 
+      // First frame after a start: pick the codec (H.264 if asked and it initialises, else JPEG) and tell the viewer.
+      if (Codec < 0) {
+        Codec = 0;
+        if (WantH264 == 1) {
+          try { var enc = new H264(); if (enc.Init(w, h, 30, 6000000)) { _h264 = enc; Codec = 1; } else enc.Dispose(); } catch { }
+        }
+        await Send(ws, sendLock, new byte[] { 4, (byte)Codec }); // codec decision
+        first = true;
+      }
+
+      if (Codec == 1) {
+        // The encoder is sized to the screen: a resolution change re-creates it (a fresh IDR).
+        if (_h264 != null && (_h264.W != w || _h264.H != h)) { _h264.Dispose(); _h264 = null; first = true;
+          try { var enc = new H264(); if (enc.Init(w, h, 30, 6000000)) _h264 = enc; } catch { } }
+        if (_h264 == null) { bmp.UnlockBits(data); Codec = 0; await Send(ws, sendLock, new byte[] { 4, 0 }); }
+      }
+
+      if (Codec == 1) {
+        if (first) await Send(ws, sendLock, Header2(w, h));
+        else if (top < 0) { bmp.UnlockBits(data); return false; } // nothing changed
+        byte[] nv12 = ToNv12(data, w, h);
+        bmp.UnlockBits(data);
+        bool key; byte[] au = _h264.Encode(nv12, out key);
+        if (au == null || au.Length == 0) return false;
+        var msg = new byte[2 + au.Length];
+        msg[0] = 3; msg[1] = (byte)((key ? 1 : 0));
+        Buffer.BlockCopy(au, 0, msg, 2, au.Length);
+        await Send(ws, sendLock, msg);
+        return true;
+      }
+
+      // JPEG: send only the changed rectangle.
+      bmp.UnlockBits(data);
+      if (top < 0) return false;
       if (first) await Send(ws, sendLock, Header2(w, h));
       using (var sub = bmp.Clone(new Rectangle(0, top, w, bottom - top), PixelFormat.Format24bppRgb))
       using (var ms = new MemoryStream()) {
@@ -256,6 +307,36 @@ public static class BroomVnc {
       }
       return true;
     }
+  }
+
+  // BGRA (our 32bpp capture) -> NV12 (what the H.264 encoder takes): a full Y plane then interleaved U,V at half size
+  // (BT.601). unsafe for speed at 30 fps.
+  static unsafe byte[] ToNv12(BitmapData data, int w, int h) {
+    byte[] nv12 = new byte[w * h + ((w + 1) / 2) * ((h + 1) / 2) * 2];
+    byte* src = (byte*)data.Scan0;
+    int stride = data.Stride, uv = w * h;
+    fixed (byte* dst = nv12) {
+      for (int y = 0; y < h; y++) {
+        byte* row = src + y * stride;
+        byte* yrow = dst + y * w;
+        for (int x = 0; x < w; x++) {
+          byte b = row[x * 4], g = row[x * 4 + 1], r = row[x * 4 + 2];
+          yrow[x] = (byte)(((66 * r + 129 * g + 25 * b + 128) >> 8) + 16);
+        }
+      }
+      int cw = (w + 1) / 2;
+      for (int y = 0; y < h; y += 2) {
+        byte* row = src + y * stride;
+        byte* crow = dst + uv + (y / 2) * cw * 2;
+        for (int x = 0; x < w; x += 2) {
+          byte b = row[x * 4], g = row[x * 4 + 1], r = row[x * 4 + 2];
+          int cx = x / 2;
+          crow[cx * 2] = (byte)(((-38 * r - 74 * g + 112 * b + 128) >> 8) + 128);     // U
+          crow[cx * 2 + 1] = (byte)(((112 * r - 94 * g - 18 * b + 128) >> 8) + 128);  // V
+        }
+      }
+    }
+    return nv12;
   }
 
   static bool Same(byte[] a, byte[] b) {
@@ -386,6 +467,108 @@ public static class BroomVnc {
     return sb.ToString();
   }
   static int Clamp(int v, int lo, int hi) { return v < lo ? lo : (v > hi ? hi : v); }
+
+  // ---- hardware health (WMI) ----
+  // Best-effort: every query in its own try/catch, a missing one just drops that field. Temperatures are ACPI thermal
+  // zones (no kernel driver, so unlabeled, not per-core). Disk SMART gives bad-sector counts without a surface scan.
+  static string BuildMetrics() {
+    int cpu = -1, ram = -1;
+    try {
+      foreach (var o in Query(null, "SELECT PercentProcessorTime FROM Win32_PerfFormattedData_PerfOS_Processor WHERE Name='_Total'"))
+        { cpu = (int)Convert.ToUInt64(o["PercentProcessorTime"]); break; }
+    } catch { }
+    try {
+      foreach (var o in Query(null, "SELECT FreePhysicalMemory,TotalVisibleMemorySize FROM Win32_OperatingSystem")) {
+        double free = Convert.ToDouble(o["FreePhysicalMemory"]), total = Convert.ToDouble(o["TotalVisibleMemorySize"]);
+        if (total > 0) ram = (int)Math.Round(100.0 * (1.0 - free / total));
+        break;
+      }
+    } catch { }
+    if (cpu < 0 && ram < 0) return null;
+
+    var temps = new List<int>();
+    try {
+      foreach (var o in Query(@"root\wmi", "SELECT CurrentTemperature FROM MSAcpi_ThermalZoneTemperature"))
+        temps.Add((int)Math.Round(Convert.ToDouble(o["CurrentTemperature"]) / 10.0 - 273.15));
+    } catch { }
+
+    var sb = new System.Text.StringBuilder();
+    sb.Append("{\"t\":\"metrics\",\"cpu\":").Append(Math.Max(cpu, 0)).Append(",\"ram\":").Append(Math.Max(ram, 0));
+    sb.Append(",\"temps\":[");
+    for (int i = 0; i < temps.Count; i++) { if (i > 0) sb.Append(','); sb.Append(temps[i]); }
+    sb.Append("],\"disks\":[");
+    sb.Append(Disks());
+    sb.Append(']');
+    ulong free2, total2, avail2;
+    if (GetDiskFreeSpaceExW(Environment.GetFolderPath(Environment.SpecialFolder.System).Substring(0, 3), out avail2, out total2, out free2))
+      sb.Append(",\"free\":").Append(free2);
+    sb.Append('}');
+    return sb.ToString();
+  }
+
+  static ManagementObjectCollection Query(string ns, string wql) {
+    var scope = ns == null ? new ManagementScope() : new ManagementScope(@"\\.\" + ns);
+    return new ManagementObjectSearcher(scope, new ObjectQuery(wql)).Get();
+  }
+
+  // One JSON object per physical drive: model + health from Win32_DiskDrive, bad-sector counts + temperature from its
+  // SMART data (matched by the device instance path), predict-fail from the SMART status.
+  static string Disks() {
+    var parts = new List<string>();
+    try {
+      // SMART by instance name.
+      var sraw = new Dictionary<string, uint[]>(StringComparer.OrdinalIgnoreCase); // name -> [realloc,pending,temp,have]
+      try {
+        foreach (var o in Query(@"root\wmi", "SELECT InstanceName,VendorSpecific FROM MSStorageDriver_FailurePredictData")) {
+          var v = o["VendorSpecific"] as byte[]; if (v == null) continue;
+          uint realloc = 0, pending = 0; int temp = -1000;
+          for (int i = 2; i + 12 <= v.Length; i += 12) {
+            int id = v[i]; if (id == 0) continue;
+            uint raw = (uint)(v[i + 5] | (v[i + 6] << 8) | (v[i + 7] << 16) | (v[i + 8] << 24));
+            if (id == 5) realloc = raw; else if (id == 197) pending = raw; else if (id == 194) temp = v[i + 5];
+          }
+          sraw[(string)o["InstanceName"]] = new uint[] { realloc, pending, (uint)(temp == -1000 ? 0xFFFF : temp), (uint)(temp == -1000 ? 0 : 1) };
+        }
+      } catch { }
+      var sfail = new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase);
+      try {
+        foreach (var o in Query(@"root\wmi", "SELECT InstanceName,PredictFailure FROM MSStorageDriver_FailurePredictStatus"))
+          sfail[(string)o["InstanceName"]] = Convert.ToBoolean(o["PredictFailure"]);
+      } catch { }
+
+      foreach (var d in Query(null, "SELECT Model,Status,PNPDeviceID FROM Win32_DiskDrive")) {
+        string name = (d["Model"] as string ?? "disk").Trim();
+        string health = (d["Status"] as string ?? "").Trim(); // "OK", "Pred Fail", "Degraded"...
+        string pnp = (d["PNPDeviceID"] as string ?? "").Replace("\\", "_");
+        uint[] s = null; bool pf = false;
+        foreach (var kv in sraw) { var k = kv.Key.Replace("\\", "_"); if (pnp.Length > 0 && (k.IndexOf(pnp, StringComparison.OrdinalIgnoreCase) >= 0 || pnp.IndexOf(k, StringComparison.OrdinalIgnoreCase) >= 0)) { s = kv.Value; break; } }
+        foreach (var kv in sfail) { var k = kv.Key.Replace("\\", "_"); if (pnp.Length > 0 && (k.IndexOf(pnp, StringComparison.OrdinalIgnoreCase) >= 0 || pnp.IndexOf(k, StringComparison.OrdinalIgnoreCase) >= 0)) { pf = kv.Value; break; } }
+        var o = new System.Text.StringBuilder();
+        o.Append("{\"name\":\"").Append(JsonEsc(name)).Append("\",\"health\":\"").Append(JsonEsc(health)).Append('"');
+        if (s != null) {
+          o.Append(",\"realloc\":").Append(s[0]).Append(",\"pending\":").Append(s[1]);
+          if (s[3] == 1) o.Append(",\"temp\":").Append((short)s[2]);
+        }
+        if (pf) o.Append(",\"predict_fail\":true");
+        o.Append('}');
+        parts.Add(o.ToString());
+      }
+    } catch { }
+    return string.Join(",", parts.ToArray());
+  }
+
+  static string JsonEsc(string s) {
+    var b = new System.Text.StringBuilder();
+    foreach (char c in s) {
+      if (c == '"' || c == '\\') b.Append('\\').Append(c);
+      else if (c >= ' ' && c < 127) b.Append(c);
+      else b.Append(' '); // keep it ASCII and valid
+    }
+    return b.ToString();
+  }
+
+  [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+  static extern bool GetDiskFreeSpaceExW(string dir, out ulong avail, out ulong total, out ulong free);
 
   // KeyboardEvent.code -> PS/2 set 1 scancode (0xE000 marks an extended key). Enough for a keyboard; unknown -> 0.
   static int Scancode(string c) {
@@ -532,5 +715,126 @@ public static class BroomVnc {
       Rel(staging); Rel(dupl); Rel(ctx); Rel(device);
       staging = dupl = ctx = device = IntPtr.Zero;
     }
+  }
+
+  // ---- H.264 encoding (Media Foundation) ----
+  // The built-in software H.264 encoder MFT. NV12 in, an Annex-B H.264 access unit out, which the browser plays with
+  // WebCodecs. Called by vtable index like the DXGI interop. Falls back to JPEG (the caller) if any step fails.
+  [DllImport("mfplat.dll")] static extern int MFStartup(uint version, uint flags);
+  [DllImport("mfplat.dll")] static extern int MFShutdown();
+  [DllImport("mfplat.dll")] static extern int MFCreateMediaType(out IntPtr type);
+  [DllImport("mfplat.dll")] static extern int MFCreateSample(out IntPtr sample);
+  [DllImport("mfplat.dll")] static extern int MFCreateMemoryBuffer(uint maxLen, out IntPtr buffer);
+  [DllImport("ole32.dll")] static extern int CoCreateInstance(ref Guid clsid, IntPtr outer, uint ctx, ref Guid iid, out IntPtr ptr);
+
+  [UnmanagedFunctionPointer(CallingConvention.StdCall)] delegate int SetGuidFn(IntPtr self, ref Guid key, ref Guid val);
+  [UnmanagedFunctionPointer(CallingConvention.StdCall)] delegate int SetU32Fn(IntPtr self, ref Guid key, uint val);
+  [UnmanagedFunctionPointer(CallingConvention.StdCall)] delegate int SetU64Fn(IntPtr self, ref Guid key, ulong val);
+  [UnmanagedFunctionPointer(CallingConvention.StdCall)] delegate int GetU32Fn(IntPtr self, ref Guid key, out uint val);
+  [UnmanagedFunctionPointer(CallingConvention.StdCall)] delegate int SetTypeFn(IntPtr self, uint stream, IntPtr type, uint flags);
+  [UnmanagedFunctionPointer(CallingConvention.StdCall)] delegate int MsgFn(IntPtr self, uint msg, IntPtr param);
+  [UnmanagedFunctionPointer(CallingConvention.StdCall)] delegate int ProcessInputFn(IntPtr self, uint stream, IntPtr sample, uint flags);
+  [UnmanagedFunctionPointer(CallingConvention.StdCall)] delegate int ProcessOutputFn(IntPtr self, uint flags, uint count, ref MFT_OUTPUT_DATA_BUFFER buf, out uint status);
+  [UnmanagedFunctionPointer(CallingConvention.StdCall)] delegate int OutInfoFn(IntPtr self, uint stream, out MFT_OUTPUT_STREAM_INFO info);
+  [UnmanagedFunctionPointer(CallingConvention.StdCall)] delegate int SetTimeFn(IntPtr self, long t);
+  [UnmanagedFunctionPointer(CallingConvention.StdCall)] delegate int AddBufFn(IntPtr self, IntPtr buf);
+  [UnmanagedFunctionPointer(CallingConvention.StdCall)] delegate int GetBufFn(IntPtr self, uint i, out IntPtr buf);
+  [UnmanagedFunctionPointer(CallingConvention.StdCall)] delegate int LockFn(IntPtr self, out IntPtr ptr, out uint max, out uint cur);
+  [UnmanagedFunctionPointer(CallingConvention.StdCall)] delegate int UnlockFn(IntPtr self);
+  [UnmanagedFunctionPointer(CallingConvention.StdCall)] delegate int SetLenFn(IntPtr self, uint len);
+
+  [StructLayout(LayoutKind.Sequential)] struct MFT_OUTPUT_DATA_BUFFER { public uint dwStreamID; public IntPtr pSample; public uint dwStatus; public IntPtr pEvents; }
+  [StructLayout(LayoutKind.Sequential)] struct MFT_OUTPUT_STREAM_INFO { public uint dwFlags, cbSize, cbAlignment; }
+
+  static Guid CLSID_H264Enc = new Guid("6ca50344-051a-4ded-9779-a43305165e35");
+  static Guid IID_IMFTransform = new Guid("bf94c121-5b05-4e6f-8000-ba598961414d");
+  static Guid MFMediaType_Video = new Guid("73646976-0000-0010-8000-00aa00389b71");
+  static Guid MFVideoFormat_H264 = new Guid("34363248-0000-0010-8000-00aa00389b71");
+  static Guid MFVideoFormat_NV12 = new Guid("3231564e-0000-0010-8000-00aa00389b71");
+  static Guid MF_MT_MAJOR_TYPE = new Guid("48eba18e-f8c9-4687-bf11-0a74c9f96a8f");
+  static Guid MF_MT_SUBTYPE = new Guid("f7e34c9a-42e8-4714-b74b-cb29d72c35e5");
+  static Guid MF_MT_AVG_BITRATE = new Guid("20332624-fb0d-4d9e-bd0d-cbf6786c102e");
+  static Guid MF_MT_FRAME_SIZE = new Guid("1652c33d-d6b2-4012-b834-72030849a37d");
+  static Guid MF_MT_FRAME_RATE = new Guid("c459a2e8-3d2c-4e44-b132-fee5156c7bb0");
+  static Guid MF_MT_PIXEL_ASPECT_RATIO = new Guid("c6376a1e-8d0a-4027-be45-6d9a0ad39bb6");
+  static Guid MF_MT_INTERLACE_MODE = new Guid("e2724bb8-e676-40c6-a4d8-1c4a3f0987c9");
+  static Guid MF_MT_MPEG2_PROFILE = new Guid("ad76a80b-2d5c-4e0b-b375-64e520137036");
+  static Guid MF_CLEANPOINT = new Guid("9cdf01d8-a0f0-43ba-b077-eaa06cbd728a");
+  const int MF_E_TRANSFORM_NEED_MORE_INPUT = unchecked((int)0xC00D6D72);
+
+  static int _mfStarted;
+  class H264 : IDisposable {
+    IntPtr mft;
+    long time;
+    uint outSize;
+    public int W, H, Fps;
+
+    public bool Init(int w, int h, int fps, int bitrate) {
+      if (System.Threading.Interlocked.Exchange(ref _mfStarted, 1) == 0 && MFStartup(0x00020070, 1) != 0) return false;
+      W = w; H = h; Fps = fps;
+      Guid clsid = CLSID_H264Enc, iid = IID_IMFTransform;
+      if (CoCreateInstance(ref clsid, IntPtr.Zero, 1, ref iid, out mft) != 0 || mft == IntPtr.Zero) return false;
+      ulong size = ((ulong)(uint)w << 32) | (uint)h, rate = ((ulong)(uint)fps << 32) | 1, par = ((ulong)1 << 32) | 1;
+      IntPtr ot;
+      if (MFCreateMediaType(out ot) != 0) return false;
+      SetG(ot, MF_MT_MAJOR_TYPE, MFMediaType_Video); SetG(ot, MF_MT_SUBTYPE, MFVideoFormat_H264);
+      SetU(ot, MF_MT_AVG_BITRATE, (uint)bitrate); SetU(ot, MF_MT_INTERLACE_MODE, 2); SetU(ot, MF_MT_MPEG2_PROFILE, 66);
+      Set8(ot, MF_MT_FRAME_SIZE, size); Set8(ot, MF_MT_FRAME_RATE, rate); Set8(ot, MF_MT_PIXEL_ASPECT_RATIO, par);
+      int hr = Vt<SetTypeFn>(mft, 16)(mft, 0, ot, 0); Rel(ot); if (hr != 0) return false;
+      IntPtr it;
+      if (MFCreateMediaType(out it) != 0) return false;
+      SetG(it, MF_MT_MAJOR_TYPE, MFMediaType_Video); SetG(it, MF_MT_SUBTYPE, MFVideoFormat_NV12);
+      SetU(it, MF_MT_INTERLACE_MODE, 2);
+      Set8(it, MF_MT_FRAME_SIZE, size); Set8(it, MF_MT_FRAME_RATE, rate); Set8(it, MF_MT_PIXEL_ASPECT_RATIO, par);
+      hr = Vt<SetTypeFn>(mft, 15)(mft, 0, it, 0); Rel(it); if (hr != 0) return false;
+      MFT_OUTPUT_STREAM_INFO osi; Vt<OutInfoFn>(mft, 7)(mft, 0, out osi);
+      outSize = osi.cbSize > 0 ? osi.cbSize : (uint)(w * h);
+      Vt<MsgFn>(mft, 23)(mft, 0x10000000, IntPtr.Zero); // BEGIN_STREAMING
+      Vt<MsgFn>(mft, 23)(mft, 0x10000002, IntPtr.Zero); // START_OF_STREAM
+      return true;
+    }
+
+    static void SetG(IntPtr t, Guid k, Guid v) { Vt<SetGuidFn>(t, 24)(t, ref k, ref v); }
+    static void SetU(IntPtr t, Guid k, uint v) { Vt<SetU32Fn>(t, 21)(t, ref k, v); }
+    static void Set8(IntPtr t, Guid k, ulong v) { Vt<SetU64Fn>(t, 22)(t, ref k, v); }
+
+    public byte[] Encode(byte[] nv12, out bool key) {
+      key = false;
+      IntPtr buf, sample, p; uint max, cur;
+      if (MFCreateMemoryBuffer((uint)nv12.Length, out buf) != 0) return null;
+      Vt<LockFn>(buf, 3)(buf, out p, out max, out cur);
+      Marshal.Copy(nv12, 0, p, nv12.Length);
+      Vt<UnlockFn>(buf, 4)(buf);
+      Vt<SetLenFn>(buf, 6)(buf, (uint)nv12.Length);
+      MFCreateSample(out sample);
+      Vt<AddBufFn>(sample, 37)(sample, buf);
+      long dur = 10000000L / Fps;
+      Vt<SetTimeFn>(sample, 31)(sample, time); Vt<SetTimeFn>(sample, 33)(sample, dur); time += dur;
+      int hr = Vt<ProcessInputFn>(mft, 24)(mft, 0, sample, 0);
+      Rel(buf); Rel(sample);
+      if (hr != 0) return null;
+
+      IntPtr obuf, osample, op; uint omax, ocur, status;
+      if (MFCreateMemoryBuffer(outSize, out obuf) != 0) return null;
+      MFCreateSample(out osample);
+      Vt<AddBufFn>(osample, 37)(osample, obuf);
+      var odb = new MFT_OUTPUT_DATA_BUFFER { pSample = osample };
+      hr = Vt<ProcessOutputFn>(mft, 25)(mft, 0, 1, ref odb, out status);
+      byte[] outb = null;
+      if (hr == 0) {
+        uint ck; Guid kg = MF_CLEANPOINT;
+        key = Vt<GetU32Fn>(osample, 7)(osample, ref kg, out ck) == 0 && ck != 0;
+        IntPtr cb; Vt<GetBufFn>(osample, 35)(osample, 0, out cb);
+        Vt<LockFn>(cb, 3)(cb, out op, out omax, out ocur);
+        outb = new byte[ocur];
+        Marshal.Copy(op, outb, 0, (int)ocur);
+        Vt<UnlockFn>(cb, 4)(cb);
+        Rel(cb);
+      } // else NEED_MORE_INPUT: no access unit this time
+      Rel(obuf); Rel(osample);
+      return outb;
+    }
+
+    public void Dispose() { Rel(mft); mft = IntPtr.Zero; }
   }
 }

@@ -31,7 +31,7 @@ const fragCache={};
 let curPage=null;
 async function showPage(p){
   if(iscsiES&&p!=='benchmark'){iscsiES.close();iscsiES=null;}
-  if(p!=='remote'){if(rmWs){rmWs.onclose=null;rmWs.close();rmWs=null;rmCtx=null;}closeWall();}
+  if(p!=='remote'){if(rmWs){rmWs.onclose=null;rmWs.close();rmWs=null;rmCtx=null;}rmCloseDec();closeWall();}
   document.querySelectorAll('nav a').forEach(x=>x.classList.toggle('active',x.dataset.page===p));
   if(fragCache[p]===undefined){
     try{const r=await fetch('/ui/'+p);
@@ -85,7 +85,7 @@ function renderMachines(){
        <td>${m.hostname?esc(m.hostname):'<span class="mono">—</span>'} ${m.registered?'':'<span class="badge rounded-pill text-bg-warning">new</span>'}</td>
        <td class="mono">${m.grp?esc(m.grp):'—'}</td>
        <td class="mono">${esc(m.ip)}</td><td class="mono">${esc(m.mac)}</td>
-       <td>${led(m.online)}${m.not_reset?' <span class="badge text-bg-danger" title="Windows started from the SSD without a PXE boot at '+new Date(m.not_reset*1000).toLocaleString()+' — this session was NOT reset (cable out, server down, boot order changed?). Cleared by the next PXE boot.">not reset</span>':''}${m.ssd_low?' <span class="badge text-bg-danger" title="SSD almost full during the session: '+gbs(m.ssd_low[0])+' free at '+new Date(m.ssd_low[1]*1000).toLocaleString()+' (the guest wrote a lot; Settings → SSD room). Cleared by the next PXE boot.">SSD full</span>':''}</td>
+       <td>${led(m.online)}${m.not_reset?' <span class="badge text-bg-danger" title="Windows started from the SSD without a PXE boot at '+new Date(m.not_reset*1000).toLocaleString()+' — this session was NOT reset (cable out, server down, boot order changed?). Cleared by the next PXE boot.">not reset</span>':''}${m.ssd_low?' <span class="badge text-bg-danger" title="SSD almost full during the session: '+gbs(m.ssd_low[0])+' free at '+new Date(m.ssd_low[1]*1000).toLocaleString()+' (the guest wrote a lot; Settings → SSD room). Cleared by the next PXE boot.">SSD full</span>':''}${mxBadge(m.metrics)}</td>
        <td class="mono" title="${esc(m.license_result||'')}">${licCell(m)}</td>
        <td><div class="d-flex gap-1">${m.registered
           ? `<button class="btn btn-sm btn-outline-secondary" ${act('wake',m.mac)}>Wake</button>
@@ -235,6 +235,7 @@ async function dvOpen(id){
     </div>
     <table class="table table-sm align-middle mt-3 mb-0"><tbody>
       <tr><td class="mono">Lease</td><td class="mono">${lease}</td></tr>
+      ${st.metrics?`<tr><td class="mono">Health</td><td class="mono" style="white-space:pre-line">${esc(mxText(st.metrics))}</td></tr>`:''}
       <tr><td class="mono">License</td><td class="mono" style="white-space:normal">${licCell(m,true)}</td></tr>
       <tr><td class="mono">Driver packages</td><td class="mono">${d.drivers.length?esc(d.drivers.join(', ')):'—'}</td></tr>
       <tr><td class="mono">Hardware (${d.hwids.length})</td><td class="mono" style="white-space:normal">${d.hwids.length
@@ -256,6 +257,23 @@ async function dvDelete(id,who){if(!await sure('Delete '+who+'? Its DHCP binding
 
 // ---- images ----
 const gbs=b=>b>=1e9?(b/1e9).toFixed(1)+' GB':(b/1e6).toFixed(0)+' MB';
+// Hardware health (metrics.rs, pushed by the agent). badge = compact line for the Machines table; bad disk / hot → red.
+const mxDiskBad=d=>d.predict_fail||(d.realloc||0)>0||(d.pending||0)>0||(d.health&&!/^(ok|healthy)$/i.test(d.health));
+function mxBadge(m){if(!m)return'';
+  const hot=m.temps&&m.temps.some(t=>t>=85), badDisk=(m.disks||[]).some(mxDiskBad);
+  const bits=[`CPU ${m.cpu}%`,`RAM ${m.ram}%`];
+  if(m.temps&&m.temps.length)bits.push(Math.max(...m.temps)+'°C');
+  bits.push('⛁ '+(badDisk?'check':'OK'));
+  return ` <span class="badge ${hot||badDisk?'text-bg-danger':'text-bg-light border'}" title="${esc(mxText(m))}">${bits.join(' · ')}</span>`;}
+function mxText(m){const l=[`CPU ${m.cpu}%  RAM ${m.ram}%`];
+  if(m.temps&&m.temps.length)l.push('ACPI temps (best-effort): '+m.temps.map(t=>t+'°C').join(', '));
+  for(const d of (m.disks||[])){let s=d.name+': '+(d.health||'?');
+    if(d.temp!=null)s+=', '+d.temp+'°C';
+    if(d.realloc!=null||d.pending!=null)s+=', bad sectors '+(d.realloc||0)+' reallocated / '+(d.pending||0)+' pending';
+    if(d.predict_fail)s+=' — SMART predicts FAILURE';
+    l.push(s);}
+  if(m.free!=null)l.push('system drive free: '+gbs(m.free));
+  return l.join('\n');}
 let imgRows=[];
 async function loadImages(){
   const rows=imgRows=await j('/api/images');
@@ -610,27 +628,43 @@ function openOne(host){
 }
 function rmBack(){history.pushState(null,'','/remote');loadRemote();}
 function rmSay(m){const e=document.getElementById('rm_msg');if(e)say(e,m);}
-function rmClose(silent){if(rmWs){rmWs.onclose=null;rmWs.close();rmWs=null;}rmCtx=null;
+function rmClose(silent){if(rmWs){rmWs.onclose=null;rmWs.close();rmWs=null;}rmCtx=null;rmCloseDec();
   const c=document.getElementById('rm_canvas');if(c)c.classList.add('d-none');if(!silent)rmSay(' disconnected');}
+let rmDec=null;   // WebCodecs VideoDecoder while the agent streams H.264
+function rmCloseDec(){if(rmDec){try{rmDec.close();}catch(e){}rmDec=null;}}
 function rmConnect(){
   rmClose(true);
   const host=document.getElementById('rm_host').value.trim();if(!host){rmSay(' ✗ enter a hostname');return;}
   const q=+document.getElementById('rm_q').value;
-  const ws=new WebSocket(`${rmProto()}//${location.host}/api/vnc/view?host=${encodeURIComponent(host)}&q=${q}`);
+  // Ask for H.264 when the browser can decode it (Chrome/Edge): smooth, catches full-screen games well. The agent
+  // falls back to JPEG (and says so with a codec message) if it cannot encode.
+  const h264='VideoDecoder'in window;
+  const ws=new WebSocket(`${rmProto()}//${location.host}/api/vnc/view?host=${encodeURIComponent(host)}&q=${q}${h264?'&codec=h264':''}`);
   ws.binaryType='arraybuffer';rmWs=ws;rmSay(' connecting…');
   const canvas=document.getElementById('rm_canvas');
+  const ack=()=>{if(rmWs===ws&&ws.readyState===1)ws.send('{"op":"ack"}');};
   ws.onopen=()=>{rmSay(' connected');canvas.classList.remove('d-none');canvas.focus();};
-  ws.onclose=()=>{if(rmWs===ws){rmWs=null;rmSay(' ✗ connection closed (agent gone or another viewer took over)');canvas.classList.add('d-none');}};
+  ws.onclose=()=>{if(rmWs===ws){rmWs=null;rmCloseDec();rmSay(' ✗ connection closed (agent gone or another viewer took over)');canvas.classList.add('d-none');}};
   ws.onerror=()=>rmSay(' ✗ could not connect (no agent for that host?)');
   ws.onmessage=ev=>{
     const b=new Uint8Array(ev.data);
     if(b[0]===2){rmW=b[1]|b[2]<<8;rmH=b[3]|b[4]<<8;canvas.width=rmW;canvas.height=rmH;rmCtx=canvas.getContext('2d');return;}
+    if(b[0]===4){ // codec decision: 0 JPEG, 1 H.264
+      rmCloseDec();
+      if(b[1]===1){rmDec=new VideoDecoder({
+        output:f=>{if(rmCtx)rmCtx.drawImage(f,0,0);f.close();ack();},
+        error:e=>{rmSay(' ✗ decode error: '+e.message);rmCloseDec();}});
+        rmDec.configure({codec:'avc1.42E01E',optimizeForLatency:true});}
+      return;}
+    if(b[0]===3&&rmDec){ // H.264 access unit, b[1] bit0 = keyframe
+      try{rmDec.decode(new EncodedVideoChunk({type:(b[1]&1)?'key':'delta',timestamp:performance.now()*1000,data:b.subarray(2)}));}
+      catch(e){ack();}
+      return;}
     if(b[0]===1&&rmCtx){
       const x=b[1]|b[2]<<8,y=b[3]|b[4]<<8;
       createImageBitmap(new Blob([b.subarray(9)],{type:'image/jpeg'})).then(bm=>{
-        if(rmCtx)rmCtx.drawImage(bm,x,y);bm.close();
-        if(rmWs===ws&&ws.readyState===1)ws.send('{"op":"ack"}');
-      }).catch(()=>{if(rmWs===ws&&ws.readyState===1)ws.send('{"op":"ack"}');});
+        if(rmCtx)rmCtx.drawImage(bm,x,y);bm.close();ack();
+      }).catch(ack);
     }
   };
   // Mouse: canvas pixels -> screen pixels (canvas is scaled by CSS). b = button bitmask.
@@ -756,7 +790,14 @@ function showRes(d){lastRes=d;
       +(n.virtual?` — virtual card (${n.virtual})`:''))}
     ${row('Disk busy',k.busy,k.dev?`${k.dev}: read ${rate(k.read)}, write ${rate(k.write)}`:'images on a filesystem without a block device')}
     ${row('Disk space',s.pct,s.total?`${gbs(s.used)} used of ${gbs(s.total)} (image storage)`:'image storage: unknown')}
+    ${k.health?`<tr><td>Disk health</td><td class="mono ${srvDiskBad(k.health)?'text-danger':''}">${esc(srvDiskHealth(k.health))}</td><td></td></tr>`:''}
   </tbody></table>`;}
+const srvDiskBad=h=>/fail/i.test(h.status)||(h.realloc||0)>0||(h.pending||0)>0;
+function srvDiskHealth(h){const p=[];
+  p.push(h.status||'SMART: no overall result');
+  if(h.temp!=null)p.push(h.temp+'°C');
+  if(h.realloc!=null||h.pending!=null)p.push('bad sectors '+(h.realloc||0)+' reallocated / '+(h.pending||0)+' pending');
+  return p.join(' · ');}
 const benchDone=()=>{if(curPage==='benchmark')loadBench();};
 async function benchServer(){const el=document.getElementById('bench_msg');
   try{await j('/api/bench/server',{method:'POST'});watchJob('bench:server',el,benchDone);}catch(e){say(el,' ✗ '+e.message);}}

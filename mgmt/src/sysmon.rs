@@ -219,6 +219,204 @@ fn disk_stat(path: &Path) -> Option<DiskStat> {
     })
 }
 
+/// SMART health of the server's image disk, read with a kernel ioctl (no smartctl / external tool): the NVMe
+/// SMART/health log page, or ATA SMART over SG_IO for SATA. best-effort — None on a RAID / virtual disk / anything it
+/// can't reach. The server runs as root, which the ioctls need.
+#[derive(Clone, serde::Serialize)]
+struct DiskHealth {
+    /// "OK" / "WARNING" / "FAILING".
+    status: String,
+    temp: Option<i32>,
+    realloc: Option<u64>,
+    pending: Option<u64>,
+}
+
+/// Partition name -> its whole disk (nvme0n1p2 -> nvme0n1, sda2 -> sda).
+fn whole_disk(part: &str) -> String {
+    if let Some(i) = part.find('p').filter(|_| part.starts_with("nvme")) {
+        // nvme0n1p2: the 'p' before the partition number.
+        if part[i + 1..].chars().all(|c| c.is_ascii_digit()) {
+            return part[..i].to_string();
+        }
+    }
+    part.trim_end_matches(|c: char| c.is_ascii_digit())
+        .to_string()
+}
+
+type HealthCache = parking_lot::Mutex<Option<(Instant, String, Option<DiskHealth>)>>;
+
+/// SMART of the image disk, cached (read at most once a minute: a SMART command is slow and never changes fast).
+fn disk_health(part: &str) -> Option<DiskHealth> {
+    static CACHE: LazyLock<HealthCache> = LazyLock::new(|| parking_lot::Mutex::new(None));
+    let disk = whole_disk(part);
+    {
+        let g = CACHE.lock();
+        if let Some((at, d, h)) = g.as_ref()
+            && d == &disk
+            && at.elapsed() < std::time::Duration::from_secs(60)
+        {
+            return h.clone();
+        }
+    }
+    let health = if disk.starts_with("nvme") {
+        nvme_health(&disk)
+    } else {
+        sata_health(&disk)
+    };
+    *CACHE.lock() = Some((Instant::now(), disk, health.clone()));
+    health
+}
+
+/// Open /dev/<disk> read-only for an ioctl.
+fn open_disk(disk: &str) -> Option<std::fs::File> {
+    std::fs::OpenOptions::new()
+        .read(true)
+        .open(format!("/dev/{disk}"))
+        .ok()
+}
+
+/// NVMe SMART/health log page (log id 0x02) via NVME_IOCTL_ADMIN_CMD on the controller (/dev/nvmeN).
+fn nvme_health(disk: &str) -> Option<DiskHealth> {
+    use std::os::fd::AsRawFd;
+    // nvme0n1 -> nvme0 (the controller char device the admin ioctl wants): "nvme" + the controller digits before "n".
+    let num: String = disk
+        .strip_prefix("nvme")?
+        .chars()
+        .take_while(|c| c.is_ascii_digit())
+        .collect();
+    let f = open_disk(&format!("nvme{num}"))?;
+
+    #[repr(C)]
+    #[derive(Default)]
+    struct AdminCmd {
+        opcode: u8,
+        flags: u8,
+        rsvd1: u16,
+        nsid: u32,
+        cdw2: u32,
+        cdw3: u32,
+        metadata: u64,
+        addr: u64,
+        metadata_len: u32,
+        data_len: u32,
+        cdw10: u32,
+        cdw11: u32,
+        cdw12: u32,
+        cdw13: u32,
+        cdw14: u32,
+        cdw15: u32,
+        timeout_ms: u32,
+        result: u32,
+    }
+    const NVME_ADMIN: libc::c_ulong = 0xC048_4E41; // _IOWR('N', 0x41, nvme_admin_cmd) — 72-byte struct
+    let mut buf = [0u8; 512];
+    let mut cmd = AdminCmd {
+        opcode: 0x02,      // Get Log Page
+        nsid: 0xffff_ffff, // whole controller
+        addr: buf.as_mut_ptr() as u64,
+        data_len: 512,
+        cdw10: (127 << 16) | 0x02, // (dwords-1) << 16 | log id 0x02 (SMART/Health)
+        ..Default::default()
+    };
+    // SAFETY: cmd.addr points at buf (512 bytes, data_len); f is a valid fd. The ioctl fills buf.
+    if unsafe { libc::ioctl(f.as_raw_fd(), NVME_ADMIN, &mut cmd) } != 0 {
+        return None;
+    }
+    let crit = buf[0];
+    let kelvin = u16::from_le_bytes([buf[1], buf[2]]) as i32;
+    let media_errors = u64::from_le_bytes(buf[160..168].try_into().ok()?);
+    Some(DiskHealth {
+        status: if crit == 0 { "OK" } else { "WARNING" }.to_string(),
+        temp: (kelvin > 0).then_some(kelvin - 273),
+        realloc: None,
+        pending: (media_errors > 0).then_some(media_errors),
+    })
+}
+
+/// ATA SMART READ DATA (0xB0 / feature 0xD0) over SG_IO ATA PASS-THROUGH(16) for a SATA/SAS disk; parse attributes
+/// 5 (reallocated), 197 (pending), 194 (temperature).
+fn sata_health(disk: &str) -> Option<DiskHealth> {
+    use std::os::fd::AsRawFd;
+    let f = open_disk(disk)?;
+
+    #[repr(C)]
+    struct SgIoHdr {
+        interface_id: i32,
+        dxfer_direction: i32,
+        cmd_len: u8,
+        mx_sb_len: u8,
+        iovec_count: u16,
+        dxfer_len: u32,
+        dxferp: u64,
+        cmdp: u64,
+        sbp: u64,
+        timeout: u32,
+        flags: u32,
+        pack_id: i32,
+        usr_ptr: u64,
+        status: u8,
+        masked_status: u8,
+        msg_status: u8,
+        sb_len_wr: u8,
+        host_status: u16,
+        driver_status: u16,
+        resid: i32,
+        duration: u32,
+        info: u32,
+    }
+    const SG_IO: libc::c_ulong = 0x2285;
+    let mut data = [0u8; 512];
+    let mut sense = [0u8; 32];
+    // ATA PASS-THROUGH(16): PIO data-in, 1 sector from the device; READ SMART DATA at LBA mid/high 0x4F/0xC2.
+    let cdb: [u8; 16] = [
+        0x85, 0x08, 0x0e, 0x00, 0xd0, 0x00, 0x01, 0x00, 0x00, 0x00, 0x4f, 0x00, 0xc2, 0x00, 0xb0,
+        0x00,
+    ];
+    let mut h: SgIoHdr = unsafe { std::mem::zeroed() };
+    h.interface_id = b'S' as i32;
+    h.dxfer_direction = -3; // SG_DXFER_FROM_DEV
+    h.cmd_len = 16;
+    h.mx_sb_len = sense.len() as u8;
+    h.dxfer_len = 512;
+    h.dxferp = data.as_mut_ptr() as u64;
+    h.cmdp = cdb.as_ptr() as u64;
+    h.sbp = sense.as_mut_ptr() as u64;
+    h.timeout = 5000;
+    // SAFETY: the pointers in h stay valid for the call; f is a valid fd. The ioctl fills `data`.
+    if unsafe { libc::ioctl(f.as_raw_fd(), SG_IO, &mut h) } != 0 || h.host_status != 0 {
+        return None;
+    }
+    let (realloc, pending, temp) = parse_ata_smart(&data);
+    // No overall-health command here: derive it from the bad-sector counts (a surface scan is not done).
+    let bad = realloc.unwrap_or(0) > 0 || pending.unwrap_or(0) > 0;
+    Some(DiskHealth {
+        status: if bad { "WARNING" } else { "OK" }.to_string(),
+        temp,
+        realloc,
+        pending,
+    })
+}
+
+/// A 512-byte ATA SMART data block → (reallocated, pending, temperature °C). Attribute table from offset 2, each
+/// entry 12 bytes (id, flags[2], value, worst, raw[6]); raw is little-endian.
+fn parse_ata_smart(data: &[u8; 512]) -> (Option<u64>, Option<u64>, Option<i32>) {
+    let raw32 = |i: usize| -> u64 {
+        u32::from_le_bytes([data[i + 5], data[i + 6], data[i + 7], data[i + 8]]) as u64
+    };
+    let (mut realloc, mut pending, mut temp) = (None, None, None);
+    let mut i = 2;
+    while i + 12 <= 362 {
+        match data[i] {
+            5 => realloc = Some(raw32(i)),
+            197 => pending = Some(raw32(i)),
+            194 => temp = Some(data[i + 5] as i32),
+            _ => {}
+        }
+        i += 12;
+    }
+    (realloc, pending, temp)
+}
+
 /// (used, total) bytes of the filesystem holding `path`, counted like `df` (used + available = what can be used).
 fn space(path: &Path) -> Option<(u64, u64)> {
     use std::os::unix::ffi::OsStrExt;
@@ -326,6 +524,7 @@ pub async fn run(st: SharedState) {
             _ => (None, 0.0, 0.0),
         };
         let dev = disk.as_ref().map(|d| d.name.clone());
+        let health = dev.as_deref().and_then(disk_health);
         io0 = disk;
         let sp = space(&images);
         let used = sp.map(|(u, t)| 100.0 * u as f64 / t.max(1) as f64);
@@ -362,7 +561,7 @@ pub async fn run(st: SharedState) {
             "cpu": {"pct": cpu, "cores": cores, "load": load},
             "ram": {"pct": ram, "used": ram_used, "total": mt, "cache": cache},
             "net": {"iface": iface, "rx": rx, "tx": tx, "link": link, "pct": net_pct, "virtual": virt},
-            "disk": {"dev": dev, "busy": busy, "read": rd, "write": wr},
+            "disk": {"dev": dev, "busy": busy, "read": rd, "write": wr, "health": health},
             "space": {"pct": used, "used": sp.map(|s| s.0), "total": sp.map(|s| s.1)},
             "limit": limit, "alerts": shown,
         })

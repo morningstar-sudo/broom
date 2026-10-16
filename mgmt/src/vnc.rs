@@ -181,8 +181,10 @@ async fn run_agent(ws: WebSocket, mac: String, host: String) {
                 Message::Binary(_) => {
                     to_viewer(&mac, id, m);
                 }
+                // The agent also pushes hardware health here (metrics.rs), not for the viewer.
+                Message::Text(t) if t.contains("\"metrics\"") => crate::metrics::store(&mac, &t),
                 Message::Close(_) => break,
-                _ => {} // pong / text: nothing to do
+                _ => {} // pong / other text
             }
         }
     };
@@ -203,6 +205,9 @@ struct ViewQuery {
     /// Scale the screen down to this width (the wall's thumbnails); 0 / absent = full size.
     #[serde(default)]
     w: Option<u16>,
+    /// "h264" asks the agent for H.264 (the agent falls back to JPEG if it can't); absent / anything else = JPEG.
+    #[serde(default)]
+    codec: Option<String>,
 }
 
 /// The browser's Origin names this server (a WebSocket is not covered by the same-origin policy: a page elsewhere
@@ -235,13 +240,17 @@ async fn view(
         )
             .into_response();
     };
-    let quality = q.q.unwrap_or(60).clamp(20, 95);
-    let width = q.w.unwrap_or(0);
-    ws.on_upgrade(move |s| run_view(s, mac, host, to_agent, quality, width, peer))
+    let start = start_msg(
+        q.q.unwrap_or(60).clamp(20, 95),
+        q.w.unwrap_or(0),
+        q.codec.as_deref() == Some("h264"),
+    );
+    ws.on_upgrade(move |s| run_view(s, mac, host, to_agent, start, peer))
 }
 
-fn start_msg(q: u8, w: u16) -> Message {
-    Message::Text(format!("{{\"op\":\"start\",\"q\":{q},\"w\":{w}}}").into())
+fn start_msg(q: u8, w: u16, h264: bool) -> Message {
+    let codec = if h264 { "h264" } else { "jpeg" };
+    Message::Text(format!("{{\"op\":\"start\",\"q\":{q},\"w\":{w},\"codec\":\"{codec}\"}}").into())
 }
 
 async fn run_view(
@@ -249,13 +258,12 @@ async fn run_view(
     mac: String,
     host: String,
     to_agent: mpsc::Sender<Message>,
-    quality: u8,
-    width: u16,
+    start: Message,
     peer: SocketAddr,
 ) {
     let (vq, mut queue) = mpsc::channel::<Message>(QUEUE);
     let vid = NEXT.fetch_add(1, Ordering::Relaxed);
-    if !attach(&mac, vid, vq) || to_agent.send(start_msg(quality, width)).await.is_err() {
+    if !attach(&mac, vid, vq) || to_agent.send(start).await.is_err() {
         return;
     }
     tracing::info!("remote: {host} opened from {}", peer.ip());

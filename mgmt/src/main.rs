@@ -24,6 +24,7 @@ mod iscsid;
 mod license;
 mod linuxfs;
 mod machines;
+mod metrics;
 mod monitor;
 mod ntfsread;
 mod overlay;
@@ -356,6 +357,7 @@ impl AppState {
         drop((seen, ips));
         self.not_reset.lock().remove(mac);
         self.ssd_low.lock().remove(mac);
+        metrics::forget(mac);
     }
 
     /// Record an image job status + push it to open web tabs.

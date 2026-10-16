@@ -40,6 +40,9 @@ struct MachineStatus {
     ssd_low: Option<(u64, u64)>,
     /// Its remote agent is connected (Remote page).
     remote: bool,
+    /// Hardware health the agent last reported (metrics.rs); None = no recent reading.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    metrics: Option<crate::metrics::Metrics>,
 }
 
 /// Machines = registered (machines table) + discovered via DHCP (leases table, dhcp.rs) or a PXE boot (pxe_ip).
@@ -148,6 +151,7 @@ async fn status(State(st): State<SharedState>) -> Json<Vec<MachineStatus>> {
                 not_reset: not_reset.get(&mac).copied(),
                 ssd_low: ssd_low.get(&mac).copied(),
                 remote: crate::vnc::connected(&mac),
+                metrics: crate::metrics::get(&mac),
                 mac,
                 ip,
                 hostname,

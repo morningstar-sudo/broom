@@ -251,9 +251,14 @@ live screen per machine running the agent — and clicking one controls that mac
 click the screen first so keys go to the machine. Toolbar buttons send **Ctrl+Alt+Del**, the **Windows key** and
 **Alt+Tab** (the browser only lets your own keyboard send those in full screen); **Paste** puts your clipboard on the
 machine and pastes it.
+The agent also reports the machine's **health** (CPU %, RAM %, temperatures, and each disk's SMART status, temperature
+and bad-sector counts) — shown on the Machines page and in a machine's detail. Temperatures come from ACPI thermal
+zones (no kernel driver, so unlabeled and best-effort — some boards report none); disk health and bad sectors come
+from SMART (no surface scan). The server reads its own disk's SMART the same built-in way (shown on the Benchmark page).
 Lower the quality on a busy network. The screen is captured with Desktop Duplication, so full-screen games show too;
-it falls back to GDI for the UAC / lock screen. The agent accepts only the server's connection and is served like the
-other Windows scripts, so it reaches every machine without a publish.
+it falls back to GDI for the UAC / lock screen. On Chrome / Edge the single-machine view streams **H.264** (smooth, near
+RDP); it falls back to JPEG on other browsers or if the machine can't encode. The agent accepts only the server's
+connection and is served like the other Windows scripts, so it reaches every machine without a publish.
 
 That same agent connection is the machine's presence signal: a machine with the agent connected shows **online**
 without a ping (the agent reopens the connection within 5 s of every boot). Machines without the agent — Linux clients,
