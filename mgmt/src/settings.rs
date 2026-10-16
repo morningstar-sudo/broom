@@ -251,9 +251,55 @@ async fn set_zram_reserve(
 }
 
 /// Current DHCP config (mode, parameters, optional behaviours) for the web to display.
+/// (addresses in the pool, machines/devices that need one from it): registered machines without a fixed IP, plus the
+/// other MACs holding a live lease. A room of 100 PCs does not fit the default .100–.200 with the router and phones.
+pub(crate) fn pool_need(
+    start: std::net::Ipv4Addr,
+    end: std::net::Ipv4Addr,
+    machines: &[crate::db::Machine],
+    leases: &[crate::db::Lease],
+    now: i64,
+) -> (u32, usize) {
+    let pool = u32::from(end)
+        .checked_sub(u32::from(start))
+        .map_or(0, |d| d + 1);
+    let registered: std::collections::HashSet<String> =
+        machines.iter().map(|m| m.mac.to_lowercase()).collect();
+    let dynamic = machines
+        .iter()
+        .filter(|m| m.ip.as_deref().is_none_or(|ip| ip.trim().is_empty()))
+        .count();
+    let others = leases
+        .iter()
+        .filter(|l| {
+            l.expires > now
+                && !l.mac.starts_with("declined-")
+                && !registered.contains(&l.mac.to_lowercase())
+        })
+        .count();
+    (pool, dynamic + others)
+}
+
 async fn get_dhcp(State(st): State<SharedState>) -> Json<serde_json::Value> {
     let g = |k: &str, d: &str| st.db.get_config(k, d);
+    let (pool_size, pool_need) = match dhcp::Cfg::load(&*st.db) {
+        Ok(c) => {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_secs() as i64);
+            pool_need(
+                c.start,
+                c.end,
+                &st.db.machines().unwrap_or_default(),
+                &st.db.leases().unwrap_or_default(),
+                now,
+            )
+        }
+        Err(_) => (0, 0),
+    };
     Json(serde_json::json!({
+        "pool_size": pool_size,
+        "pool_need": pool_need,
         "mode": g("dhcp_mode", "off"),
         "iface": g("dhcp_iface", ""),
         "server_ip": g("dhcp_server_ip", ""),

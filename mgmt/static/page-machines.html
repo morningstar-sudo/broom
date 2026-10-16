@@ -25,6 +25,10 @@
       <button class="btn btn-sm btn-outline-secondary" data-click="mPrev"><svg class="ic" aria-hidden="true"><use href="/icons.svg#prev"/></svg> Prev</button>
       <span id="m_page" class="msg"></span>
       <button class="btn btn-sm btn-outline-secondary" data-click="mNext">Next <svg class="ic" aria-hidden="true"><use href="/icons.svg#next"/></svg></button>
+      <label class="visually-hidden" for="m_psize">Rows per page</label>
+      <select class="form-select form-select-sm w-auto" id="m_psize" data-change="mPageSize" title="Rows per page">
+        <option value="15">15 / page</option><option value="50">50 / page</option><option value="100">100 / page</option><option value="0">All</option>
+      </select>
     </div>
   </div>
 </section>

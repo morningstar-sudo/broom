@@ -11,6 +11,20 @@
       <input class="form-control form-control-sm w-auto" id="rm_go" list="rm_hosts" placeholder="hostname" size="14" autocomplete="off">
       <button class="btn btn-sm btn-primary" data-click="rmGo">Open</button>
     </div>
+    <!-- Only the screens of the page shown are streamed (and decoded): the others cost nothing, here or on the PCs. -->
+    <div class="d-flex flex-wrap gap-2 align-items-center mb-3">
+      <label class="small text-body-secondary" for="rm_wgrp">Group</label>
+      <select class="form-select form-select-sm w-auto" id="rm_wgrp" data-change="rmWallFilter"><option value="">All</option></select>
+      <label class="small text-body-secondary ms-2" for="rm_wsize">Screens per page</label>
+      <select class="form-select form-select-sm w-auto" id="rm_wsize" data-change="rmWallSize">
+        <option>6</option><option selected>12</option><option>24</option><option>48</option><option value="custom">Custom…</option>
+      </select>
+      <input class="form-control form-control-sm d-none" id="rm_wsize_n" type="number" min="1" max="200" style="width:80px" data-change="rmWallSize" aria-label="Screens per page">
+      <span class="flex-grow-1"></span>
+      <button class="btn btn-sm btn-outline-secondary" data-click="rmWallPrev" aria-label="Previous page"><svg class="ic" aria-hidden="true"><use href="/icons.svg#prev"/></svg></button>
+      <span id="rm_wpage" class="mono small"></span>
+      <button class="btn btn-sm btn-outline-secondary" data-click="rmWallNext" aria-label="Next page"><svg class="ic" aria-hidden="true"><use href="/icons.svg#next"/></svg></button>
+    </div>
     <div id="rm_wall" class="d-flex flex-wrap gap-3"></div>
     <div id="rm_wall_empty" class="mono small text-body-secondary d-none">no machine is running the remote agent yet</div>
   </div>

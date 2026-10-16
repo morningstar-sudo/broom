@@ -64,7 +64,12 @@ document.querySelectorAll('nav details[data-group]').forEach(d=>{
 });
 
 // ---- machines (filter + client-side paging) ----
-let allMachines=[], mPage=1; const M_PAGE=15;
+let allMachines=[], mPage=1;
+// Rows per page (Machines): 15 / 50 / 100 / all (0 → Infinity), remembered in this browser.
+let M_PAGE=15;
+try{const s=localStorage.getItem('m_psize');if(s!==null)M_PAGE=+s||Infinity;}catch(e){}
+function mPageSize(){const n=+document.getElementById('m_psize').value;M_PAGE=n||Infinity;
+  try{localStorage.setItem('m_psize',String(n));}catch(e){}mPage=1;renderMachines();}
 async function loadStatus(){
   allMachines=await j('/api/status');
   const online=allMachines.filter(m=>m.online).length;
@@ -103,6 +108,7 @@ function renderMachines(){
      </tr>`).join('') || '<tr><td colspan=7 class="mono">no matching machines</td></tr>';
   document.getElementById('m_count').textContent=rows.length+' machines';
   document.getElementById('m_page').textContent='Page '+mPage+'/'+pages;
+  const ps=document.getElementById('m_psize');if(ps)ps.value=M_PAGE===Infinity?'0':String(M_PAGE);
 }
 function mPrev(){if(mPage>1){mPage--;renderMachines();}}
 function mNext(){const pages=Math.max(1,Math.ceil(filteredMachines().length/M_PAGE));if(mPage<pages){mPage++;renderMachines();}}
@@ -466,6 +472,12 @@ async function loadDhcp(){const c=await j('/api/dhcp');
   ['mode','iface','server_ip','subnet','netmask','range_start','range_end','gateway'].forEach(k=>{const e=document.getElementById('dhcp_'+k);if(e)e.value=c[k]||'';});
   for(const k of ['ipxe_signed','strict_reset','rapid_commit','ipxe_fast','authoritative','send_hostname']){const e=document.getElementById('dhcp_'+k);if(e)e.checked=!!c[k];}
   setDns(c.dns);
+  // Pool vs the machines that need an address from it (registered without a fixed IP + other devices with a lease).
+  const pl=document.getElementById('dhcp_pool');
+  if(pl){const tight=c.pool_need>c.pool_size*0.9;
+    pl.className='small mt-2'+(tight?' alert alert-warning py-1 px-2 mb-0':' text-body-secondary');
+    pl.textContent=`Pool: ${c.pool_size} addresses, ${c.pool_need} machines/devices need one from it.`
+      +(tight?' Too tight: widen the range, or give machines a fixed IP (Devices).':'');}
   const dm=document.getElementById('dhcp_mode');if(dm)dm.onchange=toggleFull;toggleFull();}
 function toggleFull(){const dm=document.getElementById('dhcp_mode');if(!dm)return;
   for(const id of ['full_only','full_only_opts']){const e=document.getElementById(id);if(e)e.style.display=dm.value==='full'?'':'none';}}
@@ -587,44 +599,88 @@ async function setZramReserve(){await j('/api/config/zram-reserve',mk({mb:+docum
 let rmWs=null, rmCtx=null, rmW=0, rmH=0;
 const rmProto=()=>location.protocol==='https:'?'wss:':'ws:';
 async function loadRemote(){
-  let hosts=[];
-  try{hosts=await j('/api/vnc/agents');}catch(e){}
-  document.getElementById('rm_hosts').innerHTML=hosts.map(h=>`<option value="${esc(h)}">`).join('');
+  try{rmAgents=await j('/api/vnc/agents');}catch(e){rmAgents=[];}
+  document.getElementById('rm_hosts').innerHTML=rmAgents.map(a=>`<option value="${esc(a.host)}">`).join('');
+  // Group filter: the groups of the machines with an agent (the choice is kept when still there).
+  const gs=document.getElementById('rm_wgrp'),cur=gs.value||rmWallGrp;
+  const groups=[...new Set(rmAgents.map(a=>a.grp).filter(Boolean))].sort();
+  gs.innerHTML='<option value="">All</option>'+groups.map(g=>`<option value="${esc(g)}">${esc(g)}</option>`).join('');
+  gs.value=groups.includes(cur)?cur:'';rmWallGrp=gs.value;
+  rmWallSizeInit();
   const q=new URLSearchParams(location.search).get('host');
-  if(q){openOne(q);}else{showWall(hosts);}
+  if(q){openOne(q);}else{showWall();}
 }
-// Wall: a low-rate thumbnail of every machine running the agent; click one to control it.
-let rmWall=[];
-function closeWall(){for(const w of rmWall){w.onclose=null;w.close();}rmWall=[];}
-function showWall(hosts){
+// Wall: a low-rate thumbnail of every machine running the agent, page by page; click one to control it. Only the
+// screens of the page shown are streamed: leaving a page closes its sockets, so those agents stop capturing and the
+// browser decodes nothing for them. A hidden tab streams nothing either.
+let rmAgents=[], rmWall=[], rmWallPg=1, rmWallGrp='', rmWallN=12, rmWallGen=0;
+function closeWall(){rmWallGen++;for(const w of rmWall){w.onclose=null;w.onerror=null;w.close();}rmWall=[];}
+const rmWallList=()=>rmAgents.filter(a=>!rmWallGrp||a.grp===rmWallGrp);
+function rmWallSizeInit(){
+  let n=12;try{n=+localStorage.getItem('rm_wall_n')||12;}catch(e){}
+  rmWallN=Math.min(200,Math.max(1,n));
+  const sel=document.getElementById('rm_wsize'),inp=document.getElementById('rm_wsize_n');
+  const preset=[...sel.options].some(o=>o.value===String(rmWallN));
+  sel.value=preset?String(rmWallN):'custom';inp.value=rmWallN;inp.classList.toggle('d-none',preset);
+}
+function rmWallSize(){
+  const sel=document.getElementById('rm_wsize'),inp=document.getElementById('rm_wsize_n');
+  const custom=sel.value==='custom';inp.classList.toggle('d-none',!custom);
+  const n=Math.min(200,Math.max(1,Math.round(+(custom?inp.value:sel.value)||12)));
+  if(custom)inp.value=n;
+  rmWallN=n;try{localStorage.setItem('rm_wall_n',String(n));}catch(e){}
+  rmWallPg=1;showWall();
+}
+function rmWallFilter(){rmWallGrp=document.getElementById('rm_wgrp').value;rmWallPg=1;showWall();}
+function rmWallPrev(){if(rmWallPg>1){rmWallPg--;showWall();}}
+function rmWallNext(){if(rmWallPg<Math.ceil(rmWallList().length/rmWallN)){rmWallPg++;showWall();}}
+function showWall(){
   closeWall();rmClose(true);
   document.getElementById('rm_one').classList.add('d-none');
   document.getElementById('rm_wall_box').classList.remove('d-none');
-  document.getElementById('rm_wall_n').textContent=hosts.length?'('+hosts.length+')':'';
-  document.getElementById('rm_wall_empty').classList.toggle('d-none',hosts.length>0);
+  const list=rmWallList(),pages=Math.max(1,Math.ceil(list.length/rmWallN));
+  if(rmWallPg>pages)rmWallPg=pages;
+  const first=(rmWallPg-1)*rmWallN,page=list.slice(first,first+rmWallN);
+  document.getElementById('rm_wall_n').textContent=rmAgents.length?'('+rmAgents.length+')':'';
+  document.getElementById('rm_wall_empty').classList.toggle('d-none',rmAgents.length>0);
+  document.getElementById('rm_wpage').textContent=list.length?`${first+1}–${first+page.length} of ${list.length}`:'0';
   const grid=document.getElementById('rm_wall');grid.innerHTML='';
-  for(const h of hosts){
-    const fig=document.createElement('figure');fig.className='m-0 text-center';fig.style.cursor='pointer';
-    fig.title='Control '+h;fig.onclick=()=>remoteTo(h);
+  if(document.hidden)return;   // nothing streams in a hidden tab; shown again → visibilitychange redraws
+  const gen=rmWallGen;
+  for(const a of page){
+    const fig=document.createElement('figure');fig.className='m-0 text-center position-relative';fig.style.cursor='pointer';
+    fig.title='Control '+a.host;fig.onclick=()=>remoteTo(a.host);
     const cv=document.createElement('canvas');cv.width=320;cv.height=180;
-    cv.className='border rounded';cv.style.width='320px';cv.style.height='auto';cv.style.background='#111';
-    const cap=document.createElement('figcaption');cap.className='small mono mt-1';cap.textContent=h;
-    fig.appendChild(cv);fig.appendChild(cap);grid.appendChild(fig);
-    wallTile(h,cv);
+    cv.className='border rounded';cv.style.width='320px';cv.style.maxWidth='100%';cv.style.height='auto';cv.style.background='#111';
+    const note=document.createElement('div');note.className='position-absolute top-50 start-50 translate-middle small text-white d-none';
+    note.textContent='in use';
+    const cap=document.createElement('figcaption');cap.className='small mono mt-1';cap.textContent=a.host;
+    fig.append(cv,note,cap);grid.appendChild(fig);
+    if(a.busy)wallBusy(a.host,cv,note,gen);else wallTile(a.host,cv,note,gen);
   }
 }
+// Someone controls this machine (or it refused the thumbnail): say so, try again in 15 s while this page is shown.
+function wallBusy(host,cv,note,gen){note.classList.remove('d-none');
+  setTimeout(()=>{if(gen===rmWallGen&&!document.hidden){note.classList.add('d-none');wallTile(host,cv,note,gen);}},15000);}
 // One thumbnail stream: low quality, scaled to 320px wide, acked slowly so it refreshes ~1/s.
-function wallTile(host,cv){
+function wallTile(host,cv,note,gen){
   const ws=new WebSocket(`${rmProto()}//${location.host}/api/vnc/view?host=${encodeURIComponent(host)}&q=35&w=320`);
   ws.binaryType='arraybuffer';rmWall.push(ws);
-  let ctx=null,tw=0,th=0;
+  let ctx=null;
   ws.onmessage=ev=>{const b=new Uint8Array(ev.data);
-    if(b[0]===2){tw=b[1]|b[2]<<8;th=b[3]|b[4]<<8;cv.width=tw;cv.height=th;ctx=cv.getContext('2d');return;}
+    if(b[0]===2){cv.width=b[1]|b[2]<<8;cv.height=b[3]|b[4]<<8;ctx=cv.getContext('2d');return;}
     if(b[0]===1&&ctx){const x=b[1]|b[2]<<8,y=b[3]|b[4]<<8;
       createImageBitmap(new Blob([b.subarray(9)],{type:'image/jpeg'})).then(bm=>{ctx.drawImage(bm,x,y);bm.close();
         setTimeout(()=>{if(ws.readyState===1)ws.send('{"op":"ack"}');},1000);}).catch(()=>{});}};
+  // Refused (in use) or taken over by a control view: still on this page → "in use" and retry.
+  ws.onclose=()=>{rmWall=rmWall.filter(x=>x!==ws);if(gen===rmWallGen)wallBusy(host,cv,note,gen);};
   ws.onerror=()=>{};
 }
+// Hidden tab: close the wall's streams; shown again: reopen the current page.
+document.addEventListener('visibilitychange',()=>{
+  if(curPage!=='remote'||document.getElementById('rm_wall_box')?.classList.contains('d-none'))return;
+  if(document.hidden)closeWall();else showWall();
+});
 // Machines page or a wall tile: open the Remote page controlling this host.
 function remoteTo(host){history.pushState(null,'','/remote?host='+encodeURIComponent(host||''));showPage('remote');}
 function openOne(host){
@@ -859,7 +915,7 @@ const ACTIONS={
   href(url){location.href=url;},
   mFilter(){mPage=1;renderMachines();},
   dvToggle:(k,el)=>dvToggle(k,el.checked), dvSelectAll:el=>dvSelectAll(el.checked),
-  wake,manage,regMachine,loadStatus,clearMFilters,mPrev,mNext,setKey,rearmKey,
+  wake,manage,regMachine,loadStatus,clearMFilters,mPrev,mNext,mPageSize,setKey,rearmKey,
   loadDevices,dvOpen,dvSave,dvDelete,dvClose,dvBulk,dvRegister,dvImport,dvAdd,dvRender,
   loadImages,addImage,setDefault,toggleCache,toggleBase,toggleSsd,togglePreload,editImgGroups,republish,showVersions,exportImage,editBoot,delImage,
   snapshotImage,rollbackImage,versionToImage,deleteVersion,
@@ -868,7 +924,7 @@ const ACTIONS={
   loadGroups,editGroup,closeGroup,saveGroup,createGroup,renameGroup,deleteGroup,
   loadServer,loadBench,loadBenchHist,benchServer,benchRequest:()=>benchAsk(false),benchCancel:()=>benchAsk(true),bSelAll,
   applyDhcp,savePw,saveCafe,setTimeout_,setZramReserve,setAlert,setSsd,gsMode,setGoldenStreams,logout,
-  remoteTo,rmGo,rmConnect,rmClose,rmBack,rmQuality,rmFull,rmSas,rmWin,rmAltTab,rmPaste,loadRemote,
+  remoteTo,rmGo,rmConnect,rmClose,rmBack,rmWallSize,rmWallFilter,rmWallPrev,rmWallNext,rmQuality,rmFull,rmSas,rmWin,rmAltTab,rmPaste,loadRemote,
 };
 
 let started=false;

@@ -6,7 +6,8 @@
 [![License](https://img.shields.io/github/license/morningstar-sudo/broom)](LICENSE)
 
 Network-boot a room of PCs from **one golden image** — every reboot comes up clean. One static Rust binary on any
-Linux server, DHCP / TFTP / iSCSI / web admin built in. For internet cafés, gaming centers and school labs (≈10–30 PCs).
+Linux server, DHCP / TFTP / iSCSI / web admin built in. For internet cafés, gaming centers and school labs — up to
+~100 PCs per server with the hardware in [*Sizing*](#sizing).
 
 - **Secure Boot on, no MOK** — every step of the network boot is signed through Microsoft's UEFI CA: no keys to
   enroll, no MokManager screen on any client. With TPM 2.0 + HVCI, **FACEIT Anti-Cheat works**.
@@ -89,6 +90,33 @@ What a Windows client loads on every boot, before Windows itself starts from its
   Gigabit LAN.
 - **Clients:** x86_64 UEFI PCs with network boot (PXE). Windows images need a local SSD; Linux images can also run
   without one (writes kept in RAM).
+
+## Sizing
+
+Nothing in Broom caps the number of machines. What grows with the room is the network traffic — a new golden going
+out to every PC after a publish, and the games disks' reads while people play (Windows itself runs from each PC's
+SSD) — so the server link, its disk and its RAM decide how big a room one server carries:
+
+| Room | Server link | Image / games disk | RAM | Notes |
+|---|---|---|---|---|
+| up to 30 PCs | 1 GbE | SSD | 16 GB | |
+| 30–60 PCs | 10 GbE | NVMe | 32 GB | the page cache keeps the games played most |
+| 60–100 PCs | 2× 10 GbE bonded (LACP) or 25 GbE | NVMe (PCIe 4) | 64 GB + | games disk in RAM (**Cache** on the Games page) if the RAM holds it |
+
+- **Bonding:** `802.3ad` with `xmit_hash_policy=layer3+4` on the server, LACP on the switch (one switch, or a stacked
+  / MLAG pair). One PC never gets more than one link's speed; a room of them spreads over both.
+- **Switches:** 1 GbE to the PCs is enough; give each access switch a 10 GbE uplink. Turn on **PortFast / edge port**
+  on the PC ports — classic spanning tree holds a port ~30 s each time its link comes up, which a PC does twice per
+  boot.
+- **Addresses:** the DHCP pool must hold every PC without a fixed IP plus the phones and laptops — the Network page
+  warns when it gets tight (the default `.100–.200` is 101 addresses). Or give the PCs fixed IPs (Devices).
+- **Publishing a new golden:** machines download it in turns (Windows → *Golden downloads at once*, Auto = the server
+  link over 1 Gbit/s: 20 at a time on 2× 10 GbE), each at its full speed. A 30 GB golden reaches 100 PCs in about half
+  an hour on 20 Gbit/s — publish outside opening hours.
+- **Remote:** the wall streams only the page of screens shown (choose how many per page), so a room of 100 costs no
+  more than the page you look at.
+- Watch the **Server** page while the room is busy (CPU, network, disk, and the alert banner at the threshold you set);
+  the **Benchmark** page measures the server disk and each PC's boot and read speed.
 
 ## Quick start (Linux server, as root)
 
@@ -281,7 +309,10 @@ before this version need **Publish** once to switch over.
 
 **Remote** (Monitor group, or the **Remote** button on the Machines page) shows a **wall** of thumbnails — one live
 screen per Windows machine — and clicking one takes it over in the browser, nothing to install on the admin's side.
-Type a hostname to go straight to a machine (`/remote?host=PC-01` works as a bookmark).
+Type a hostname to go straight to a machine (`/remote?host=PC-01` works as a bookmark). The wall goes page by page
+(screens per page: 6 / 12 / 24 / 48 or your own number; filter by group): only the page shown is streamed and
+decoded — the other machines do not even capture their screen — and a hidden browser tab streams nothing. A machine
+someone is controlling shows "in use" on the wall: a thumbnail never takes it away from them.
 
 - **Mouse, keyboard, scroll**: click the screen first so keys go to the machine (layout-independent: physical keys are
   sent). Toolbar: **Ctrl+Alt+Del**, the **Windows key** and **Alt+Tab** (the browser only lets your own keyboard send
@@ -447,10 +478,9 @@ and the server load low. Linux images can run with no disk at all (golden over i
 Any x86_64 Linux machine, run as root. Broom is a single static binary — nothing else to install.
 
 **How many machines?**
-Broom is built for small sites, about 10–30 machines per server. For bigger rooms the network is the limit: after a
-publish, machines download the new golden in turns, a few at a time at full speed (Windows → *Golden downloads at
-once*; Auto = the server's link speed over 1 Gbit/s), so they become usable one batch after the other. A larger room
-wants a 10 Gbit/s (or bonded) server link, an NVMe disk and plenty of RAM for the games; measure on the Benchmark page.
+Up to about 100 per server, given the server link, disk and RAM in [*Sizing*](#sizing): nothing in Broom caps the
+count, the network and the games disk's reads are the limits. Sites running it so far are small rooms — measure yours
+on the Server and Benchmark pages as you grow.
 
 **How are games handled?**
 Put game libraries on a games disk instead of the golden. Update them once from one machine; every machine gets the

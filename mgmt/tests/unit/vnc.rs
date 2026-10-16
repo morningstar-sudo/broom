@@ -15,7 +15,7 @@ fn text(m: Message) -> String {
 async fn agents_and_viewers() {
     let mac = "aa:bb:cc:00:00:01";
     let (ta, mut agent_q) = mpsc::channel(QUEUE);
-    let a1 = register(mac, "PC-01", ta);
+    let a1 = register(mac, "PC-01", None, ta);
     assert!(connected("AA:BB:CC:00:00:01"));
     let (fmac, host, to_agent) = find("pc-01").expect("found by hostname, any case");
     assert_eq!((fmac.as_str(), host.as_str()), (mac, "PC-01"));
@@ -26,7 +26,7 @@ async fn agents_and_viewers() {
     );
 
     let (v1, mut v1q) = mpsc::channel(QUEUE);
-    assert!(attach(mac, 10, v1));
+    assert_eq!(attach(mac, 10, v1, false), Attach::Ok);
     to_agent.send(start_msg(60, 0, false)).await.unwrap();
     assert_eq!(
         text(agent_q.recv().await.unwrap()),
@@ -41,7 +41,7 @@ async fn agents_and_viewers() {
 
     // A second viewer takes over: the first one's queue closes, detaching it does not stop the agent.
     let (v2, mut v2q) = mpsc::channel(QUEUE);
-    assert!(attach(mac, 11, v2));
+    assert_eq!(attach(mac, 11, v2, false), Attach::Ok);
     assert!(v1q.recv().await.is_none(), "replaced viewer closed");
     assert!(!detach(mac, 10), "old viewer: agent keeps streaming");
     assert!(to_viewer(mac, a1, Message::Binary(vec![3].into())));
@@ -49,7 +49,7 @@ async fn agents_and_viewers() {
 
     // The machine's agent reconnects: the old connection's updates go nowhere and its end leaves the new one listed.
     let (tb, _agent2_q) = mpsc::channel(QUEUE);
-    let a2 = register(mac, "PC-01", tb);
+    let a2 = register(mac, "PC-01", None, tb);
     assert!(
         v2q.recv().await.is_none(),
         "viewer of the old connection closed"
@@ -60,13 +60,68 @@ async fn agents_and_viewers() {
     assert!(!detach(mac, 11));
 
     let (v3, mut v3q) = mpsc::channel(QUEUE);
-    assert!(attach(mac, 12, v3));
+    assert_eq!(attach(mac, 12, v3, false), Attach::Ok);
     assert!(detach(mac, 12), "current viewer: the agent is told to stop");
-    attach(mac, 13, mpsc::channel(QUEUE).0);
+    attach(mac, 13, mpsc::channel(QUEUE).0, false);
     unregister(mac, a2);
     assert!(!connected(mac) && find("PC-01").is_none());
     assert!(v3q.recv().await.is_none());
-    assert!(!attach(mac, 14, mpsc::channel(QUEUE).0), "agent gone");
+    assert_eq!(
+        attach(mac, 14, mpsc::channel(QUEUE).0, false),
+        Attach::Gone,
+        "agent gone"
+    );
+}
+
+/// The wall never pushes out someone controlling a machine: a thumbnail is refused (Busy) while a control view is on,
+/// replaces another thumbnail, and is itself replaced by a control view. /api/vnc/agents reports busy + group.
+#[tokio::test]
+async fn thumbnails_never_kick_control() {
+    let mac = "aa:bb:cc:00:00:02";
+    let (ta, _agent_q) = mpsc::channel(QUEUE);
+    let a = register(mac, "PC-02", Some("VIP".into()), ta);
+
+    let (t1, mut t1q) = mpsc::channel(QUEUE);
+    assert_eq!(
+        attach(mac, 20, t1, true),
+        Attach::Ok,
+        "thumbnail on an idle machine"
+    );
+    assert!(!busy(mac));
+    let (t2, _t2q) = mpsc::channel(QUEUE);
+    assert_eq!(
+        attach(mac, 21, t2, true),
+        Attach::Ok,
+        "a thumbnail replaces a thumbnail"
+    );
+    assert!(t1q.recv().await.is_none());
+
+    let (c1, mut c1q) = mpsc::channel(QUEUE);
+    assert_eq!(
+        attach(mac, 22, c1, false),
+        Attach::Ok,
+        "control replaces the thumbnail"
+    );
+    assert!(busy(mac));
+    let (t3, _t3q) = mpsc::channel(QUEUE);
+    assert_eq!(
+        attach(mac, 23, t3, true),
+        Attach::Busy,
+        "a thumbnail does not kick control"
+    );
+    assert!(to_viewer(mac, a, Message::Binary(vec![9].into())));
+    assert!(
+        c1q.recv().await.is_some(),
+        "the controller still gets the screen"
+    );
+
+    let list = agents().await.0;
+    let me = list.iter().find(|x| x.host == "PC-02").unwrap();
+    assert!(me.busy && me.grp.as_deref() == Some("VIP"));
+
+    assert!(detach(mac, 22));
+    assert!(!busy(mac));
+    unregister(mac, a);
 }
 
 #[test]

@@ -47,12 +47,21 @@ const PING: Duration = Duration::from_secs(30);
 /// larger, so the limit is generous but bounded).
 const MAX_INPUT: usize = 256 << 10;
 
+struct Viewer {
+    id: u64,
+    q: mpsc::Sender<Message>,
+    /// A wall thumbnail (scaled down, watch only); false = someone controlling the machine.
+    thumb: bool,
+}
+
 struct Agent {
     id: u64,
     host: String,
+    /// The machine's group (the wall filters by it).
+    grp: Option<String>,
     to_agent: mpsc::Sender<Message>,
-    /// The viewer now watching: (id, its queue).
-    viewer: Option<(u64, mpsc::Sender<Message>)>,
+    /// The viewer now watching.
+    viewer: Option<Viewer>,
 }
 
 /// Connected agents by MAC (lower case).
@@ -60,13 +69,14 @@ static AGENTS: LazyLock<Mutex<HashMap<String, Agent>>> = LazyLock::new(Default::
 static NEXT: AtomicU64 = AtomicU64::new(1);
 
 /// An agent connects: it replaces an older connection of the same machine (whose viewer is closed).
-fn register(mac: &str, host: &str, to_agent: mpsc::Sender<Message>) -> u64 {
+fn register(mac: &str, host: &str, grp: Option<String>, to_agent: mpsc::Sender<Message>) -> u64 {
     let id = NEXT.fetch_add(1, Ordering::Relaxed);
     AGENTS.lock().insert(
         mac.to_string(),
         Agent {
             id,
             host: host.to_string(),
+            grp,
             to_agent,
             viewer: None,
         },
@@ -91,8 +101,8 @@ fn to_viewer(mac: &str, id: u64, m: Message) -> bool {
         .filter(|x| x.id == id)
         .and_then(|x| x.viewer.as_ref())
     {
-        Some((_, v)) => {
-            let _ = v.try_send(m);
+        Some(v) => {
+            let _ = v.q.try_send(m);
             true
         }
         None => false,
@@ -108,15 +118,27 @@ fn find(host: &str) -> Option<(String, String, mpsc::Sender<Message>)> {
         .map(|(mac, a)| (mac.clone(), a.host.clone(), a.to_agent.clone()))
 }
 
-/// Viewer `vid` starts watching `mac` (an older viewer's queue is dropped → it is closed). false = agent gone.
-fn attach(mac: &str, vid: u64, q: mpsc::Sender<Message>) -> bool {
-    match AGENTS.lock().get_mut(mac) {
-        Some(a) => {
-            a.viewer = Some((vid, q));
-            true
-        }
-        None => false,
+#[derive(Debug, PartialEq)]
+enum Attach {
+    Ok,
+    /// Someone is controlling the machine: a wall thumbnail does not push them out.
+    Busy,
+    /// The agent is gone.
+    Gone,
+}
+
+/// Viewer `vid` starts watching `mac`. One viewer per machine: a control view replaces whoever watches (their queue
+/// is dropped → they are closed); a thumbnail replaces only another thumbnail.
+fn attach(mac: &str, vid: u64, q: mpsc::Sender<Message>, thumb: bool) -> Attach {
+    let mut g = AGENTS.lock();
+    let Some(a) = g.get_mut(mac) else {
+        return Attach::Gone;
+    };
+    if thumb && a.viewer.as_ref().is_some_and(|v| !v.thumb) {
+        return Attach::Busy;
     }
+    a.viewer = Some(Viewer { id: vid, q, thumb });
+    Attach::Ok
 }
 
 /// Viewer `vid` stops: true = it was still the one watching (the agent can stop), false = replaced meanwhile.
@@ -125,7 +147,7 @@ fn detach(mac: &str, vid: u64) -> bool {
     let Some(a) = g.get_mut(mac) else {
         return false;
     };
-    if a.viewer.as_ref().is_some_and(|v| v.0 == vid) {
+    if a.viewer.as_ref().is_some_and(|v| v.id == vid) {
         a.viewer = None;
         return true;
     }
@@ -137,10 +159,26 @@ pub fn connected(mac: &str) -> bool {
     AGENTS.lock().contains_key(&mac.to_lowercase())
 }
 
-/// GET /api/vnc/agents — hostnames of the machines with an agent connected, sorted.
-async fn agents() -> Json<Vec<String>> {
-    let mut v: Vec<String> = AGENTS.lock().values().map(|a| a.host.clone()).collect();
-    v.sort_by_key(|h| h.to_lowercase());
+#[derive(serde::Serialize)]
+struct AgentInfo {
+    host: String,
+    grp: Option<String>,
+    /// Someone is controlling it (the wall shows "in use" instead of a thumbnail).
+    busy: bool,
+}
+
+/// GET /api/vnc/agents — the machines with an agent connected, by hostname.
+async fn agents() -> Json<Vec<AgentInfo>> {
+    let mut v: Vec<AgentInfo> = AGENTS
+        .lock()
+        .values()
+        .map(|a| AgentInfo {
+            host: a.host.clone(),
+            grp: a.grp.clone(),
+            busy: a.viewer.as_ref().is_some_and(|v| !v.thumb),
+        })
+        .collect();
+    v.sort_by_key(|a| a.host.to_lowercase());
     Json(v)
 }
 
@@ -157,15 +195,19 @@ async fn agent(
         );
         return (StatusCode::FORBIDDEN, "not a registered machine").into_response();
     };
-    let (mac, host) = (m.mac.to_lowercase(), crate::machines::who(&m));
+    let (mac, host, grp) = (
+        m.mac.to_lowercase(),
+        crate::machines::who(&m),
+        m.grp.clone(),
+    );
     ws.max_message_size(16 << 20)
-        .on_upgrade(move |s| run_agent(s, mac, host))
+        .on_upgrade(move |s| run_agent(s, mac, host, grp))
 }
 
-async fn run_agent(ws: WebSocket, mac: String, host: String) {
+async fn run_agent(ws: WebSocket, mac: String, host: String, grp: Option<String>) {
     let (mut tx, mut rx) = ws.split();
     let (to_agent, mut queue) = mpsc::channel::<Message>(QUEUE);
-    let id = register(&mac, &host, to_agent);
+    let id = register(&mac, &host, grp, to_agent);
     tracing::info!("remote: agent of {host} connected");
     let writer = async {
         let mut ping = tokio::time::interval(PING);
@@ -244,12 +286,26 @@ async fn view(
         )
             .into_response();
     };
+    // A scaled-down view is a wall thumbnail: it never takes the machine from someone controlling it.
+    let thumb = q.w.unwrap_or(0) > 0;
+    if thumb && busy(&mac) {
+        return (StatusCode::CONFLICT, format!("{host}: in use")).into_response();
+    }
     let start = start_msg(
         q.q.unwrap_or(60).clamp(20, 95),
         q.w.unwrap_or(0),
         q.codec.as_deref() == Some("h264"),
     );
-    ws.on_upgrade(move |s| run_view(s, mac, host, to_agent, start, peer))
+    ws.on_upgrade(move |s| run_view(s, mac, host, to_agent, start, thumb, peer))
+}
+
+/// Someone is controlling `mac` (a full-size viewer).
+fn busy(mac: &str) -> bool {
+    AGENTS
+        .lock()
+        .get(mac)
+        .and_then(|a| a.viewer.as_ref())
+        .is_some_and(|v| !v.thumb)
 }
 
 fn start_msg(q: u8, w: u16, h264: bool) -> Message {
@@ -263,14 +319,19 @@ async fn run_view(
     host: String,
     to_agent: mpsc::Sender<Message>,
     start: Message,
+    thumb: bool,
     peer: SocketAddr,
 ) {
     let (vq, mut queue) = mpsc::channel::<Message>(QUEUE);
     let vid = NEXT.fetch_add(1, Ordering::Relaxed);
-    if !attach(&mac, vid, vq) || to_agent.send(start).await.is_err() {
+    // Busy (someone took control between the check and now) / gone: the socket just closes; the wall retries later.
+    if attach(&mac, vid, vq, thumb) != Attach::Ok || to_agent.send(start).await.is_err() {
         return;
     }
-    tracing::info!("remote: {host} opened from {}", peer.ip());
+    // Thumbnails come and go with the wall's paging: only control sessions are worth a log line.
+    if !thumb {
+        tracing::info!("remote: {host} opened from {}", peer.ip());
+    }
     let (mut tx, mut rx) = ws.split();
     let down = async {
         while let Some(m) = queue.recv().await {
@@ -300,7 +361,9 @@ async fn run_view(
     if detach(&mac, vid) {
         let _ = to_agent.try_send(Message::Text("{\"op\":\"stop\"}".into()));
     }
-    tracing::info!("remote: {host} closed");
+    if !thumb {
+        tracing::info!("remote: {host} closed");
+    }
 }
 
 #[cfg(test)]

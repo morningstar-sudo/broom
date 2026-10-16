@@ -8,7 +8,8 @@ last_modified_at: 2026-10-17
 
 **Broom** network-boots a room of PCs from **one golden image** — every reboot comes up clean. One static binary
 on any Linux server, DHCP / TFTP / iSCSI / web admin built in. Free and open source (Apache-2.0), for internet cafés,
-gaming centers and school labs (≈10–30 PCs).
+gaming centers and school labs — up to ~100 PCs per server with the right server link
+([sizing](https://github.com/morningstar-sudo/broom#sizing)).
 
 **Secure Boot on, no MOK:** every step of the network boot is signed through Microsoft's UEFI CA — no keys to
 enroll, no MokManager screen on any client. With TPM 2.0 + HVCI, [FACEIT Anti-Cheat works](faceit-diskless.md).

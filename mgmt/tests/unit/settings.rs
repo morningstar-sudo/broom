@@ -77,3 +77,41 @@ fn dns_list_normalized() {
             .contains("at most 8")
     );
 }
+
+#[test]
+fn dhcp_pool_need() {
+    use crate::db::{Lease, Machine};
+    let ip = |s: &str| s.parse::<std::net::Ipv4Addr>().unwrap();
+    let m = |mac: &str, fixed: Option<&str>| Machine {
+        mac: mac.into(),
+        ip: fixed.map(Into::into),
+        ..Default::default()
+    };
+    let l = |mac: &str, expires: i64| Lease {
+        mac: mac.into(),
+        ip: Some("10.0.0.150".into()),
+        hostname: None,
+        expires,
+        source: "full".into(),
+    };
+    let machines = [
+        m("aa:00:00:00:00:01", None),              // needs a pool address
+        m("aa:00:00:00:00:02", Some("10.0.0.50")), // fixed: does not
+        m("aa:00:00:00:00:03", Some("")),          // empty = none
+    ];
+    let leases = [
+        l("AA:00:00:00:00:01", 2000), // a registered machine's lease: already counted
+        l("bb:00:00:00:00:01", 2000), // a phone: counts
+        l("bb:00:00:00:00:02", 500),  // expired: no
+        l("declined-10.0.0.160", 2000), // a declined address: no
+    ];
+    assert_eq!(
+        pool_need(ip("10.0.0.100"), ip("10.0.0.200"), &machines, &leases, 1000),
+        (101, 3)
+    );
+    assert_eq!(
+        pool_need(ip("10.0.0.20"), ip("10.0.0.10"), &[], &[], 0),
+        (0, 0),
+        "inverted range"
+    );
+}

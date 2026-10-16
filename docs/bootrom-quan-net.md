@@ -10,7 +10,7 @@ faq:
   - q: Máy trạm có cần ổ cứng không?
     a: Image Windows cần SSD trên mỗi máy (để lưu image và chạy Windows). Image Linux chạy được cả khi không có ổ.
   - q: Bao nhiêu máy?
-    a: Broom được làm cho phòng nhỏ, khoảng 10–30 máy mỗi máy chủ.
+    a: "Tới khoảng 100 máy mỗi máy chủ, Broom không giới hạn số máy. Cái quyết định là mạng và ổ của máy chủ: tới 30 máy dùng mạng 1 Gbps; 30–60 máy dùng 10 Gbps và ổ NVMe; 60–100 máy dùng 2 cổng 10 Gbps gộp (LACP) hoặc 25 Gbps, NVMe PCIe 4, RAM từ 64 GB. Switch máy trạm 1 Gbps có đường lên 10 Gbps, bật PortFast. Các quán đang chạy hiện đều là phòng nhỏ — tăng máy dần và theo dõi trang Server. Chi tiết: [Sizing](https://github.com/morningstar-sudo/broom#sizing)."
   - q: Có chạy được game có anti-cheat không?
     a: FACEIT Anti-Cheat chạy được với Secure Boot (không cần MOK), TPM 2.0 và HVCI — xem [hướng dẫn FACEIT](faceit-diskless.html).
   - q: Chủ quán có xem được màn hình các máy không?
@@ -22,8 +22,8 @@ faq:
 [← Broom](index.md)
 
 **Broom** là phần mềm **bootrom (boot không ổ cứng / diskless)** mã nguồn mở, miễn phí, dành cho **quán net, phòng
-game, phòng máy trường học** khoảng 10–30 máy. Bạn cài Windows 11 Pro **một lần** trong máy ảo, tải lên máy chủ;
-mọi máy trạm boot qua mạng từ image đó, và mỗi lần khởi động lại, máy trạm **sạch như mới** — khách cài gì, xoá gì
+game, phòng máy trường học**, tới khoảng 100 máy mỗi máy chủ. Bạn cài Windows 11 Pro **một lần** trong máy ảo, tải
+lên máy chủ; mọi máy trạm boot qua mạng từ image đó, và mỗi lần khởi động lại, máy trạm **sạch như mới** — khách cài gì, xoá gì
 cũng mất sau khi restart.
 
 ![Máy trạm Windows 11 boot qua mạng bằng Broom, có ổ game G: dùng chung](images/client-games-disk.webp){: width="1280" height="720"}
