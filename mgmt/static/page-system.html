@@ -11,46 +11,8 @@
     </div>
   </div>
   <div class="card card-body mb-3">
-    <h2 class="h6 text-uppercase text-body-secondary mb-3">Guest user (Windows)</h2>
-    <div class="d-flex flex-wrap gap-2 align-items-end">
-      <div><label class="form-label small mb-1" for="cafe_user">Guest user</label><input class="form-control form-control-sm" id="cafe_user" size="10"></div>
-      <div><label class="form-label small mb-1" for="cafe_password">Password</label><input class="form-control form-control-sm" id="cafe_password" type="password" size="10" placeholder="(unchanged)"></div>
-      <button class="btn btn-sm btn-primary" data-click="saveCafe">Save</button>
-      <span id="cafe_msg" class="msg align-self-center"></span>
-    </div>
-  </div>
-  <div class="card card-body mb-3">
     <h2 class="h6 text-uppercase text-body-secondary mb-3">Countdown boot menu</h2>
     <div class="d-flex flex-wrap gap-2 align-items-center"><input class="form-control form-control-sm" id="timeout" type="number" min="0" max="3600" style="width:90px"> seconds
       <button class="btn btn-sm btn-outline-primary" data-click="setTimeout_">Save</button> <span id="to_msg" class="msg"></span></div>
-  </div>
-  <div class="card card-body mb-3">
-    <h2 class="h6 text-uppercase text-body-secondary mb-3">SSD room (Windows machines)</h2>
-    <div class="d-flex flex-wrap gap-3 align-items-end">
-      <div><label class="form-label small mb-1" for="ssd_room">Keep free per session</label><div class="input-group input-group-sm"><input class="form-control" id="ssd_room" type="number" min="5" style="width:80px"><span class="input-group-text">GB</span></div></div>
-      <div><label class="form-label small mb-1" for="ssd_warn">Warn the guest below</label><div class="input-group input-group-sm"><input class="form-control" id="ssd_warn" type="number" min="1" style="width:80px"><span class="input-group-text">GB</span></div></div>
-      <div><label class="form-label small mb-1" for="ssd_reboot">Restart below</label><div class="input-group input-group-sm"><input class="form-control" id="ssd_reboot" type="number" min="1" style="width:80px"><span class="input-group-text">GB</span></div></div>
-      <button class="btn btn-sm btn-outline-primary" data-click="setSsd">Save</button> <span id="ssd_msg" class="msg align-self-center"></span>
-    </div>
-  </div>
-  <div class="card card-body mb-3">
-    <h2 class="h6 text-uppercase text-body-secondary mb-3">Golden downloads at once (Windows machines)</h2>
-    <p class="small text-body-secondary mb-2">After a publish, machines download the new golden in turns, this many at a time at full speed, instead of all sharing the link and finishing together at the end. Auto: the server's link speed over 1 Gbit/s per machine.</p>
-    <div class="d-flex flex-wrap gap-2 align-items-center">
-      <select class="form-select form-select-sm w-auto" id="gs_mode" data-change="gsMode"><option value="auto">Auto</option><option value="manual">Manual</option></select>
-      <input class="form-control form-control-sm" id="gs_n" type="number" min="0" max="256" style="width:90px" aria-label="Downloads at once (0 = no queue)">
-      <button class="btn btn-sm btn-outline-primary" data-click="setGoldenStreams">Save</button> <span id="gs_msg" class="msg"></span>
-    </div>
-    <div class="small text-body-secondary mt-2" id="gs_info"></div>
-  </div>
-  <div class="card card-body mb-3">
-    <h2 class="h6 text-uppercase text-body-secondary mb-3">Server resource alert</h2>
-    <div class="d-flex flex-wrap gap-2 align-items-center"><div class="input-group input-group-sm w-auto"><input class="form-control" id="alert_pct" type="number" min="50" max="99" style="width:80px"><span class="input-group-text">%</span></div>
-      <button class="btn btn-sm btn-outline-primary" data-click="setAlert">Save</button> <span id="al_msg" class="msg"></span></div>
-  </div>
-  <div class="card card-body mb-3">
-    <h2 class="h6 text-uppercase text-body-secondary mb-3">RAM cache — RAM reserved for the server</h2>
-    <div class="d-flex flex-wrap gap-2 align-items-center"><div class="input-group input-group-sm w-auto"><input class="form-control" id="zram_reserve" type="number" min="0" style="width:100px"><span class="input-group-text">MB</span></div>
-      <button class="btn btn-sm btn-outline-primary" data-click="setZramReserve">Save</button> <span id="zr_msg" class="msg"></span></div>
   </div>
 </section>

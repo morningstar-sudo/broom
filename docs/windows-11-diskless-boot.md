@@ -59,7 +59,7 @@ DHCP and point its PXE options at Broom: next-server / option 66 = the Broom ser
 1. Create a VM, install Windows 11 Pro, and stop at the first setup screen (OOBE). Press **Ctrl+Shift+F3** to enter
    **Audit Mode**.
 2. Install your software, games launchers, drivers you want everywhere, and settings.
-3. In Broom's web admin, set the guest user and password (**Settings → Guest user**).
+3. In Broom's web admin, set the guest user and password (**Windows → Guest user**).
 4. In the VM, run PowerShell as Administrator:
 
    ```powershell

@@ -69,36 +69,77 @@ public static class BroomVnc {
     // ourselves as SYSTEM inside the console session (where the guest's desktop is), then this copy exits.
     uint console = WTSGetActiveConsoleSessionId();
     uint mine; ProcessIdToSessionId(GetCurrentProcessId(), out mine);
-    if (console == 0xFFFFFFFF) return;      // nobody logged on at the console yet: broom-watch retries
-    if (mine != console) { RelaunchInSession(console, args[0]); return; }
+    if (console == 0xFFFFFFFF) { Log("no console session yet"); return; } // broom-watch retries
+    if (mine != console) {
+      // broom-watch calls us every 15 s: an agent already running (its mutex exists) -> nothing to start.
+      Mutex running;
+      if (Mutex.TryOpenExisting("Global\\broom-vnc-agent", out running)) { running.Dispose(); return; }
+      RelaunchInSession(console, args[0]);
+      return;
+    }
 
     // One agent per machine: a second launch (a stale watch task) exits.
     bool fresh;
     using (var mutex = new Mutex(true, "Global\\broom-vnc-agent", out fresh)) {
       if (!fresh) return;
+      Log("agent started in session " + mine + ", server " + args[0]);
       try { SetProcessDPIAware(); } catch { }
       string url = "ws://" + args[0] + "/api/vnc/agent";
       // Reconnect for ever: the admin may open the viewer at any time, the server restarts, the network blips.
+      string last = null;
       while (true) {
-        try { Run(url).Wait(); } catch { }
+        string err = null;
+        try { Run(url).Wait(); err = "connection closed"; }
+        catch (AggregateException e) { err = e.InnerException != null ? e.InnerException.Message : e.Message; }
+        catch (Exception e) { err = e.Message; }
+        if (err != last) { Log("server connection: " + err + " (retrying every 5 s)"); last = err; }
         Thread.Sleep(5000);
       }
     }
+  }
+
+  // C:\Windows\Temp\broom-vnc.log: what the agent did (start, relaunch, connection errors), each change once. Kept
+  // small: cut when it passes 256 KB. Never throws.
+  static void Log(string m) {
+    try {
+      string f = Environment.GetEnvironmentVariable("SystemRoot") + "\\Temp\\broom-vnc.log";
+      if (File.Exists(f) && new FileInfo(f).Length > 256 * 1024) File.Delete(f);
+      File.AppendAllText(f, DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss") + " [" + GetCurrentProcessId() + "] " + m + "\r\n");
+    } catch { }
+  }
+
+  [DllImport("advapi32.dll", SetLastError=true, CharSet=CharSet.Unicode)] static extern bool LookupPrivilegeValueW(string system, string name, out long luid);
+  [DllImport("advapi32.dll", SetLastError=true)] static extern bool AdjustTokenPrivileges(IntPtr token, bool disableAll, ref TokenPriv tp, uint len, IntPtr prev, IntPtr retLen);
+  [StructLayout(LayoutKind.Sequential, Pack = 4)] struct TokenPriv { public uint Count; public long Luid; public uint Attr; }
+
+  // SYSTEM holds these, but not always enabled: SetTokenInformation(TokenSessionId) needs SeTcb, CreateProcessAsUser
+  // SeAssignPrimaryToken + SeIncreaseQuota.
+  static void EnablePrivileges() {
+    IntPtr t;
+    if (!OpenProcessToken(GetCurrentProcess(), 0x28, out t)) return; // TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY
+    try {
+      foreach (var name in new[] { "SeTcbPrivilege", "SeAssignPrimaryTokenPrivilege", "SeIncreaseQuotaPrivilege" }) {
+        var tp = new TokenPriv { Count = 1, Attr = 2 }; // SE_PRIVILEGE_ENABLED
+        if (LookupPrivilegeValueW(null, name, out tp.Luid)) AdjustTokenPrivileges(t, false, ref tp, 0, IntPtr.Zero, IntPtr.Zero);
+      }
+    } finally { CloseHandle(t); }
   }
 
   // Start broom-vnc.exe again in `session` with our own (SYSTEM) token: same rights, a desktop to work on.
   static void RelaunchInSession(uint session, string srv) {
     IntPtr tok = IntPtr.Zero, dup = IntPtr.Zero;
     try {
-      if (!OpenProcessToken(GetCurrentProcess(), 0x0002 | 0x0008, out tok)) return; // DUPLICATE | QUERY
-      if (!DuplicateTokenEx(tok, 0x02000000, IntPtr.Zero, 2, 1, out dup)) return;    // MAXIMUM_ALLOWED, primary
-      if (!SetTokenInformation(dup, 12, ref session, sizeof(uint))) return;          // TokenSessionId
+      EnablePrivileges();
+      if (!OpenProcessToken(GetCurrentProcess(), 0x0002 | 0x0008, out tok)) { Log("relaunch: OpenProcessToken error " + Marshal.GetLastWin32Error()); return; }
+      if (!DuplicateTokenEx(tok, 0x02000000, IntPtr.Zero, 2, 1, out dup)) { Log("relaunch: DuplicateTokenEx error " + Marshal.GetLastWin32Error()); return; }
+      if (!SetTokenInformation(dup, 12, ref session, sizeof(uint))) { Log("relaunch: SetTokenInformation(session " + session + ") error " + Marshal.GetLastWin32Error()); return; }
       var si = new STARTUPINFO(); si.cb = Marshal.SizeOf(typeof(STARTUPINFO)); si.desktop = "winsta0\\default";
       PROCESS_INFORMATION pi;
       string exe = Application.ExecutablePath;
       if (CreateProcessAsUser(dup, exe, "\"" + exe + "\" " + srv, IntPtr.Zero, IntPtr.Zero, false, 0x08000000, IntPtr.Zero, null, ref si, out pi)) {
+        Log("relaunched into session " + session + " (pid " + pi.pid + ")");
         CloseHandle(pi.process); CloseHandle(pi.thread);
-      }
+      } else Log("relaunch: CreateProcessAsUser error " + Marshal.GetLastWin32Error());
     } finally {
       if (dup != IntPtr.Zero) CloseHandle(dup);
       if (tok != IntPtr.Zero) CloseHandle(tok);

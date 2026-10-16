@@ -1,0 +1,33 @@
+<section id="page-windows">
+  <div class="d-flex flex-wrap align-items-baseline gap-3 mb-4"><h1 class="h4 mb-0">Windows</h1>
+    <span class="small text-body-secondary">Settings of the Windows machines.</span></div>
+  <div class="card card-body mb-3">
+    <h2 class="h6 text-uppercase text-body-secondary mb-3">Guest user</h2>
+    <p class="small text-body-secondary mb-2">Baked into the golden when you run the prep: set it before preparing a Windows VM.</p>
+    <div class="d-flex flex-wrap gap-2 align-items-end">
+      <div><label class="form-label small mb-1" for="cafe_user">Guest user</label><input class="form-control form-control-sm" id="cafe_user" size="10"></div>
+      <div><label class="form-label small mb-1" for="cafe_password">Password</label><input class="form-control form-control-sm" id="cafe_password" type="password" size="10" placeholder="(unchanged)"></div>
+      <button class="btn btn-sm btn-primary" data-click="saveCafe">Save</button>
+      <span id="cafe_msg" class="msg align-self-center"></span>
+    </div>
+  </div>
+  <div class="card card-body mb-3">
+    <h2 class="h6 text-uppercase text-body-secondary mb-3">SSD room</h2>
+    <div class="d-flex flex-wrap gap-3 align-items-end">
+      <div><label class="form-label small mb-1" for="ssd_room">Keep free per session</label><div class="input-group input-group-sm"><input class="form-control" id="ssd_room" type="number" min="5" style="width:80px"><span class="input-group-text">GB</span></div></div>
+      <div><label class="form-label small mb-1" for="ssd_warn">Warn the guest below</label><div class="input-group input-group-sm"><input class="form-control" id="ssd_warn" type="number" min="1" style="width:80px"><span class="input-group-text">GB</span></div></div>
+      <div><label class="form-label small mb-1" for="ssd_reboot">Restart below</label><div class="input-group input-group-sm"><input class="form-control" id="ssd_reboot" type="number" min="1" style="width:80px"><span class="input-group-text">GB</span></div></div>
+      <button class="btn btn-sm btn-outline-primary" data-click="setSsd">Save</button> <span id="ssd_msg" class="msg align-self-center"></span>
+    </div>
+  </div>
+  <div class="card card-body mb-3">
+    <h2 class="h6 text-uppercase text-body-secondary mb-3">Golden downloads at once</h2>
+    <p class="small text-body-secondary mb-2">After a publish, machines download the new golden in turns, this many at a time at full speed, instead of all sharing the link and finishing together at the end. Auto: the server's link speed over 1 Gbit/s per machine.</p>
+    <div class="d-flex flex-wrap gap-2 align-items-center">
+      <select class="form-select form-select-sm w-auto" id="gs_mode" data-change="gsMode"><option value="auto">Auto</option><option value="manual">Manual</option></select>
+      <input class="form-control form-control-sm" id="gs_n" type="number" min="0" max="256" style="width:90px" aria-label="Downloads at once (0 = no queue)">
+      <button class="btn btn-sm btn-outline-primary" data-click="setGoldenStreams">Save</button> <span id="gs_msg" class="msg"></span>
+    </div>
+    <div class="small text-body-secondary mt-2" id="gs_info"></div>
+  </div>
+</section>

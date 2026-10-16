@@ -39,8 +39,11 @@ function StartAgent {
     $src = "$Vol\broom\broom-vnc.exe"
     if ([IO.File]::Exists($src)) { try { [IO.File]::Copy($src, $exe) } catch { } }
     elseif ([IO.File]::Exists("$Vol\broom\broom-vnc.cs")) {
-      try { Add-Type -Path "$Vol\broom\broom-vnc.cs" -OutputAssembly $exe -OutputType WindowsApplication `
-              -ReferencedAssemblies System.Drawing, System.Windows.Forms, System.Management -CompilerOptions '/unsafe' -ErrorAction Stop } catch { }
+      # The .NET Framework's own csc (in every Windows), same flags as CI. Not Add-Type: PowerShell 5.1 has no
+      # -CompilerOptions, and the agent needs /unsafe.
+      $csc = "$env:SystemRoot\Microsoft.NET\Framework64\v4.0.30319\csc.exe"
+      if (-not [IO.File]::Exists($csc)) { $csc = "$env:SystemRoot\Microsoft.NET\Framework\v4.0.30319\csc.exe" }
+      try { & $csc /nologo /unsafe /target:winexe /r:System.Drawing.dll /r:System.Windows.Forms.dll /r:System.Management.dll "/out:$exe" "$Vol\broom\broom-vnc.cs" | Out-Null } catch { }
     }
   }
   if ([IO.File]::Exists($exe)) { try { Start-Process $exe -ArgumentList $Srv -WindowStyle Hidden } catch { } }

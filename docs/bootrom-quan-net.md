@@ -75,7 +75,7 @@ Chọn một trong hai cách:
 1. Tạo máy ảo, cài Windows 11 Pro, đến màn hình thiết lập đầu tiên (OOBE) thì bấm **Ctrl+Shift+F3** để vào
    **Audit Mode**.
 2. Cài phần mềm, launcher game, cấu hình như muốn cho cả phòng.
-3. Trên web Broom, đặt tài khoản và mật khẩu cho khách (**Settings → Guest user**).
+3. Trên web Broom, đặt tài khoản và mật khẩu cho khách (**Windows → Guest user**).
 4. Trong máy ảo, mở PowerShell bằng quyền Administrator và chạy:
 
    ```powershell
@@ -95,7 +95,7 @@ chia SSD. Bật máy: lần đầu máy tải image về SSD và tự restart m�
 
 ## Cài game
 
-Ở **Images → Games disks**, tạo ổ game, chọn một **máy cập nhật**. Boot máy đó, cài hoặc cập nhật game trên ổ game,
+Ở trang **Games**, tạo ổ game, chọn một **máy cập nhật**. Boot máy đó, cài hoặc cập nhật game trên ổ game,
 tắt máy đúng cách rồi bấm **Save**. Các máy khác nhận bản mới ở lần boot sau. Chỉ nên để máy cập nhật tải bản cập
 nhật game — launcher tự cập nhật trên máy khách sẽ làm đầy SSD và mất khi restart.
 

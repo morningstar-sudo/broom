@@ -1,6 +1,7 @@
-// bench.rs — numbers for the Benchmark page: the server's image disk (O_DIRECT reads), live iSCSI throughput, and per
-// machine its boot time (every boot: menu choice → desktop, by the server's clock) and, when the admin asks, its disk
-// + network read speed (measured at its next boot, before anyone plays on it). Results are kept in the DB (bench).
+// bench.rs — numbers for the Benchmark page: the server's image disk (O_DIRECT reads), and per machine its boot time
+// (every boot: menu choice → desktop, by the server's clock) and, when the admin asks, its disk + network read speed
+// (measured at its next boot, before anyone plays on it). Results are kept in the DB (bench). Also the live iSCSI
+// throughput the Server page shows.
 use axum::{
     Json, Router,
     body::{Body, Bytes},
@@ -240,7 +241,7 @@ async fn sample() -> Sample {
     )
 }
 
-/// GET /api/bench/iscsi/live (SSE) — "iscsi" every second while the Benchmark page is open: read throughput of each
+/// GET /api/bench/iscsi/live (SSE) — "iscsi" every second while the Server page is open: read throughput of each
 /// target and each client since the previous sample. Sampling stops when the tab closes (the stream is dropped).
 async fn iscsi_live(
     State(st): State<SharedState>,

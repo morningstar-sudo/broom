@@ -263,7 +263,7 @@ async fn events(
             }
         }
     });
-    // "res": the server's resources every 2 s (sysmon.rs) — the alert banner + the Benchmark page; the last one at once.
+    // "res": the server's resources every 2 s (sysmon.rs) — the alert banner + the Server page; the last one at once.
     let latest = sysmon::LATEST.lock().clone();
     let first = (!latest.is_empty()).then(|| Ok(Event::default().event("res").data(latest)));
     let res = stream::unfold(sysmon::RES.subscribe(), |mut rx| async move {
@@ -291,7 +291,9 @@ async fn events(
 async fn ui_page(axum::extract::Path(p): axum::extract::Path<String>) -> Html<&'static str> {
     Html(match p.as_str() {
         "machines" | "images" | "network" | "system" | "drivers" | "devices" | "groups"
-        | "benchmark" | "remote" => assets::text(&format!("static/page-{p}.html")),
+        | "benchmark" | "remote" | "server" | "games" | "windows" => {
+            assets::text(&format!("static/page-{p}.html"))
+        }
         _ => "",
     })
 }
@@ -540,7 +542,7 @@ async fn main() {
         });
     }
 
-    // Server resources every 2 s → web pages (alert banner over the threshold, Benchmark page).
+    // Server resources every 2 s → web pages (alert banner over the threshold, Server page).
     tokio::spawn(sysmon::run(state.clone()));
 
     let app = Router::new()
@@ -562,6 +564,9 @@ async fn main() {
         .route("/groups", get(index))
         .route("/benchmark", get(index))
         .route("/remote", get(index))
+        .route("/server", get(index))
+        .route("/games", get(index))
+        .route("/windows", get(index))
         .route("/ui/{page}", get(ui_page)) // fragment tab on-demand
         .route("/api/events", get(events)) // SSE: server liveness (sidebar dot) + image job status
         .route("/boot.ipxe", get(boot::render)) // iPXE menu

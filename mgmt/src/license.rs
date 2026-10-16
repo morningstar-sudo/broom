@@ -136,7 +136,7 @@ async fn ssd_low(
         .find(|m| m.mac.eq_ignore_ascii_case(&mac))
         .map(|m| who(&m));
     tracing::warn!(
-        "machine {} ({mac}, {ip}): SSD almost full during the session — {:.1} GB free (guest writes; see Settings → SSD room)",
+        "machine {} ({mac}, {ip}): SSD almost full during the session — {:.1} GB free (guest writes; see Windows → SSD room)",
         name.as_deref().unwrap_or(&mac),
         q.free as f64 / (1u64 << 30) as f64
     );

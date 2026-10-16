@@ -1,0 +1,23 @@
+<section id="page-games">
+  <div class="d-flex flex-wrap align-items-baseline gap-3 mb-4"><h1 class="h4 mb-0">Games</h1>
+    <span class="small text-body-secondary">Shared games disks for the Windows machines, updated from one machine.</span>
+    <span class="flex-grow-1"></span><button class="btn btn-sm btn-outline-secondary" data-click="loadGames" title="Refresh" aria-label="Refresh"><svg class="ic" aria-hidden="true"><use href="/icons.svg#refresh"/></svg></button></div>
+  <div class="card card-body mb-3">
+    <h2 class="h6 text-uppercase text-body-secondary mb-3">Games disks</h2>
+    <div class="table-responsive"><table class="table table-sm table-hover align-middle" id="games">
+      <thead><tr><th>Name</th><th>Drive</th><th>Size</th><th>Groups</th><th title="version machines get at boot">Version</th><th title="machines connected (still on an older version)">Machines</th><th>Update machine</th><th>Update not saved</th><th></th></tr></thead>
+      <tbody></tbody></table></div>
+  </div>
+  <div class="card card-body mb-3">
+    <h2 class="h6 text-uppercase text-body-secondary mb-3">Add / change a disk</h2>
+    <div class="d-flex flex-wrap gap-2 align-items-end">
+      <div><label class="form-label small mb-1" for="gm_name">Name</label><input class="form-control form-control-sm" id="gm_name" size="10" placeholder="common"></div>
+      <div><label class="form-label small mb-1" for="gm_letter">Drive</label><input class="form-control form-control-sm" id="gm_letter" size="2" maxlength="1" value="G"></div>
+      <div><label class="form-label small mb-1" for="gm_size">Size GB</label><input class="form-control form-control-sm" id="gm_size" type="number" min="1" style="width:90px" value="500"></div>
+      <div><label class="form-label small mb-1" for="gm_groups">Groups (empty = all machines)</label><input class="form-control form-control-sm" id="gm_groups" size="20" placeholder="VIP, Thuong" list="gm_grouplist"></div>
+      <datalist id="gm_grouplist"></datalist>
+      <button class="btn btn-sm btn-primary" data-click="saveGames">Add / change</button>
+      <span id="gm_msg" class="msg align-self-center"></span>
+    </div>
+  </div>
+</section>

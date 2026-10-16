@@ -1,0 +1,25 @@
+<section id="page-server">
+  <div class="d-flex flex-wrap align-items-baseline gap-3 mb-4"><h1 class="h4 mb-0">Server</h1>
+    <span class="small text-body-secondary">Live load and disk health of this server.</span>
+    <span class="flex-grow-1"></span><button class="btn btn-sm btn-outline-secondary" data-click="loadServer" title="Refresh" aria-label="Refresh"><svg class="ic" aria-hidden="true"><use href="/icons.svg#refresh"/></svg></button></div>
+  <div class="card card-body mb-3">
+    <h2 class="h6 text-uppercase text-body-secondary mb-3">Server now</h2>
+    <div id="b_res" class="msg">—</div>
+  </div>
+  <div class="card card-body mb-3">
+    <h2 class="h6 text-uppercase text-body-secondary mb-3">iSCSI now</h2>
+    <div id="b_iscsi" class="msg">—</div>
+  </div>
+  <div class="card card-body mb-3">
+    <h2 class="h6 text-uppercase text-body-secondary mb-3">Resource alert</h2>
+    <p class="small text-body-secondary mb-2">A banner shows on every page while CPU, RAM, network or the image disk stays at or above this.</p>
+    <div class="d-flex flex-wrap gap-2 align-items-center"><div class="input-group input-group-sm w-auto"><input class="form-control" id="alert_pct" type="number" min="50" max="99" style="width:80px"><span class="input-group-text">%</span></div>
+      <button class="btn btn-sm btn-outline-primary" data-click="setAlert">Save</button> <span id="al_msg" class="msg"></span></div>
+  </div>
+  <div class="card card-body mb-3">
+    <h2 class="h6 text-uppercase text-body-secondary mb-3">RAM cache — RAM reserved for the server</h2>
+    <p class="small text-body-secondary mb-2">RAM kept free for the server itself when an image or games disk is loaded into RAM.</p>
+    <div class="d-flex flex-wrap gap-2 align-items-center"><div class="input-group input-group-sm w-auto"><input class="form-control" id="zram_reserve" type="number" min="0" style="width:100px"><span class="input-group-text">MB</span></div>
+      <button class="btn btn-sm btn-outline-primary" data-click="setZramReserve">Save</button> <span id="zr_msg" class="msg"></span></div>
+  </div>
+</section>

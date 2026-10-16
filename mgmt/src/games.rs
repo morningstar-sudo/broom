@@ -90,7 +90,7 @@ fn configs(st: &SharedState) -> Vec<Config> {
         .collect()
 }
 
-/// Why the games disks are not served (last sync), shown on the Images page; None = fine.
+/// Why the games disks are not served (last sync), shown on the Games page; None = fine.
 static LAST_ERR: parking_lot::Mutex<Option<String>> = parking_lot::Mutex::new(None);
 
 /// Push the list to the iSCSI daemon (at start, on change, and every minute: an update machine's lease may move).

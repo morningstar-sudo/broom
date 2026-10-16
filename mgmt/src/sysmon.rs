@@ -1,7 +1,7 @@
 // sysmon.rs — the server's own resources. Limits sized from the hardware (iSCSI buffers + connections, TFTP transfers)
 // instead of fixed numbers, and a sampler every 2 s (CPU, RAM, the boot NIC, the image disk) whose numbers go to every
 // open web page over SSE ("res" on /api/events): a banner on every page while one stays above the threshold
-// (Settings, default 80%), the live numbers on the Benchmark page.
+// (Server page, default 80%), the live numbers on the Server page.
 use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::path::Path;

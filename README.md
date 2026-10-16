@@ -175,7 +175,7 @@ sent, in parallel 8 MB chunks with retry) — or a single `.vmdk` / `.img` / `.z
   ```
   Power off → upload (OS = Linux, cache `disk` or RAM).
 
-- **Windows 11 Pro** — set the guest user + password (Settings → Guest user), then run inside the VM in Audit Mode
+- **Windows 11 Pro** — set the guest user + password (Windows → Guest user), then run inside the VM in Audit Mode
   (PowerShell as Admin; also shown on the Images page):
   ```powershell
   irm http://<server>/broom-prep-win | iex
@@ -215,7 +215,7 @@ asks first: it would then go to every machine.
 
 ### SSD room (Windows)
 
-Everything a guest writes (C:, games drives) lands on the machine's SSD until the next boot. **Settings → SSD room**:
+Everything a guest writes (C:, games drives) lands on the machine's SSD until the next boot. **Windows → SSD room**:
 the stage frees *Keep free* GB at each boot (parked images, unused the longest first); during the session a watchdog
 (`broom-watch.ps1`) checks the SSD every 15 s — below *Warn* it tells the guest and flags the machine (*SSD full* on the
 Machines page), below *Restart* it restarts the machine after 60 s. Without it Windows stops with a blue screen once
@@ -254,7 +254,7 @@ machine and pastes it.
 The agent also reports the machine's **health** (CPU %, RAM %, temperatures, and each disk's SMART status, temperature
 and bad-sector counts) — shown on the Machines page and in a machine's detail. Temperatures come from ACPI thermal
 zones (no kernel driver, so unlabeled and best-effort — some boards report none); disk health and bad sectors come
-from SMART (no surface scan). The server reads its own disk's SMART the same built-in way (shown on the Benchmark page).
+from SMART (no surface scan). The server reads its own disk's SMART the same built-in way (shown on the Server page).
 Lower the quality on a busy network. The screen is captured with Desktop Duplication, so full-screen games show too;
 it falls back to GDI for the UAC / lock screen. On Chrome / Edge the single-machine view streams **H.264** (smooth, near
 RDP); it falls back to JPEG on other browsers or if the machine can't encode. The agent accepts only the server's

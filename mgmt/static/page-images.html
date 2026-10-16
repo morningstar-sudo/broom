@@ -24,21 +24,6 @@
     <p class="form-text">Power the VM off, then pick its whole folder — no zip needed (only .vmx/.vmdk are sent; memory files are skipped).</p>
     <p class="form-text"><b>Linux</b>: <code>curl -fsSL http://<span id="srvhost2">SERVER</span>/broom-prep | sudo bash</code></p>
     <p class="form-text"><b>Windows (Pro)</b>: PowerShell Admin, in the VM: <code style="user-select:all">irm http://<span id="srvhost3">SERVER</span>/broom-prep-win | iex</code>
-      <br>Set the guest user + password (Settings) first: they are baked into the golden.</p>
-  </div>
-  <div class="card card-body mb-3">
-    <h2 class="h6 text-uppercase text-body-secondary mb-3">Games disks (Windows) <button class="btn btn-sm btn-outline-secondary ms-1" data-click="loadGames" title="Refresh" aria-label="Refresh"><svg class="ic" aria-hidden="true"><use href="/icons.svg#refresh"/></svg></button></h2>
-    <div class="table-responsive"><table class="table table-sm table-hover align-middle" id="games">
-      <thead><tr><th>Name</th><th>Drive</th><th>Size</th><th>Groups</th><th title="version machines get at boot">Version</th><th title="machines connected (still on an older version)">Machines</th><th>Update machine</th><th>Update not saved</th><th></th></tr></thead>
-      <tbody></tbody></table></div>
-    <div class="d-flex flex-wrap gap-2 align-items-end mt-2">
-      <div><label class="form-label small mb-1" for="gm_name">Name</label><input class="form-control form-control-sm" id="gm_name" size="10" placeholder="common"></div>
-      <div><label class="form-label small mb-1" for="gm_letter">Drive</label><input class="form-control form-control-sm" id="gm_letter" size="2" maxlength="1" value="G"></div>
-      <div><label class="form-label small mb-1" for="gm_size">Size GB</label><input class="form-control form-control-sm" id="gm_size" type="number" min="1" style="width:90px" value="500"></div>
-      <div><label class="form-label small mb-1" for="gm_groups">Groups (empty = all machines)</label><input class="form-control form-control-sm" id="gm_groups" size="20" placeholder="VIP, Thuong" list="gm_grouplist"></div>
-      <datalist id="gm_grouplist"></datalist>
-      <button class="btn btn-sm btn-primary" data-click="saveGames">Add / change</button>
-      <span id="gm_msg" class="msg align-self-center"></span>
-    </div>
+      <br>Set the guest user + password (Windows page) first: they are baked into the golden.</p>
   </div>
 </section>

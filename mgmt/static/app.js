@@ -26,11 +26,11 @@ for(const ev of ['click','change','input'])document.addEventListener(ev,e=>{
 });
 
 // ---- tabs: load HTML fragments on demand (/ui/<page>) + only load data for the tab being viewed ----
-const loaders={machines:loadStatus,devices:loadDevices,groups:loadGroups,benchmark:loadBench,images:()=>{loadImages();loadGames();},drivers:loadDrivers,network:loadDhcp,system:loadCafe,remote:loadRemote};
+const loaders={machines:loadStatus,remote:loadRemote,server:loadServer,devices:loadDevices,groups:loadGroups,images:loadImages,games:loadGames,drivers:loadDrivers,network:loadDhcp,windows:loadCafe,system:loadCafe,benchmark:loadBench};
 const fragCache={};
 let curPage=null;
 async function showPage(p){
-  if(iscsiES&&p!=='benchmark'){iscsiES.close();iscsiES=null;}
+  if(iscsiES&&p!=='server'){iscsiES.close();iscsiES=null;}
   if(p!=='remote'){if(rmWs){rmWs.onclose=null;rmWs.close();rmWs=null;rmCtx=null;}rmCloseDec();closeWall();}
   document.querySelectorAll('nav a').forEach(x=>x.classList.toggle('active',x.dataset.page===p));
   if(fragCache[p]===undefined){
@@ -85,7 +85,7 @@ function renderMachines(){
        <td>${m.hostname?esc(m.hostname):'<span class="mono">—</span>'} ${m.registered?'':'<span class="badge rounded-pill text-bg-warning">new</span>'}</td>
        <td class="mono">${m.grp?esc(m.grp):'—'}</td>
        <td class="mono">${esc(m.ip)}</td><td class="mono">${esc(m.mac)}</td>
-       <td>${led(m.online)}${m.not_reset?' <span class="badge text-bg-danger" title="Windows started from the SSD without a PXE boot at '+new Date(m.not_reset*1000).toLocaleString()+' — this session was NOT reset (cable out, server down, boot order changed?). Cleared by the next PXE boot.">not reset</span>':''}${m.ssd_low?' <span class="badge text-bg-danger" title="SSD almost full during the session: '+gbs(m.ssd_low[0])+' free at '+new Date(m.ssd_low[1]*1000).toLocaleString()+' (the guest wrote a lot; Settings → SSD room). Cleared by the next PXE boot.">SSD full</span>':''}${mxBadge(m.metrics)}</td>
+       <td>${led(m.online)}${m.not_reset?' <span class="badge text-bg-danger" title="Windows started from the SSD without a PXE boot at '+new Date(m.not_reset*1000).toLocaleString()+' — this session was NOT reset (cable out, server down, boot order changed?). Cleared by the next PXE boot.">not reset</span>':''}${m.ssd_low?' <span class="badge text-bg-danger" title="SSD almost full during the session: '+gbs(m.ssd_low[0])+' free at '+new Date(m.ssd_low[1]*1000).toLocaleString()+' (the guest wrote a lot; Windows → SSD room). Cleared by the next PXE boot.">SSD full</span>':''}${mxBadge(m.metrics)}</td>
        <td class="mono" title="${esc(m.license_result||'')}">${licCell(m)}</td>
        <td><div class="d-flex gap-1">${m.registered
           ? `<button class="btn btn-sm btn-outline-secondary" ${act('wake',m.mac)}>Wake</button>
@@ -467,7 +467,7 @@ async function applyDhcp(){const b={};['mode','iface','server_ip','subnet','netm
   const m=document.getElementById('dhcp_msg');
   try{const r=await j('/api/dhcp',mk(b));say(m,' ✓ '+(r.status||'applied'));}catch(e){say(m,' ✗ '+e.message);}}
 
-// ---- games disks (Images page) ----
+// ---- games disks (Games page) ----
 let gmDisks=[];
 async function loadGames(){const g=await j('/api/games');const tb=document.querySelector('#games tbody');if(!tb)return;
   gmDisks=g.disks;
@@ -741,8 +741,10 @@ async function loadBench(){
   const sel=document.getElementById('b_hmac'),cur=sel.value;
   sel.innerHTML='<option value="">all</option><option value="server">server</option>'+macs.map(m=>`<option value="${esc(m)}">${esc(bName(m))}</option>`).join('');
   sel.value=cur;
-  loadBenchHist();loadIscsi();if(lastRes)showRes(lastRes);
+  loadBenchHist();
 }
+// Server page: live load + disk health ("res" SSE), iSCSI now, and its alert / RAM-reserve settings.
+function loadServer(){loadIscsi();if(lastRes)showRes(lastRes);loadCafe();}
 async function loadBenchHist(){
   const sel=document.getElementById('b_hmac');if(!sel)return;
   const rows=await j('/api/bench/history?mac='+encodeURIComponent(sel.value));
@@ -750,7 +752,7 @@ async function loadBenchHist(){
     <td>${esc(BENCH_KINDS[r.kind]?BENCH_KINDS[r.kind][0]:r.kind)}</td><td><b>${esc(bVal(r))}</b></td><td class="mono">${esc(r.detail)}</td></tr>`).join('')
     ||'<tr><td colspan=5 class="mono">no results yet</td></tr>';
 }
-// iSCSI now: pushed every second over SSE while the Benchmark page is open (showPage closes it on leaving).
+// iSCSI now: pushed every second over SSE while the Server page is open (showPage closes it on leaving).
 function loadIscsi(){
   if(iscsiES)return;
   iscsiES=new EventSource('/api/bench/iscsi/live');
@@ -776,7 +778,7 @@ let lastRes=null;
 function showRes(d){lastRes=d;
   const bar=document.getElementById('alertbar');
   if(bar){bar.hidden=!d.alerts.length;
-    if(d.alerts.length)bar.innerHTML=`<b>${ic('warn')} Server at its limit:</b> ${esc(d.alerts.join(', '))} (threshold ${d.limit}%) — clients boot and load slower. <a class="alert-link" href="/benchmark" data-click="go" data-args='["benchmark"]'>Details</a>`;}
+    if(d.alerts.length)bar.innerHTML=`<b>${ic('warn')} Server at its limit:</b> ${esc(d.alerts.join(', '))} (threshold ${d.limit}%) — clients boot and load slower. <a class="alert-link" href="/server" data-click="go" data-args='["server"]'>Details</a>`;}
   const el=document.getElementById('b_res');if(!el)return;
   // Measured values first; a bar + % only where the whole is known (none for a VM's virtual network card).
   const row=(name,pct,txt)=>`<tr><td>${name}</td><td>${pct==null?'':
@@ -854,7 +856,7 @@ const ACTIONS={
   loadGames,saveGames,setGamesUpdate,toggleGamesRam,saveGamesUpdate,discardGamesUpdate,editGames,delGames,
   loadDrivers,uploadDriver,saveDrvTargets,delDriver,
   loadGroups,editGroup,closeGroup,saveGroup,createGroup,renameGroup,deleteGroup,
-  loadBench,loadBenchHist,benchServer,benchRequest:()=>benchAsk(false),benchCancel:()=>benchAsk(true),bSelAll,
+  loadServer,loadBench,loadBenchHist,benchServer,benchRequest:()=>benchAsk(false),benchCancel:()=>benchAsk(true),bSelAll,
   applyDhcp,savePw,saveCafe,setTimeout_,setZramReserve,setAlert,setSsd,gsMode,setGoldenStreams,logout,
   remoteTo,rmConnect,rmClose,rmBack,rmQuality,rmFull,rmSas,rmWin,rmAltTab,rmPaste,loadRemote,
 };

@@ -151,6 +151,10 @@ async fn agent(
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
 ) -> Response {
     let Some(m) = crate::machines::machine_at(&st, &peer.ip().to_string()) else {
+        tracing::warn!(
+            "remote: agent from {} refused — not a registered machine (Machines page)",
+            peer.ip()
+        );
         return (StatusCode::FORBIDDEN, "not a registered machine").into_response();
     };
     let (mac, host) = (m.mac.to_lowercase(), crate::machines::who(&m));
