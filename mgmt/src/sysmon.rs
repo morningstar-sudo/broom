@@ -289,7 +289,7 @@ fn disk_stat(path: &Path) -> Option<DiskStat> {
 /// SMART/health log page, or ATA SMART over SG_IO for SATA. best-effort — None on a RAID / virtual disk / anything it
 /// can't reach. The server runs as root, which the ioctls need.
 #[derive(Clone, serde::Serialize)]
-struct DiskHealth {
+pub(crate) struct DiskHealth {
     /// "OK" / "WARNING" / "FAILING".
     status: String,
     temp: Option<i32>,
@@ -309,27 +309,24 @@ fn whole_disk(part: &str) -> String {
         .to_string()
 }
 
-type HealthCache = parking_lot::Mutex<Option<(Instant, String, Option<DiskHealth>)>>;
+type HealthCache = parking_lot::Mutex<HashMap<String, (Instant, Option<DiskHealth>)>>;
 
-/// SMART of the image disk, cached (read at most once a minute: a SMART command is slow and never changes fast).
-fn disk_health(part: &str) -> Option<DiskHealth> {
-    static CACHE: LazyLock<HealthCache> = LazyLock::new(|| parking_lot::Mutex::new(None));
+/// SMART of a disk (the image disk; every disk on the Server page's Disks card), cached per disk: read at most once
+/// a minute — a SMART command is slow and never changes fast.
+pub(crate) fn disk_health(part: &str) -> Option<DiskHealth> {
+    static CACHE: LazyLock<HealthCache> = LazyLock::new(Default::default);
     let disk = whole_disk(part);
+    if let Some((at, h)) = CACHE.lock().get(&disk)
+        && at.elapsed() < std::time::Duration::from_secs(60)
     {
-        let g = CACHE.lock();
-        if let Some((at, d, h)) = g.as_ref()
-            && d == &disk
-            && at.elapsed() < std::time::Duration::from_secs(60)
-        {
-            return h.clone();
-        }
+        return h.clone();
     }
     let health = if disk.starts_with("nvme") {
         nvme_health(&disk)
     } else {
         sata_health(&disk)
     };
-    *CACHE.lock() = Some((Instant::now(), disk, health.clone()));
+    CACHE.lock().insert(disk, (Instant::now(), health.clone()));
     health
 }
 
@@ -486,7 +483,7 @@ fn parse_ata_smart(data: &[u8; 512]) -> (Option<u64>, Option<u64>, Option<i32>) 
 }
 
 /// (used, total) bytes of the filesystem holding `path`, counted like `df` (used + available = what can be used).
-fn space(path: &Path) -> Option<(u64, u64)> {
+pub(crate) fn space(path: &Path) -> Option<(u64, u64)> {
     use std::os::unix::ffi::OsStrExt;
     let c = std::ffi::CString::new(path.as_os_str().as_bytes()).ok()?;
     // SAFETY: c is a valid NUL-terminated path; s is written by statvfs before it is read.
@@ -624,7 +621,17 @@ pub async fn run(st: SharedState) {
         let health = dev.as_deref().and_then(disk_health);
         io0 = disk;
         let sp = space(&images);
-        let used = sp.map(|(u, t)| 100.0 * u as f64 / t.max(1) as f64);
+        let pct = |(u, t): (u64, u64)| 100.0 * u as f64 / t.max(1) as f64;
+        // The alert: the fullest of the image disk and the other broom disks (volumes.rs).
+        let used = sp
+            .map(pct)
+            .into_iter()
+            .chain(
+                crate::volumes::mounted(&st)
+                    .into_iter()
+                    .filter_map(|p| space(&p).map(pct)),
+            )
+            .reduce(f64::max);
 
         let now = alerts(
             &[
@@ -660,7 +667,7 @@ pub async fn run(st: SharedState) {
             "net": {"iface": iface, "rx": rx, "tx": tx, "link": link, "pct": net_pct, "virtual": virt},
             "egress": {"iscsi": egress.0, "http": egress.1},
             "disk": {"dev": dev, "busy": busy, "read": rd, "write": wr, "health": health},
-            "space": {"pct": used, "used": sp.map(|s| s.0), "total": sp.map(|s| s.1)},
+            "space": {"pct": sp.map(pct), "used": sp.map(|s| s.0), "total": sp.map(|s| s.1)},
             "limit": limit, "alerts": shown,
         })
         .to_string();

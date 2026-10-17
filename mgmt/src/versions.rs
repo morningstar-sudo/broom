@@ -44,6 +44,11 @@ fn storage() -> PathBuf {
         .unwrap_or_else(|_| crate::home().join("storage"))
 }
 
+/// The versions' root (volumes.rs puts an image's `files/<name>` on its disk).
+pub(crate) fn storage_dir() -> PathBuf {
+    storage()
+}
+
 fn chunk_path(root: &Path, hash: &str) -> PathBuf {
     root.join("chunks").join(&hash[..2]).join(hash)
 }
@@ -371,7 +376,7 @@ fn gc(root: &Path) -> Result<usize, String> {
                 freed += 1;
             }
         }
-        let _ = std::fs::remove_dir(img.path()); // only when empty
+        crate::volumes::remove_dir_if_empty(&img.path()); // only when empty (a link to a volume: its folder too)
     }
     for sub in std::fs::read_dir(root.join("chunks"))
         .into_iter()

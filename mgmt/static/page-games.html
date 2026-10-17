@@ -5,7 +5,7 @@
   <div class="card card-body mb-3">
     <h2 class="h6 text-uppercase text-body-secondary mb-3">Games disks</h2>
     <div class="table-responsive"><table class="table table-sm table-hover align-middle" id="games">
-      <thead><tr><th>Name</th><th>Drive</th><th>Size</th><th>Groups</th><th title="version machines get at boot">Version</th><th title="machines connected (still on an older version)">Machines</th><th>Update machine</th><th>Update not saved</th><th></th></tr></thead>
+      <thead><tr><th>Name</th><th>Drive</th><th>Size</th><th>Groups</th><th title="version machines get at boot">Version</th><th title="machines connected (still on an older version)">Machines</th><th>Update machine</th><th>Update not saved</th><th title="the server disk it is on (Server page → Disks); pick another to move it">Server disk</th><th></th></tr></thead>
       <tbody></tbody></table></div>
   </div>
   <div class="card card-body mb-3">
@@ -16,6 +16,7 @@
       <div><label class="form-label small mb-1" for="gm_size">Size GB</label><input class="form-control form-control-sm" id="gm_size" type="number" min="1" style="width:90px" value="500"></div>
       <div><label class="form-label small mb-1" for="gm_groups">Groups (empty = all machines)</label><input class="form-control form-control-sm" id="gm_groups" size="20" placeholder="VIP, Thuong" list="gm_grouplist"></div>
       <datalist id="gm_grouplist"></datalist>
+      <div class="vol-pick" hidden><label class="form-label small mb-1" for="gm_vol">Server disk (new disk)</label><select class="form-select form-select-sm" id="gm_vol"></select></div>
       <button class="btn btn-sm btn-primary" data-click="saveGames">Add / change</button>
       <span id="gm_msg" class="msg align-self-center"></span>
     </div>

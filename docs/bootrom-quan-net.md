@@ -104,6 +104,13 @@ Chọn một trong hai cách:
 Thêm các máy ở trang **Machines** trước lần boot Windows đầu tiên — máy đã đăng ký và chỉ có một ổ trong thì Broom tự
 chia SSD. Bật máy: lần đầu máy tải image về SSD và tự restart một lần; từ đó mỗi lần boot đều sạch.
 
+Máy có **nhiều ổ cứng**: mở **Devices → máy đó → Disks**, bấm **Use as Broom disk** ở ổ muốn chứa Windows (không phải gõ
+trên màn hình máy trạm). Các ổ còn lại nên để **ẩn khỏi khách** (chọn cho cả nhóm ở trang **Groups**, hoặc riêng từng
+máy): khách không thấy, không ghi được nên không có gì sót lại sau khi restart.
+
+Máy chủ **gắn thêm ổ**: trang **Server → Disks**, bấm **Format** ở ổ mới (gõ tên ổ để xác nhận). Sau đó chọn ổ này khi
+tạo image / ổ game, hoặc chuyển image / ổ game sang bằng cột **Server disk** ở trang Images / Games.
+
 ## Cài game
 
 Ở trang **Games**, tạo ổ game, chọn một **máy cập nhật**. Boot máy đó, cài hoặc cập nhật game trên ổ game,

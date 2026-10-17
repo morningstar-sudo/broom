@@ -217,7 +217,7 @@ fn clear_legacy_zram(st: &SharedState) {
 /// Every published Linux image whose current target the daemon doesn't have (first start, daemon lost its state):
 /// disk → export it again; zram → publish again (new generation + RAM copy, falls back to disk on RAM overflow).
 /// Targets the daemon still has are left alone (clients stay connected).
-fn restore_targets(st: &SharedState) {
+pub(crate) fn restore_targets(st: &SharedState) {
     let have: Vec<String> = crate::iscsi::list()
         .unwrap_or_default()
         .into_iter()
@@ -394,7 +394,7 @@ fn publish_iscsi_staged(
     let size = std::fs::metadata(img_abs).map_err(|e| e.to_string())?.len();
     let bs = format!(
         "sanhook iscsi:${{broom-srv}}::::{iqn} || shell\n\
-         kernel http://${{broom-srv}}/tftp/broom/{name}/vmlinuz initrd=initrd.img ip=dhcp BOOTIF=01-${{mac:hexhyp}} broom.ip=${{ip}}:${{netmask}}:${{gateway}} root=UUID={root_uuid} ro fsck.mode=skip overlayroot=device:dev=/dev/disk/by-label/broomwb,recurse=0 broom.name={name} broom.hash={hash} broom.size={size} broom.srv=${{broom-srv}} broom.reg=${{broom-reg}} broom.lxgb=${{broom-lxgb}} broom.wbgb=${{broom-wbgb}} broom.ssd=${{broom-ssd}}\n\
+         kernel http://${{broom-srv}}/tftp/broom/{name}/vmlinuz initrd=initrd.img ip=dhcp BOOTIF=01-${{mac:hexhyp}} broom.ip=${{ip}}:${{netmask}}:${{gateway}} root=UUID={root_uuid} ro fsck.mode=skip overlayroot=device:dev=/dev/disk/by-label/broomwb,recurse=0 broom.name={name} broom.hash={hash} broom.size={size} broom.srv=${{broom-srv}} broom.reg=${{broom-reg}} broom.lxgb=${{broom-lxgb}} broom.wbgb=${{broom-wbgb}} broom.ssd=${{broom-ssd}} broom.hide=${{broom-hide}}\n\
          initrd http://${{broom-srv}}/tftp/broom/{name}/initrd.img\n\
          boot"
     );

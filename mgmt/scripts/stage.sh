@@ -101,6 +101,7 @@ ask_disk(){
   for n in "$@"; do
     printf 'broom:   %-10s %6s GB  %s\n' "$n" "$(( $(cat $SYSB/$n/size) / 2097152 ))" "$(cat $SYSB/$n/device/model 2>/dev/null)" > $CON
   done
+  echo "broom: (or pick it on the server: Devices -> this machine -> Disks, then press Enter)" > $CON
   printf 'broom: type the disk to ERASE (e.g. %s), or press Enter to reboot without touching any disk: ' "$1" > $CON
   read -r ans < $CON
   for n in "$@"; do [ "$ans" = "$n" ] && { echo "$n"; return; }; done
@@ -111,6 +112,42 @@ if [ -z "$disk" ] && [ "$REG" = 1 ] && [ $# -eq 1 ]; then
   # The single disk would be wiped without asking — but a disk that shows up late (slow controller, async probe)
   # could be the Broom SSD, making this one the wrong choice. Look again after a pause: still that one disk → go.
   one=$1; sleep 5; udevadm settle 2>/dev/null; scan; disk=$(broomdisk)
+fi
+# Every disk reported to the server (Devices page), which answers with the Broom disk chosen there (if any) and
+# whether the other disks are hidden from the guest. A disk is known by a stable id — WWN, else serial, else
+# name + size — since sda / nvme0n1 can swap between boots. The network comes up here, in this shell (see ask_disk).
+did(){
+  p=$(udevadm info -q property -n /dev/$1 2>/dev/null)
+  i=$(echo "$p" | sed -n 's/^ID_WWN=//p' | head -n 1)
+  [ -n "$i" ] || i=$(echo "$p" | sed -n 's/^ID_SERIAL=//p' | head -n 1)
+  [ -n "$i" ] || i="$1-$(cat $SYSB/$1/size)"
+  echo "$i" | tr -c 'A-Za-z0-9._:\n-' '_'
+}
+report_disks(){
+  : > /run/broom-disks.txt
+  for n in $disks; do
+    b=0; [ "$n" = "$disk" ] && b=1
+    echo "$(did $n) $(( $(cat $SYSB/$n/size) * 512 )) $b $n $(cat $SYSB/$n/device/model 2>/dev/null)" >> /run/broom-disks.txt
+  done
+  [ -n "$MAC" ] && wget -q -T 10 -O /run/broom-plan --post-file=/run/broom-disks.txt "http://$SRV/api/disks/report?mac=$MAC" 2>/dev/null
+}
+configure_networking
+report_disks || : > /run/broom-plan
+WANT=$(sed -n 's/^broom=//p' /run/broom-plan); HIDE=$(sed -n 's/^hide=//p' /run/broom-plan)
+if [ -n "$WANT" ]; then
+  want=""; for n in $disks; do [ "$(did $n)" = "$WANT" ] && want=$n; done
+  if [ -z "$want" ]; then
+    log "the Broom disk chosen on the server ($WANT) is not in this machine -> keeping /dev/${disk:-none}"
+  elif [ "$want" != "$disk" ] && [ "$REG" = 1 ]; then
+    # Chosen on the web (confirmed there). The old Broom disk only holds broom's own data: its partitions go, so
+    # the machine never has two.
+    if [ -n "$disk" ]; then
+      log "Broom disk moves from /dev/$disk to /dev/$want (chosen on the server): /dev/$disk loses its Broom partitions"
+      sfdisk -q --delete /dev/$disk >/dev/null 2>&1 || log "could not clear /dev/$disk"
+      udevadm settle 2>/dev/null
+    fi
+    disk=$want; NEWDISK=1
+  fi
 fi
 if [ -n "$disk" ]; then
   # p1/p2 not Windows' = a Linux-only layout of an older version → laid out again (only broom data on it).
@@ -124,7 +161,6 @@ if [ -z "$disk" ]; then
   if [ "$REG" = 1 ] && [ $# -eq 1 ] && [ "$1" = "$one" ]; then
     disk=$1
   else
-    [ "$REG" = 1 ] || configure_networking # in this shell (see ask_disk): its IP is shown on the screen
     disk=$(ask_disk "$@")
     [ -n "$disk" ] || restart "no disk chosen -> nothing was touched"
   fi
@@ -137,6 +173,7 @@ if [ -n "$NEWDISK" ]; then
   udevadm settle 2>/dev/null
   i=0; while [ ! -b "$(part $disk 2)" ] && [ $i -lt 10 ]; do sleep 1; i=$((i+1)); done
   FORMAT=1
+  report_disks >/dev/null 2>&1   # the Devices page shows the new Broom disk at once
 fi
 # Windows' partitions only — the Linux side formats its own.
 if [ -n "$FORMAT" ]; then
@@ -160,6 +197,8 @@ if mnt discard || mnt force,discard; then log "BROOMWIN: discard mount (freed sp
 elif mnt rw || mnt force; then log "BROOMWIN: plain mount (the disk takes no TRIM)"
 else die "mount ntfs3 $(part $disk 2)"; fi
 mkdir -p $B
+# The other disks hidden from the guest (Devices / Groups page): broom-watch takes them offline in Windows.
+if [ "$HIDE" = 1 ]; then echo 1 > $B/hide-disks; else rm -f $B/hide-disks; fi
 
 # 0. Every Windows image this machine boots keeps its files on BROOMWIN: the one booting now at the top of broom\ —
 #    where the boot loader (\broom\child.vhdx) and broom-done look — the others parked in broom\img.<image>\ (image

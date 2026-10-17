@@ -172,6 +172,15 @@ registered machine with exactly one internal disk. An unknown machine (or one wi
 screen which disk to wipe — type its name, or press Enter to leave the disks alone. Linux images on such a machine
 keep their writes in RAM (zram) instead of touching a disk.
 
+**Machines with more than one disk** (Devices → a machine → *Disks*): every Windows boot reports the machine's disks
+(by WWN / serial, so a disk keeps its identity when sda and sdb swap). **Use as Broom disk** picks the disk Windows
+lives on — no question on the machine's screen: at its next boot that disk is erased and set up, and the old Broom disk
+loses its Broom partitions (only Broom's own files were on it). **Other disks: hidden** keeps the guest off them —
+offline in Windows (`broom-watch` takes them offline again within 15 s if the guest brings one back), removed from the
+kernel on a Linux image — so nothing written there outlives the reset. Set it per group (Groups page) or per machine;
+USB drives stay. It keeps the room clean, it is not a lock: the guest is an administrator. Linux images need one
+republish to get it.
+
 **One Broom SSD per machine, shared by Windows and Linux images** (other disks stay normal disks):
 `p1 BROOMEFI 512M | p2 BROOMWIN (Windows) | p3 broomwb 30G + p4 broomcache (Linux)`. Whichever OS boots first lays
 it out; the other only formats its own partitions, so switching images never wipes the disk. Every image a machine
@@ -219,9 +228,9 @@ The menu is grouped (each group folds; the one holding the open page stays open)
 |---|---|---|
 | Monitor | **Machines** | every machine: on/off, uptime, traffic now, health badge, license, Wake / Manage / Remote |
 | | **Remote** | live wall of every Windows machine's screen; click one to control it |
-| | **Server** | the server's CPU / RAM / network / disk load + 10-minute charts, services up/down, its disk's SMART, live iSCSI; alert threshold, RAM reserve |
-| Manage | **Devices** | register / edit / import machines, a machine's detail (lease, license, drivers, health) |
-| | **Groups** | which images, games disks and drivers each group of machines gets |
+| | **Server** | the server's CPU / RAM / network / disk load + 10-minute charts, services up/down, its disks (SMART, format a new one for images / games disks), live iSCSI; alert threshold, RAM reserve |
+| Manage | **Devices** | register / edit / import machines, a machine's detail (lease, license, drivers, health, its disks: Broom disk, hide the others) |
+| | **Groups** | which images, games disks and drivers each group of machines gets; hide their other disks |
 | Content | **Images** | goldens: upload, publish, cache (disk / RAM), versions, export, boot menu |
 | | **Games** | shared games disks and their update machine |
 | | **Drivers** | driver packages installed into each Windows machine's base |
@@ -379,12 +388,23 @@ Everything lives next to the binary:
 ├── images/<name>/   # image.img = golden (raw, sparse)
 ├── storage/         # image versions (hard links to the goldens + manifests)
 ├── games/<name>/    # games.img = a Windows games disk; layer-N/ = newer versions not merged yet; update.* = unsaved
+├── disks/<id>/      # other server disks broom mounted (Server → Disks): their images/, games/, storage/files/
 ├── tftp/            # boot files (kernel/initrd, Windows templates, stage) — served over HTTP /tftp + TFTP
 └── work/            # scratch for publish steps
 ```
 
 Environment overrides: `BOOTROM_HOME` (the whole tree), `BOOTROM_IMAGES_DIR` / `BOOTROM_STORAGE_DIR`
 (e.g. a bigger disk), `BOOTROM_DB=sqlite:///path/bootrom.db`.
+
+**More disks on the server** (Server → *Disks*): every disk with its partitions, mounts, SMART and state (system /
+in use / broom / free). **Format** a free disk (type its name to confirm): it is erased, made ext4 (`mkfs.ext4`; xfs
+when only `mkfs.xfs` is installed) and mounted at `disks/<id>/` — by broom itself at every start, no fstab. Or **Add
+folder** for something you mounted yourself (LVM, RAID). Then pick that disk when creating an image or a games disk,
+or move one there from the Images / Games page (*Server disk* column): its files are copied — sparse, versions kept as
+hard links — then the old copy goes; refused while machines use it. An image / games disk on another disk is a
+symlink at its usual place (`images/<name>`, `storage/files/<name>`, `games/<name>`), so backups must follow links
+(`cp -aL` / `rsync -L`, or back the disk up too). A disk that is missing at start is logged and what is on it is not
+served until it is back. The *Disk space* alert covers every broom disk.
 
 Logs go to stdout (client boots, DHCP/TFTP, publish steps, config changes); warnings and errors to
 stderr; the newest 2000 lines also show on the **Logs** page. `RUST_LOG=debug` also logs every external command.
@@ -398,6 +418,7 @@ Under systemd: `journalctl -u bootrom-mgmt -f`.
 | `images/` | the goldens (`image.img`, sparse) | stop the service or pick a time with no publish running; `cp --sparse=always -a` / `rsync -S` |
 | `storage/` | image versions (hard links + manifests) | same as `images/` — copy both together, with `cp -a` / `rsync -H` (keeps the links) |
 | `tftp/` | boot files | optional: rebuilt by **Publish** on each image (back it up to skip that) |
+| `disks/<id>/` | images / games disks on other server disks (Server → Disks) | like `images/` and `storage/`; or copy `images/`, `storage/`, `games/` following links (`cp -aL`, `rsync -L` — that loses the version hard links: more space) |
 | `work/` | scratch | no |
 
 Restore: stop the service, put the files back in the same layout, start it — iSCSI targets and RAM copies are

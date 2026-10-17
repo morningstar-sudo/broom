@@ -255,6 +255,7 @@ fn is_public(method: &axum::http::Method, path: &str) -> bool {
         "/boot/start",
         "/api/cache-list",
         "/api/drivers/for",
+        "/api/disks/report",
         "/api/license",
         "/api/license/result",
         "/api/booted",

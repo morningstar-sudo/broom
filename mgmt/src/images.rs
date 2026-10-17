@@ -68,6 +68,7 @@ async fn list(State(st): State<SharedState>) -> Result<Json<Vec<serde_json::Valu
         v["used"] = m.as_ref().map(|m| m.blocks() * 512).into();
         v["export"] = crate::export::export_info(&i.name);
         v["job"] = jobs.get(&i.name).cloned().into();
+        v["volume"] = crate::volumes::volume_of(&st, "image", &i.name).into();
         v
     });
     Ok(Json(rows.collect()))
@@ -79,6 +80,9 @@ struct NewImage {
     os: String,
     boot_script: Option<String>,
     cache_mode: Option<String>,
+    /// The broom disk it goes on (volumes.rs); None = broom's own folder.
+    #[serde(default)]
+    volume: Option<String>,
 }
 
 /// Image / package name: letters, digits, `_`, `-`, at most 64 (the boot menu passes it on as is, /boot/start keeps 64).
@@ -106,7 +110,12 @@ async fn create(
             "os must be 'linux' or 'windows'".into(),
         ));
     }
-    // One folder per image under the binary's directory.
+    // One folder per image under the binary's directory (on another broom disk: a link to its folder there). Never
+    // into an existing image's folder: the row insert below refuses a taken name.
+    if st.db.image_by_name(&b.name).map_err(ise)?.is_none() {
+        crate::volumes::create_on(&st, b.volume.as_deref(), "image", &b.name)
+            .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+    }
     std::fs::create_dir_all(crate::images_dir().join(&b.name))
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     let cache_mode = match b.cache_mode.as_deref() {
@@ -156,7 +165,7 @@ async fn delete(
         let mut freed = 0;
         if valid_name(&n) {
             crate::publish::unpublish(&st2, &n); // target, zram, tftp/ boot files (golden.vhdx)
-            let _ = std::fs::remove_dir_all(crate::images_dir().join(&n));
+            let _ = crate::volumes::remove_tree(&crate::images_dir().join(&n)); // on another disk: there too
             let _ = std::fs::remove_dir_all(crate::export::export_dir(&n));
             let _g = st2.versions_lock.lock();
             freed = crate::versions::delete_all(&n).unwrap_or(0);

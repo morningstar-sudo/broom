@@ -104,9 +104,10 @@ async fn list(State(st): State<SharedState>) -> Json<serde_json::Value> {
         .map(|d| serde_json::json!({"name": d.name, "letter": d.letter, "groups": d.groups}))
         .collect();
     let drivers: Vec<_> = st.db.drivers().unwrap_or_default().iter().map(|d| serde_json::json!({"id": d.id, "name": d.name, "all": d.all_machines, "groups": d.groups})).collect();
-    Json(
-        serde_json::json!({"groups": all(&st), "machines": machines, "images": images, "disks": disks, "drivers": drivers}),
-    )
+    Json(serde_json::json!({
+        "groups": all(&st), "machines": machines, "images": images, "disks": disks, "drivers": drivers,
+        "hide_disks": crate::disks::hidden_groups(&st),
+    }))
 }
 
 #[derive(Deserialize)]
@@ -256,6 +257,8 @@ async fn rename(
             },
             true,
         )?;
+        let hide = swap(&crate::disks::hidden_groups(&st2), &f2, Some(&t2));
+        crate::disks::set_hidden_groups(&st2, &hide).map_err(ise)?;
         save(&st2, &swap(&saved(&st2), &f2, Some(&t2)))
     })
     .await
@@ -280,6 +283,8 @@ async fn delete(
             &|m| m.grp.clone().filter(|g| !same(g, &n2)),
             false,
         )?;
+        let hide = swap(&crate::disks::hidden_groups(&st2), &n2, None);
+        crate::disks::set_hidden_groups(&st2, &hide).map_err(ise)?;
         save(&st2, &swap(&saved(&st2), &n2, None))
     })
     .await
@@ -306,6 +311,9 @@ struct SetBody {
     /// An image / games disk may lose its last group (then every machine gets it).
     #[serde(default)]
     allow_all: bool,
+    /// Its machines hide their other disks from the guest (disks.rs); None = unchanged.
+    #[serde(default)]
+    hide_disks: Option<bool>,
 }
 
 /// POST /api/groups/set {name, machines, images, disks, drivers, allow_all} — exactly these are the group's. Images /
@@ -343,6 +351,13 @@ async fn set(
             }
         };
         apply(&st2, &f, &machine, b.allow_all)?;
+        if let Some(on) = b.hide_disks {
+            let mut hide = swap(&crate::disks::hidden_groups(&st2), &n2, None);
+            if on {
+                hide.push(n2.clone());
+            }
+            crate::disks::set_hidden_groups(&st2, &hide).map_err(ise)?;
+        }
         let mut v = saved(&st2);
         if !v.iter().any(|g| same(g, &n2)) {
             v.push(n2.clone());

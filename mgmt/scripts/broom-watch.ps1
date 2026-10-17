@@ -74,6 +74,25 @@ function StartAgent {
   try { Start-Process $agentExe -ArgumentList $Srv -WindowStyle Hidden } catch { }
 }
 StartAgent
+# Other disks hidden from the guest (Devices / Groups page; the stage leaves broom\hide-disks): every internal disk but
+# the Broom disk taken offline, again every 15 s (the guest is an admin and could bring one back). Offline is kept in
+# the registry, which resets with the session: turned off on the server, the disks are back after the next boot.
+# The Broom disk = the one holding BROOMWIN; exactly one must be found, else nothing is touched (taking that disk
+# offline would pull Windows' own VHDX away). Virtual disks (C:, games) and USB stay. Get-Disk loads the Storage
+# module: only on machines that hide.
+$hide = $Vol -and [IO.File]::Exists("$Vol\broom\hide-disks")
+function HideDisks {
+  if (-not $hide) { return }
+  try {
+    $own = @(Get-Volume -FileSystemLabel BROOMWIN -ErrorAction Stop | Get-Partition | Get-Disk | ForEach-Object { $_.Number } | Select-Object -Unique)
+    if ($own.Count -ne 1) { return }
+    Get-Disk | Where-Object {
+      $_.Number -ne $own[0] -and -not $_.IsOffline -and -not $_.IsBoot -and -not $_.IsSystem -and
+      @('USB', 'File Backed Virtual', 'iSCSI', 'Virtual', 'SD', 'MMC') -notcontains [string]$_.BusType
+    } | ForEach-Object { Set-Disk -Number $_.Number -IsOffline $true -ErrorAction SilentlyContinue }
+  } catch { }
+}
+HideDisks
 # Boot time (Benchmark page): the desktop is up once explorer runs (guest logged on) -> tell the server, which times it
 # from the menu choice on its own clock. Checked every second for up to 15 minutes, then the watchdog goes on.
 for ($i = 0; $i -lt 900; $i++) {
@@ -102,5 +121,6 @@ while ($true) {
     }
   }
   StartAgent   # re-ensure the remote agent is up (guest killed it, or it crashed)
+  HideDisks
   Start-Sleep 15
 }

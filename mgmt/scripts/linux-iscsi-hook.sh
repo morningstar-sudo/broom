@@ -5,13 +5,14 @@ log(){ echo "broom: $*"; echo "$*" >> /run/broom-wb.log; }
 WB_GB=""   # writeback GB (broom.wbgb, set by the server); the rest of the Linux part = cache + /games.
 modprobe iscsi_tcp 2>/dev/null
 modprobe iscsi_ibft 2>/dev/null
-NAME=""; HASH=""; SIZE=""; NOCACHE=""; REG=""; LX=""; SSD=""; SRV=""; MAC=""; BIP=""
+NAME=""; HASH=""; SIZE=""; NOCACHE=""; REG=""; LX=""; SSD=""; SRV=""; MAC=""; BIP=""; HIDE=""
 for a in $(cat /proc/cmdline); do
   case "$a" in
     BOOTIF=01-*) MAC=$(echo "${a#BOOTIF=01-}" | tr 'A-F-' 'a-f:');; broom.ip=*) BIP=${a#*=};;
     broom.name=*) NAME=${a#*=};; broom.hash=*) HASH=${a#*=};; broom.size=*) SIZE=${a#*=};;
     broom.nocache) NOCACHE=1;;
     broom.reg=*) REG=${a#*=};; broom.lxgb=*) LX=${a#*=};; broom.ssd=*) SSD=${a#*=};; broom.srv=*) SRV=${a#*=};; broom.wbgb=*) WB_GB=${a#*=};;
+    broom.hide=*) HIDE=${a#*=};;
   esac
 done
 case "$LX" in ''|*[!0-9]*) LX=0;; esac
@@ -107,6 +108,18 @@ if [ -z "$wb" ] && modprobe zram 2>/dev/null && [ -e /sys/block/zram0/disksize ]
   mem=$(sed -n 's/^MemTotal: *\([0-9]*\) kB/\1/p' /proc/meminfo)
   echo "$((mem * 512))" > /sys/block/zram0/disksize
   mkfs.ext4 -qF -L broomwb -O ^has_journal /dev/zram0 2>/dev/null && wb=/dev/zram0
+fi
+# The machine's other local disks hidden from the guest (Devices / Groups page): taken out of the kernel before the
+# real root starts, so nothing mounts or writes them. Every disk but the one carrying broom's partitions.
+if [ "$HIDE" = 1 ]; then
+  for n in $localdisks; do
+    keep=""
+    for p in /sys/block/$n/$n*; do
+      case "$(pname $p)" in BROOMEFI|BROOMWIN|broomwb|broomcache) keep=1;; esac
+    done
+    [ -n "$keep" ] && continue
+    echo 1 > /sys/block/$n/device/delete 2>/dev/null && log "/dev/$n hidden (Devices: other disks hidden)"
+  done
 fi
 
 # 2. Cache: mount p2 under /run (moves to the real root with /run → service + /games keep using it).

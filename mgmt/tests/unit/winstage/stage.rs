@@ -157,10 +157,15 @@ fn stage_disk_choice() {
     let part = &s[s.find("part(){").unwrap()..s.find("# end disk choice").unwrap()];
     // disks: name ("+" suffix = shows up only after the stage's pause), usb, partition names ("" = none) and
     // whether p2 already holds the BROOMWIN filesystem.
+    // What the server answers to the disk report (/api/disks/report); empty = no answer.
+    let plan = std::cell::RefCell::new(String::new());
     let run = |name: &str, disks: &[(&str, bool, &[&str], bool)], reg: &str, answer: &str| {
         let d = std::env::temp_dir().join(format!("broom_t_disk_{name}"));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(d.join("block")).unwrap();
+        if !plan.borrow().is_empty() {
+            std::fs::write(d.join("plan"), plan.borrow().as_str()).unwrap();
+        }
         let mut ntfs = Vec::new();
         for (n, usb, parts, formatted) in disks {
             let (n, late) = n.strip_suffix('+').map_or((*n, false), |n| (n, true));
@@ -218,9 +223,15 @@ fn stage_disk_choice() {
             .replace(
                 "read -r ans < $CON",
                 &format!("read -r ans < {}/answer", d.display()),
-            );
+            )
+            .replace("/run/broom-", &format!("{}/broom-", d.display()));
+        // No udevadm here → disks are known as "<dev>-<sectors>". wget = the server's answer; sfdisk = recorded.
         let sh = format!(
-            "REG={reg}; LX=50\nlog(){{ :; }}; die(){{ echo DIE; exit; }}; restart(){{ echo RESTART; exit; }}; configure_networking(){{ :; }}\n{body}\necho \"DISK $disk ${{NEWDISK:--}} ${{FORMAT:--}}\""
+            "REG={reg}; LX=50; MAC=aa:bb:cc:dd:ee:ff; SRV=srv\nlog(){{ :; }}; die(){{ echo DIE; exit; }}; restart(){{ echo RESTART; exit; }}; configure_networking(){{ :; }}\n\
+             wget(){{ o=; while [ $# -gt 0 ]; do [ \"$1\" = -O ] && o=$2; shift; done; [ -f {0}/plan ] && cp {0}/plan \"$o\"; }}\n\
+             sfdisk(){{ echo \"$*\" >> {0}/sfdisk; }}; udevadm(){{ :; }}\n\
+             {body}\necho \"DISK $disk ${{NEWDISK:--}} ${{FORMAT:--}} $(cat {0}/sfdisk 2>/dev/null)\"",
+            d.display()
         );
         let o = stage_sh().args(["-c", &sh]).output().unwrap();
         let _ = std::fs::remove_dir_all(&d);
@@ -334,6 +345,41 @@ fn stage_disk_choice() {
         ),
         "DISK sdb 1 -",
         "older Linux-only layout → laid out again, no question"
+    );
+    // The Broom disk chosen on the server (Devices → Disks), by id.
+    *plan.borrow_mut() = "broom=sdb-500118192\nhide=1\n".into();
+    let two = [("sda", false, WIN, true), ("sdb", false, NONE, false)];
+    assert_eq!(
+        run("m", &two, "1", ""),
+        "DISK sdb 1 - -q --delete /dev/sda",
+        "moved to the chosen disk, the old one cleared"
+    );
+    assert_eq!(
+        run("n", &two, "", ""),
+        "DISK sda - -",
+        "an unregistered machine never follows a choice"
+    );
+    assert_eq!(
+        run(
+            "o",
+            &[("sda", false, NONE, false), ("sdb", false, NONE, false)],
+            "1",
+            ""
+        ),
+        "DISK sdb 1 -",
+        "no Broom disk yet, several disks: the choice, no question"
+    );
+    *plan.borrow_mut() = "broom=sdz-1\nhide=0\n".into();
+    assert_eq!(
+        run("p", &two, "1", ""),
+        "DISK sda - -",
+        "chosen disk not in the machine → kept, nothing wiped"
+    );
+    *plan.borrow_mut() = "broom=sda-500118192\nhide=0\n".into();
+    assert_eq!(
+        run("q", &two, "1", ""),
+        "DISK sda - -",
+        "chosen = current: nothing to do"
     );
     // ask_disk runs in $(...): configure_networking there would be forgotten (IP=done lives in a shell variable)
     // and the next call would run DHCP again on the configured NIC — downloads then crawled at ~200 KB/s.

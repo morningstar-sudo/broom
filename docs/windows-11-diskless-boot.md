@@ -92,6 +92,9 @@ PC restarts once by itself, and from then on every boot is clean.
 - **Health** — each PC's CPU, RAM, temperatures, disk health (SMART, bad sectors), uptime and the traffic it draws
   now on the Machines page; the server's own load with 10-minute charts, its disk health and whether DHCP, TFTP and
   the iSCSI target are up on the Server page.
+- **More disks** — on a PC with several disks, pick the one Windows lives on from the web (Devices → Disks) and hide
+  the others from the guest (per group or per PC), so nothing written there survives the reset. On the server, format
+  a new disk from the Server page and keep images or games disks on it.
 - **Logs** — the server's log in the browser (Tools → Logs): filter warnings and errors, search a PC's name, follow
   live while it boots.
 

@@ -96,7 +96,15 @@ static LAST_ERR: parking_lot::Mutex<Option<String>> = parking_lot::Mutex::new(No
 /// Push the list to the iSCSI daemon (at start, on change, and every minute: an update machine's lease may move).
 /// A new error is logged once as a warning (it repeats every minute until fixed). Blocking.
 pub fn sync(st: &SharedState) -> Result<(), String> {
-    let list = configs(st);
+    sync_except(st, None)
+}
+
+/// sync() without disk `skip` (volumes.rs: the daemon lets go of its files while they move).
+pub fn sync_except(st: &SharedState, skip: Option<&str>) -> Result<(), String> {
+    let list: Vec<Config> = configs(st)
+        .into_iter()
+        .filter(|c| Some(c.name.as_str()) != skip)
+        .collect();
     let r = if list.is_empty() && crate::iscsi::games_status().is_none() {
         Ok(()) // nothing to serve, no daemon to tell
     } else {
@@ -112,6 +120,27 @@ pub fn sync(st: &SharedState) -> Result<(), String> {
     }
     *last = r.as_ref().err().cloned();
     r
+}
+
+/// Nobody uses disk `name` (volumes.rs moves it): no client session, no update connected / unsaved, no merge.
+pub fn idle(name: &str) -> Result<(), String> {
+    let Some(i) = crate::iscsi::games_status()
+        .unwrap_or_default()
+        .into_iter()
+        .find(|i| i.name == name)
+    else {
+        return Ok(()); // not served: nobody can use it
+    };
+    if i.sessions > 0 || i.old_sessions > 0 {
+        return Err(format!(
+            "{} machine(s) use it — shut them down first",
+            i.sessions + i.old_sessions
+        ));
+    }
+    if i.update_connected || i.update_bytes > 0 || i.merging {
+        return Err("its update is not saved / still merging — Save or Discard it first".into());
+    }
+    Ok(())
 }
 
 async fn sync_now(st: SharedState) -> Result<(), ApiError> {
@@ -149,6 +178,7 @@ async fn status(State(st): State<SharedState>) -> Json<serde_json::Value> {
                 "update_name": upd.map(who),
                 "update_ip": d.update.and_then(|id| ip_of(&st, id)),
                 "status": s,
+                "volume": crate::volumes::volume_of(&st, "games", &d.name),
                 "disk": d,
             })
         })
@@ -174,9 +204,12 @@ struct DiskBody {
     letter: String,
     #[serde(default)]
     groups: Vec<String>,
+    /// A new disk: the broom disk it goes on (volumes.rs); None = broom's own folder.
+    #[serde(default)]
+    volume: Option<String>,
 }
 
-/// POST /api/games/disk {name, size_gb, letter, groups} — add a disk, or change one (same name). games.img is created
+/// POST /api/games/disk {name, size_gb, letter, groups, volume} — add a disk, or change one (same name). games.img is created
 /// sparse and can only grow (the update machine extends its partitions to the new size on its next boot).
 async fn upsert(
     State(st): State<SharedState>,
@@ -224,6 +257,9 @@ async fn upsert(
         )));
     }
     if want > have {
+        if old.is_none() {
+            crate::volumes::create_on(&st, b.volume.as_deref(), "games", &name).map_err(bad)?;
+        }
         std::fs::create_dir_all(p.parent().unwrap()).map_err(ise)?;
         let f = std::fs::OpenOptions::new()
             .create(true)
@@ -270,7 +306,7 @@ async fn delete(
     let dir = img(&b.name).parent().unwrap().to_path_buf();
     // Off the async threads: freeing a sparse disk of many TB (+ its versions) can take seconds.
     tokio::task::spawn_blocking(move || {
-        std::fs::remove_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))
+        crate::volumes::remove_tree(&dir).map_err(|e| format!("{}: {e}", dir.display()))
     })
     .await
     .map_err(|e| ise(e.to_string()))?

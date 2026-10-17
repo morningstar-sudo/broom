@@ -11,6 +11,7 @@ mod db;
 mod devices;
 mod dhcp;
 mod disk;
+mod disks;
 mod drivers;
 mod export;
 mod games;
@@ -39,6 +40,7 @@ mod versions;
 mod vhdx;
 mod vmdk;
 mod vnc;
+mod volumes;
 mod winstage;
 mod wol;
 
@@ -487,6 +489,10 @@ async fn main() {
         ssd_low: Mutex::new(std::collections::HashMap::new()),
     });
     auth::init_setup_token(&state);
+    // Broom disks formatted here mounted again, before anything on them is served.
+    if preflight::is_root() {
+        volumes::mount_all(&state);
+    }
 
     // Built-in DHCP server + TFTP + iSCSI targets. Distro services from older versions
     // (dnsmasq, tftpd, targetcli's restore service) → stopped first; stopping the latter clears LIO.
@@ -605,6 +611,8 @@ async fn main() {
         .merge(vnc::routes()) // Remote page: screen + mouse/keys of a Windows machine
         .merge(logbuf::routes()) // Logs page: the newest log lines
         .merge(sysmon::routes()) // Server page: services up or down
+        .merge(disks::routes()) // client disks: inventory, Broom disk, hide the others
+        .merge(volumes::routes()) // server disks: format, mount, images / games disks on them
         .merge(auth::routes()) // admin login
         // Serve boot assets over HTTP (kernel/initrd much faster than TFTP).
         // /tftp/... -> <home>/tftp/... (e.g. http://SERVER/tftp/broom-stage/vmlinuz); a Windows golden set to RAM

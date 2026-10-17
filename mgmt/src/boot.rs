@@ -230,7 +230,7 @@ pub async fn start(
                         .map(|m| m.len())
                 });
             format!(
-                "#!ipxe\nset broom-srv {}\nset broom-base {}\nset broom-strict {}\nset broom-lxgb {}\nset broom-wbgb {WB_GB}\nset broom-ssd {}\n{}{bs}\n",
+                "#!ipxe\nset broom-srv {}\nset broom-base {}\nset broom-strict {}\nset broom-lxgb {}\nset broom-wbgb {WB_GB}\nset broom-ssd {}\nset broom-hide {}\n{}{bs}\n",
                 // The server's address at boot time — boot scripts use ${broom-srv}, so changing the Server IP needs
                 // no republish.
                 st.db.get_config("dhcp_server_ip", ""),
@@ -238,6 +238,9 @@ pub async fn start(
                 strict as u8,
                 linux_share_gb(linux_sizes),
                 (i.use_ssd || i.os == "windows") as u8,
+                // A Linux image hides the machine's other disks itself (broom.hide=); the Windows stage asks
+                // /api/disks/report.
+                (!mac.is_empty() && crate::disks::hide_for(&st, &mac)) as u8,
                 shim_line(&st, i).unwrap_or_default()
             )
         }

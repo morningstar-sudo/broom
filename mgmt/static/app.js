@@ -257,9 +257,38 @@ async function dvOpen(id){
       <tr><td class="mono">Hardware (${d.hwids.length})</td><td class="mono" style="white-space:normal">${d.hwids.length
         ?`<details><summary>IDs its stage reported at the last boot</summary>${d.hwids.map(esc).join('<br>')}</details>`
         :'— (no Windows boot since this was added)'}</td></tr>
-    </tbody></table>`;
+    </tbody></table>
+    <h3 class="h6 mt-3">Disks</h3><div id="dd_disks" class="msg">…</div>`;
   dvRender();
+  dvDisks(m.mac,name);
 }
+// The machine's local disks as its stage reported them (disks.rs): which one is the Broom disk, pick another one
+// (erased at the next boot), hide the others from the guest.
+async function dvDisks(mac,name){const el=document.getElementById('dd_disks');if(!el)return;
+  let k;try{k=await j('/api/disks?mac='+encodeURIComponent(mac));}catch(e){el.textContent='✗ '+e.message;return;}
+  const hide=k.hide==null?'':k.hide?'1':'0';
+  const rows=k.disks.map(d=>{const label=`${d.dev} ${gbs(d.size)} ${d.model}`.trim();
+    const role=d.broom?'<span class="badge text-bg-primary">Broom disk</span>'
+      :k.broom===d.id?'<span class="badge text-bg-warning" title="erased and set up at the next boot">Broom disk at next boot</span>'
+      :`<button class="btn btn-sm btn-outline-danger" ${act('dvBroomDisk',mac,d.id,label,name)} title="erase it at the next boot and keep Windows there instead">Use as Broom disk</button>`;
+    return `<tr><td class="mono">${esc(d.dev)}</td><td class="mono">${gbs(d.size)}</td><td>${esc(d.model||'—')}</td><td class="mono small">${esc(d.id)}</td><td>${role}</td></tr>`;}).join('');
+  el.innerHTML=`<div class="d-flex flex-wrap gap-2 align-items-center mb-2"><label class="small" for="dd_hide">Other disks</label>
+      <select class="form-select form-select-sm w-auto" id="dd_hide" data-change="dvHide" data-args="${esc(JSON.stringify([mac]))}">
+        <option value="" ${hide===''?'selected':''}>as its group (${k.group_hide?'hidden':'visible'})</option>
+        <option value="1" ${hide==='1'?'selected':''}>hidden from the guest</option>
+        <option value="0" ${hide==='0'?'selected':''}>visible</option></select>
+      <span class="small text-body-secondary">hidden = offline in Windows, gone on a Linux image; applies from the next boot</span><span id="dk_msg" class="msg"></span></div>
+    ${rows?`<table class="table table-sm align-middle mb-0"><thead><tr><th>Disk</th><th>Size</th><th>Model</th><th>Id</th><th></th></tr></thead><tbody>${rows}</tbody></table>
+      <div class="small text-body-secondary mt-1">reported ${new Date(k.seen*1000).toLocaleString()} (Windows boots)</div>`
+      :'<span class="mono">— not reported yet (boot Windows on it once)</span>'}`;}
+async function dvHide(mac,el){const m=document.getElementById('dk_msg');
+  try{await j('/api/disks/hide',mk({mac,hide:el.value===''?null:el.value==='1'}));say(m,' ✓ saved');}catch(e){say(m,' ✗ '+e.message);}}
+async function dvBroomDisk(mac,id,label,name){
+  const t=await ask('Erase a disk',`At its next boot ${name} ERASES ${label} and keeps Windows there; its current Broom disk loses its Broom partitions (only Broom's own files are on it). Type the machine name to confirm.`,'');
+  if(t==null)return;
+  if(t.trim()!==name){toast('Name does not match — nothing changed',true);return;}
+  try{await j('/api/disks/broom',mk({mac,id}));toast('Set: '+label+' becomes the Broom disk at the next boot');dvDisks(mac,name);}
+  catch(e){toast(e.message,true);}}
 function dvClose(){dvOpenId=null;const b=document.getElementById('dv_detail');if(b)b.hidden=true;dvRender();}
 async function dvSave(id){
   const img=document.getElementById('dd_img').value, msg=document.getElementById('dd_msg');
@@ -301,7 +330,7 @@ function mxText(m){const l=[`CPU ${m.cpu}%  RAM ${m.ram}%`];
   return l.join('\n');}
 let imgRows=[];
 async function loadImages(){
-  const rows=imgRows=await j('/api/images');
+  const [rows]=await Promise.all([j("/api/images"),loadVols()]);imgRows=rows;
   document.querySelector('#images tbody').innerHTML=rows.map(i=>
     `<tr><td>${esc(i.name)}${i.export?`<div class="mono" style="font-size:12px" title="exported ${i.export.created?new Date(i.export.created*1000).toLocaleString():''} — save both into one folder, open the .vmx in VMware">${ic('down','')} <a href="/api/images/export-file?id=${i.id}&f=vmx">.vmx</a> · <a href="/api/images/export-file?id=${i.id}&f=vmdk">.vmdk ${gbs(i.export.size)}</a> (${esc(i.export.version)})</div>`:''}</td><td>${osPill(i.os)}</td>
        <td><a href="#" ${act('editImgGroups',i.id,i.name,i.groups)} title="machine groups that get it in their boot menu">${i.groups.length?esc(i.groups.join(', ')):'all'}</a></td>
@@ -309,6 +338,7 @@ async function loadImages(){
        <td>${i.is_default?ic('ok'):''}</td>
        <td>${i.boot_script?ic('ok'):'<span class="mono">no</span>'}</td>
        <td class="mono" title="used on disk / virtual disk">${i.size==null?'—':gbs(i.used)+' / '+gbs(i.size)}${i.active_version?' <span class="badge rounded-pill text-bg-success">'+esc(i.active_version)+'</span>':''}</td>
+       <td>${volCell('image',i.name,i.volume)}</td>
        <td class="mono" title="${esc(i.hash||'')}">${i.hash?esc(i.hash).slice(0,10):'—'}</td>
        <td><div class="d-flex flex-wrap gap-1" style="min-width:320px">
          <button class="btn btn-sm btn-outline-secondary" ${act('setDefault',i.id)}>Default</button>
@@ -320,7 +350,7 @@ async function loadImages(){
          <button class="btn btn-sm btn-outline-secondary" ${act('exportImage',i.id,i.name,null)} title="download as a VMware VM (.vmx + .vmdk) to edit the golden">Export</button>
          <button class="btn btn-sm btn-outline-secondary" ${act('editBoot',i.id)}>Boot</button>
          <button class="btn btn-sm btn-outline-danger" ${act('delImage',i.id,i.name)}>Delete</button>
-       </div></td></tr>`).join('') || '<tr><td colspan=9 class="mono">no images yet</td></tr>';
+       </div></td></tr>`).join('') || '<tr><td colspan=10 class="mono">no images yet</td></tr>';
   // A job still running that this tab doesn't follow (page reloaded / opened meanwhile) → follow it on the status line.
   for(const i of rows)if(i.job&&i.job.startsWith('⏳')&&!jobWatch[i.name])watchJob(i.name,document.getElementById('img_status'));
   // srvhost inside the images fragment → set after it is injected.
@@ -433,11 +463,64 @@ async function addImage(){
   const name=v('up_name'),msg=document.getElementById('up_msg'),cache=document.getElementById('up_cache').value;
   if(!files.length||!name){toast('Enter a name + choose a VM folder or a file',true);return;}
   const os=document.getElementById('up_os').value;
-  try{await j('/api/images',mk({name,os,cache_mode:cache}));}catch(e){}
+  try{await j('/api/images',mk({name,os,cache_mode:cache,volume:v('up_vol')||null}));}catch(e){}
   try{await uploadFiles('/api/images',name,files,document.getElementById('up_prog'),msg);}
   catch(e){say(msg,' ✗ '+e.message);return;}
   say(msg,' ✓ upload done');loadImages();watchJob(name,msg);   // convert + publish run in the background → SSE
 }
+
+// ---- server disks (volumes.rs): more disks for images and games disks ----
+let vols={volumes:[],disks:[],home:null};
+const volFree=s=>s?gbs(Math.max(0,s.total-s.used))+' free':'?';
+// The broom disks (Images / Games pages): the pickers for a new image / games disk, shown once there is a second one.
+async function loadVols(){try{vols=await j('/api/volumes');}catch(e){return;}
+  const up=vols.volumes.filter(x=>x.mounted);
+  const opts=`<option value="">broom folder (${volFree(vols.home&&vols.home.space)})</option>`
+    +up.map(x=>`<option value="${esc(x.id)}">${esc(x.id)} (${volFree(x.space)})</option>`).join('');
+  for(const id of ['up_vol','gm_vol']){const s=document.getElementById(id);if(s)s.innerHTML=opts;}
+  document.querySelectorAll('.vol-pick').forEach(e=>e.hidden=!up.length);}
+// The disk an image / games disk is on; another one picked = moved there (a job).
+function volCell(kind,name,cur){
+  if(!vols.volumes.length&&!cur)return '<span class="mono">broom folder</span>';
+  const o=(id,label,dis)=>`<option value="${esc(id)}"${(cur||'')===id?' selected':''}${dis?' disabled':''}>${esc(label)}</option>`;
+  return `<select class="form-select form-select-sm w-auto" data-change="volMove" data-args="${esc(JSON.stringify([kind,name,cur||'']))}">`
+    +o('','broom folder')+vols.volumes.map(x=>o(x.id,x.id+(x.mounted?'':' (missing)'),!x.mounted&&x.id!==cur)).join('')+'</select>';}
+async function volMove(kind,name,cur,el){const to=el.value,what=(kind==='image'?'image ':'games disk ')+name;
+  if(!await sure(`Move ${what} to ${to||'the broom folder'}? Its files are copied (a while for a big one), then the old copy is deleted. Machines using it must be shut down first.`)){el.value=cur;return;}
+  const job=kind==='image'?name:'games:'+name,m=document.getElementById(kind==='image'?'img_status':'gm_msg');
+  try{await j('/api/volumes/move',mk({kind,name,to}));watchJob(job,m,()=>kind==='image'?loadImages():loadGames());}
+  catch(e){toast(e.message,true);el.value=cur;}}
+// Server page → Disks: every disk of the server, broom's disks, format a free one / add a mounted folder.
+async function loadServerDisks(){const el=document.getElementById('b_disks');if(!el)return;
+  let r;try{r=await j('/api/volumes?disks=1');}catch(e){el.textContent='✗ '+e.message;return;}
+  vols=r;
+  const sp=s=>s?`${gbs(s.used)} used of ${gbs(s.total)}`:'not mounted';
+  const on=x=>[...x.images.map(n=>'image '+n),...x.games.map(n=>'games '+n)].join(', ');
+  const vrows=`<tr><td><b>broom folder</b></td><td class="mono">${esc(r.home.path)}</td><td class="mono">${sp(r.home.space)}</td><td>everything not on another disk</td><td></td></tr>`
+    +r.volumes.map(x=>`<tr><td><b>${esc(x.id)}</b>${x.mounted?'':' <span class="badge text-bg-danger" title="not mounted: unplugged? what is on it is not served">missing</span>'}</td>
+      <td class="mono">${esc(x.path)}${x.fstype?' ('+esc(x.fstype)+')':''}</td><td class="mono">${sp(x.space)}</td><td>${esc(on(x))||'—'}</td>
+      <td>${on(x)?'':`<button class="btn btn-sm btn-outline-secondary" ${act('volRemove',x.id)} title="stop using it (its files stay)">Remove</button>`}</td></tr>`).join('');
+  const badge={system:'text-bg-secondary','in use':'text-bg-secondary',broom:'text-bg-primary',free:'text-bg-success'};
+  const drows=r.disks.map(d=>`<tr><td class="mono">${esc(d.name)}</td><td class="mono">${gbs(d.size)}</td><td>${esc(d.model||'—')}${d.rotational?' <span class="small text-body-secondary">HDD</span>':''}</td>
+      <td class="mono small">${esc([d.mount||'',...d.parts.map(p=>p.name+(p.mount?' → '+p.mount:'')),...d.holders.map(h=>'held by '+h)].filter(Boolean).join(', '))||'—'}</td>
+      <td class="small">${d.health?`<span class="${srvDiskBad(d.health)?'text-danger':''}">${esc(srvDiskHealth(d.health))}</span>`:'—'}</td>
+      <td><span class="badge ${badge[d.state]}">${d.state}</span></td>
+      <td>${d.state==='free'?`<button class="btn btn-sm btn-outline-danger" ${act('volFormat',d.name,d.model,d.size,d.old_data)}>Format</button>`:''}</td></tr>`).join('');
+  el.innerHTML=`<table class="table table-sm align-middle mb-3"><thead><tr><th>Broom disk</th><th>Path</th><th>Space</th><th>On it</th><th></th></tr></thead><tbody>${vrows}</tbody></table>
+    <table class="table table-sm align-middle mb-2"><thead><tr><th>Disk</th><th>Size</th><th>Model</th><th>Partitions / mounts</th><th>Health</th><th>State</th><th></th></tr></thead><tbody>${drows}</tbody></table>
+    <div class="d-flex flex-wrap gap-2 align-items-end"><div><label class="form-label small mb-1" for="vol_folder">Or a folder you mounted yourself (LVM, RAID…)</label><input class="form-control form-control-sm" id="vol_folder" size="28" placeholder="/mnt/data/broom"></div>
+      <button class="btn btn-sm btn-outline-primary" data-click="volFolder">Add folder</button><span id="vol_msg" class="msg align-self-center"></span></div>`;}
+async function volFormat(name,model,size,old){
+  const t=await ask('Format '+name,`ERASES everything on ${name} (${model||'disk'} ${gbs(size)})${old?' — it has partitions / a filesystem now':''} and makes it a broom disk for images and games disks. Type ${name} to confirm.`,'');
+  if(t==null)return;
+  if(t.trim()!==name){toast('Name does not match — nothing changed',true);return;}
+  const m=document.getElementById('vol_msg');say(m,' formatting '+name+'…');
+  try{const r=await j('/api/volumes/format',mk({disk:name,confirm:t.trim()}));say(m,' ✓ '+name+' is broom disk '+r.id);}catch(e){say(m,' ✗ '+e.message);}
+  loadServerDisks();}
+async function volFolder(){const m=document.getElementById('vol_msg');
+  try{await j('/api/volumes/folder',mk({path:v('vol_folder')}));say(m,' ✓ added');}catch(e){say(m,' ✗ '+e.message);}loadServerDisks();}
+async function volRemove(id){if(!await sure('Stop using broom disk '+id+'? It is unmounted if broom mounted it; its files stay on it.'))return;
+  try{await j('/api/volumes/remove',mk({id}));}catch(e){toast(e.message,true);}loadServerDisks();}
 
 // ---- driver packages (drivers.rs): .zip of an extracted driver folder → installed into base by broom-done ----
 async function loadDrivers(){
@@ -500,7 +583,7 @@ async function applyDhcp(){const b={};['mode','iface','server_ip','subnet','netm
 
 // ---- games disks (Games page) ----
 let gmDisks=[];
-async function loadGames(){const g=await j('/api/games');const tb=document.querySelector('#games tbody');if(!tb)return;
+async function loadGames(){const [g]=await Promise.all([j('/api/games'),loadVols()]);const tb=document.querySelector('#games tbody');if(!tb)return;
   gmDisks=g.disks;
   document.getElementById('gm_grouplist').innerHTML=g.groups.map(x=>`<option value="${esc(x)}">`).join('');
   const opts=sel=>'<option value="">— none —</option>'+g.machines.map(m=>
@@ -512,12 +595,13 @@ async function loadGames(){const g=await j('/api/games');const tb=document.query
       <td class="mono">${s?s.sessions+(s.old_sessions?` <span title="still on an older version until they reboot">(${s.old_sessions} older)</span>`:''):''}</td>
       <td><select class="form-select form-select-sm d-inline-block w-auto" data-change="setGamesUpdate" data-args="${esc(JSON.stringify([d.name]))}">${opts(d.update)}</select>${d.update!=null&&!x.update_ip?' <span class="text-danger" title="no fixed IP or lease known">no IP</span>':''}${s&&s.update_connected?' <span class="text-success">'+ic('dot','')+' writable</span>':''}</td>
       <td class="mono">${s&&s.update_bytes?gbs(s.update_bytes)+` <button class="btn btn-sm btn-outline-primary" ${act('saveGamesUpdate',d.name)}>Save</button> <button class="btn btn-sm btn-outline-secondary" ${act('discardGamesUpdate',d.name)}>Discard</button>`:'—'}</td>
+      <td>${volCell('games',d.name,x.volume)}</td>
       <td><button class="btn btn-sm btn-outline-secondary" ${act('toggleGamesRam',d.name,!d.ram)} title="RAM: the disk is served from a copy in the server's RAM (loaded in the background; needs about as much free RAM as the games on it — games barely compress). Disk: read from games.img (the page cache keeps what is played most).">${d.ram?(s&&s.ram?'Cache: RAM':(s&&s.ram_loading?'Cache: RAM (loading…)':'Cache: RAM (not loaded)')):'Cache: disk'}</button> <button class="btn btn-sm btn-outline-secondary" ${act('editGames',d.name)}>Edit</button> <button class="btn btn-sm btn-outline-danger" ${act('delGames',d.name)}>Delete</button></td></tr>`;}).join('')
-    ||'<tr><td colspan="9" class="mono">no games disk yet</td></tr>';
+    ||'<tr><td colspan="10" class="mono">no games disk yet</td></tr>';
   const m=document.getElementById('gm_msg');if(m&&g.error)say(m,' ✗ not served: '+g.error);}
 async function gamesCall(url,body,q){if(q&&!await sure(q))return;const m=document.getElementById('gm_msg');
   try{const r=await j(url,mk(body));say(m,' ✓ '+(r.status||'saved'));}catch(e){say(m,' ✗ '+e.message);}loadGames();}
-const saveGames=()=>gamesCall('/api/games/disk',{name:v('gm_name'),letter:v('gm_letter'),size_gb:+v('gm_size'),groups:[v('gm_groups')]});
+const saveGames=()=>gamesCall('/api/games/disk',{name:v('gm_name'),letter:v('gm_letter'),size_gb:+v('gm_size'),groups:[v('gm_groups')],volume:v('gm_vol')||null});
 const setGamesUpdate=(name,el)=>gamesCall('/api/games/update',{name,id:el.value?+el.value:null});
 const toggleGamesRam=(name,ram)=>gamesCall('/api/games/cache',{name,ram},ram?'Serve games disk '+name+' from RAM? It is loaded in the background (served from the disk meanwhile) and needs about as much free RAM as the games on it; not enough RAM → it stays on the disk (see the log).':null);
 const saveGamesUpdate=name=>gamesCall('/api/games/save',{name},'Save the update of '+name+' as its new version? Its update machine must be shut down. Each machine gets it at its next boot.');
@@ -549,11 +633,12 @@ function editGroup(n){if(!grData)return;grCur=n;const g=grData,lc=n.toLowerCase(
   document.getElementById('gr_disks').innerHTML=g.disks.map(d=>box(d.name,!d.groups.length||grIn(d,n),
     esc(d.name)+' ('+esc(d.letter)+':)'+(d.groups.length?'':all),!d.groups.length,d.groups.length?'':allT)).join('')||'—';
   document.getElementById('gr_drivers').innerHTML=g.drivers.map(d=>box(d.id,d.all||grIn(d,n),
-    esc(d.name)+(d.all?all:''),d.all,d.all?'for every machine — change it on the Drivers page':'')).join('')||'—';}
+    esc(d.name)+(d.all?all:''),d.all,d.all?'for every machine — change it on the Drivers page':'')).join('')||'—';
+  document.getElementById('gr_hide').checked=(g.hide_disks||[]).some(x=>x.toLowerCase()===lc);}
 function closeGroup(){grCur=null;const e=document.getElementById('gr_edit');if(e)e.style.display='none';}
 async function saveGroup(){const m=document.getElementById('gr_emsg');
   const ids=(id,num)=>[...document.querySelectorAll('#'+id+' input:checked:not(:disabled)')].map(e=>num?+e.dataset.v:e.dataset.v);
-  const body={name:grCur,machines:ids('gr_machines',1),images:ids('gr_images',1),disks:ids('gr_disks',0),drivers:ids('gr_drivers',1)};
+  const body={name:grCur,machines:ids('gr_machines',1),images:ids('gr_images',1),disks:ids('gr_disks',0),drivers:ids('gr_drivers',1),hide_disks:document.getElementById('gr_hide').checked};
   try{await j('/api/groups/set',mk(body));say(m,' ✓ saved');}
   catch(e){if(/EVERY machine/.test(e.message)&&await sure(e.message+'.\n\nSave anyway?')){
       try{await j('/api/groups/set',mk({...body,allow_all:true}));say(m,' ✓ saved');}catch(e2){say(m,' ✗ '+e2.message);}}
@@ -841,7 +926,7 @@ async function loadBench(){
   loadBenchHist();
 }
 // Server page: live load + disk health ("res" SSE), iSCSI now, and its alert / RAM-reserve settings.
-function loadServer(){loadIscsi();if(lastRes)showRes(lastRes);loadCafe();drawCharts();loadServices();
+function loadServer(){loadIscsi();if(lastRes)showRes(lastRes);loadCafe();drawCharts();loadServices();loadServerDisks();
   if(!svcTimer)svcTimer=setInterval(()=>{if(curPage!=='server'){clearInterval(svcTimer);svcTimer=null;return;}loadServices();},10000);}
 // Services (sysmon.rs /api/server/status): each one up or down, refreshed every 10 s while the page is open.
 let svcTimer=null;
@@ -994,7 +1079,8 @@ const ACTIONS={
   mFilter(){mPage=1;renderMachines();},
   dvToggle:(k,el)=>dvToggle(k,el.checked), dvSelectAll:el=>dvSelectAll(el.checked),
   wake,manage,regMachine,loadStatus,clearMFilters,mPrev,mNext,mPageSize,setKey,rearmKey,
-  loadDevices,dvOpen,dvSave,dvDelete,dvClose,dvBulk,dvRegister,dvImport,dvAdd,dvRender,
+  loadDevices,dvOpen,dvSave,dvDelete,dvClose,dvBulk,dvRegister,dvImport,dvAdd,dvRender,dvHide,dvBroomDisk,
+  volMove,volFormat,volFolder,volRemove,loadServerDisks,
   loadImages,addImage,setDefault,toggleCache,toggleBase,toggleSsd,togglePreload,editImgGroups,republish,showVersions,exportImage,editBoot,delImage,
   snapshotImage,rollbackImage,versionToImage,deleteVersion,
   loadGames,saveGames,setGamesUpdate,toggleGamesRam,saveGamesUpdate,discardGamesUpdate,editGames,delGames,
