@@ -50,7 +50,7 @@ cũng mất sau khi restart.
   **Wake-on-LAN** và xem trạng thái máy trên web.
 - **Miễn phí, mã nguồn mở** (Apache-2.0) — không tính phí theo số máy, dùng cho quán kinh doanh được.
 
-![Trang Remote của Broom: điều khiển một máy trạm Windows 11 ngay trên trình duyệt](images/remote-control.webp){: width="1241" height="691"}
+![Trang Remote của Broom: điều khiển một máy trạm Windows 11 ngay trên trình duyệt](images/remote-control.webp){: width="1883" height="867"}
 
 ## Cần chuẩn bị
 
@@ -117,9 +117,13 @@ Mở trang **Remote** (nhóm Monitor): màn hình mọi máy trạm Windows hi�
 **Ctrl+Alt+Del**, phím **Windows**, **Alt+Tab** và **Paste** (dán clipboard của bạn vào máy trạm). Trên Chrome / Edge
 hình chạy mượt (H.264); mạng đông thì hạ chất lượng xuống **Low**.
 
+![Trang Remote của Broom: lưới màn hình các máy trạm, lọc theo nhóm, chia trang](images/remote-wall.webp){: width="1907" height="871"}
+
 Sức khoẻ từng máy (CPU, RAM, nhiệt độ, ổ cứng, bad sector, thời gian bật, MB/s đang tải) hiện ở trang **Machines**.
 Trang **Server** có tải máy chủ kèm biểu đồ 10 phút, sức khoẻ ổ và bảng **Services** (DHCP, TFTP, iSCSI chạy hay
 không). Máy không boot được thì mở **Tools → Logs**, chọn *Warn+* hoặc gõ tên máy để xem lỗi.
+
+![Trang Server của Broom: tải máy chủ và biểu đồ 10 phút gần nhất](images/server-monitoring.webp){: width="1887" height="867"}
 
 ## Câu hỏi thường gặp
 

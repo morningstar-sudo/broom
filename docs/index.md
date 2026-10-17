@@ -45,7 +45,9 @@ enroll, no MokManager screen on any client. With TPM 2.0 + HVCI, [FACEIT Anti-Ch
   did not boot.
 - **Snapshot / rollback, machine groups, web admin.**
 
-![Broom web admin Remote page controlling a Windows 11 client](images/remote-control.webp){: width="1241" height="691"}
+![Broom web admin Remote page controlling a Windows 11 client](images/remote-control.webp){: width="1883" height="867"}
+
+![Broom web admin Server page: live load, 10-minute charts and services](images/server-monitoring.webp){: width="1887" height="867"}
 
 ## Quick start
 

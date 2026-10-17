@@ -29,9 +29,16 @@ Linux server, DHCP / TFTP / iSCSI / web admin built in. For internet cafés, gam
 
 ![Windows 11 client network-booted by Broom, with a games disk mounted as G:](docs/images/client-games-disk.png)
 
-**Remote** — a client's screen in the web admin, controlled with the mouse and keyboard:
+**Remote** — every client's screen on one wall; click one to control it with the mouse and keyboard:
+
+![Broom web admin Remote page: a wall of every Windows client's screen](docs/images/remote-wall.png)
 
 ![Broom web admin Remote page controlling a Windows 11 client](docs/images/remote-control.png)
+
+**Server** — live load, 10-minute charts (CPU / RAM, network with the iSCSI and golden HTTP share, disk busy) and
+services up/down:
+
+![Broom web admin Server page with live load and charts](docs/images/server-monitoring.png)
 
 **FACEIT Anti-Cheat on a Broom client** — Secure Boot, IOMMU, TPM 2.0, TPM attestation and HVCI all pass:
 
