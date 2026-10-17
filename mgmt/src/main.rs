@@ -23,6 +23,7 @@ mod iscsi;
 mod iscsid;
 mod license;
 mod linuxfs;
+mod logbuf;
 mod machines;
 mod metrics;
 mod monitor;
@@ -222,6 +223,16 @@ async fn bootstrap_js() -> impl axum::response::IntoResponse {
         assets::text("static/bootstrap.bundle.min.js"),
     )
 }
+// Chart.js 4.4.7 (MIT), vendored the same way: the Server page's charts.
+async fn chart_js() -> impl axum::response::IntoResponse {
+    (
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "text/javascript; charset=utf-8",
+        )],
+        assets::text("static/chart.umd.min.js"),
+    )
+}
 async fn icons() -> impl axum::response::IntoResponse {
     (
         [(axum::http::header::CONTENT_TYPE, "image/svg+xml")],
@@ -247,9 +258,13 @@ async fn login_js() -> impl axum::response::IntoResponse {
 /// image job change (publish / snapshot / rollback steps) — replaces polling /api/images/job.
 async fn events(
     axum::extract::State(st): axum::extract::State<SharedState>,
+    headers: axum::http::HeaderMap,
 ) -> Sse<impl futures_util::Stream<Item = Result<Event, std::convert::Infallible>>> {
     use futures_util::stream::{self, StreamExt};
     use tokio::sync::broadcast::error::RecvError;
+    // The guard checked the session when the stream opened; it stays open for hours, so it checks again every 30 s
+    // and ends with a "logout" event once the session is gone (expired, or the password changed elsewhere).
+    let gone = auth::until_invalid(st.clone(), auth::session_token(&headers));
     let ping = || Event::default().event("ping").data(VERSION);
     let jobs = stream::unfold(st.job_tx.subscribe(), |mut rx| async move {
         loop {
@@ -278,7 +293,11 @@ async fn events(
     Sse::new(
         stream::once(async move { Ok(ping()) })
             .chain(stream::iter(first))
-            .chain(stream::select(jobs, res)),
+            .chain(stream::select(jobs, res))
+            .take_until(gone)
+            .chain(stream::once(async {
+                Ok(Event::default().event("logout").data("session ended"))
+            })),
     )
     .keep_alive(
         KeepAlive::new()
@@ -291,7 +310,7 @@ async fn events(
 async fn ui_page(axum::extract::Path(p): axum::extract::Path<String>) -> Html<&'static str> {
     Html(match p.as_str() {
         "machines" | "images" | "network" | "system" | "drivers" | "devices" | "groups"
-        | "benchmark" | "remote" | "server" | "games" | "windows" => {
+        | "benchmark" | "remote" | "server" | "games" | "windows" | "logs" => {
             assets::text(&format!("static/page-{p}.html"))
         }
         _ => "",
@@ -553,6 +572,7 @@ async fn main() {
         .route("/app.css", get(app_css)) // public: the login page uses it too
         .route("/bootstrap.min.css", get(bootstrap_css)) // public too
         .route("/bootstrap.bundle.min.js", get(bootstrap_js))
+        .route("/chart.umd.min.js", get(chart_js))
         .route("/icons.svg", get(icons)) // public: the login page uses it too
         // One URL per page (F5 / bookmarks keep the page); same shell, JS picks the page from the path.
         .route("/machines", get(index))
@@ -567,6 +587,7 @@ async fn main() {
         .route("/server", get(index))
         .route("/games", get(index))
         .route("/windows", get(index))
+        .route("/logs", get(index))
         .route("/ui/{page}", get(ui_page)) // fragment tab on-demand
         .route("/api/events", get(events)) // SSE: server liveness (sidebar dot) + image job status
         .route("/boot.ipxe", get(boot::render)) // iPXE menu
@@ -582,6 +603,8 @@ async fn main() {
         .merge(monitor::routes()) // online status, Wake-on-LAN
         .merge(bench::routes()) // Benchmark page + client measurements
         .merge(vnc::routes()) // Remote page: screen + mouse/keys of a Windows machine
+        .merge(logbuf::routes()) // Logs page: the newest log lines
+        .merge(sysmon::routes()) // Server page: services up or down
         .merge(auth::routes()) // admin login
         // Serve boot assets over HTTP (kernel/initrd much faster than TFTP).
         // /tftp/... -> <home>/tftp/... (e.g. http://SERVER/tftp/broom-stage/vmlinuz); a Windows golden set to RAM
@@ -628,7 +651,8 @@ fn init_logging() {
         .with_writer(
             std::io::stderr
                 .with_max_level(tracing::Level::WARN)
-                .or_else(std::io::stdout),
+                .or_else(std::io::stdout)
+                .and(logbuf::Make), // + the Logs page's copy
         )
         .with_ansi(std::io::stdout().is_terminal())
         .with_target(false)

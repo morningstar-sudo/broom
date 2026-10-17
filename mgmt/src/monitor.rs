@@ -43,6 +43,12 @@ struct MachineStatus {
     /// Hardware health the agent last reported (metrics.rs); None = no recent reading.
     #[serde(skip_serializing_if = "Option::is_none")]
     metrics: Option<crate::metrics::Metrics>,
+    /// What the server sends it now, bytes/s: (iSCSI, golden over HTTP) — sysmon.rs.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    traffic: Option<(f64, f64)>,
+    /// Unix time its agent connected (≈ since Windows started).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    agent_since: Option<u64>,
 }
 
 /// Machines = registered (machines table) + discovered via DHCP (leases table, dhcp.rs) or a PXE boot (pxe_ip).
@@ -152,6 +158,8 @@ async fn status(State(st): State<SharedState>) -> Json<Vec<MachineStatus>> {
                 ssd_low: ssd_low.get(&mac).copied(),
                 remote: crate::vnc::connected(&mac),
                 metrics: crate::metrics::get(&mac),
+                traffic: ip.as_deref().and_then(crate::sysmon::traffic),
+                agent_since: crate::vnc::since(&mac),
                 mac,
                 ip,
                 hostname,

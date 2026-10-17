@@ -55,12 +55,78 @@ pub fn raise_fd_limit() {
     }
 }
 
+// ---------- services ----------
+
+static STARTED: LazyLock<Instant> = LazyLock::new(Instant::now);
+
+pub fn routes() -> axum::Router<SharedState> {
+    axum::Router::new().route("/api/server/status", axum::routing::get(services))
+}
+
+/// GET /api/server/status — is each service up (Server page, Services card).
+async fn services(
+    axum::extract::State(st): axum::extract::State<SharedState>,
+) -> axum::Json<serde_json::Value> {
+    let full = st.db.get_config("dhcp_mode", "off") == "full";
+    // net[0] = TFTP, net[1] = DHCP (only in full mode, and only if it could bind): dhcp::start().
+    let (tftp, dhcp) = {
+        let net = st.net.lock();
+        let up = |i: usize| net.get(i).is_some_and(|h| !h.is_finished());
+        (up(0), full && up(1))
+    };
+    let iscsi = tokio::task::spawn_blocking(crate::iscsi::stats)
+        .await
+        .ok()
+        .flatten();
+    let (golden_running, golden_waiting) = crate::goldenram::queue_stats();
+    let host_up = std::fs::read_to_string("/proc/uptime")
+        .ok()
+        .and_then(|s| s.split_whitespace().next()?.parse::<f64>().ok());
+    axum::Json(serde_json::json!({
+        "dhcp": {"mode": if full { "full" } else { "off" }, "running": dhcp,
+                 "iface": st.db.get_config("dhcp_iface", "")},
+        "tftp": {"running": tftp},
+        "iscsi": iscsi.map(|s| serde_json::json!({
+            "targets": s.targets.len(),
+            "sessions": s.targets.iter().map(|t| t.sessions).sum::<usize>(),
+            "clients": s.peers.map(|p| p.iter().filter(|p| p.connected).count()),
+        })),
+        "agents": crate::vnc::count(),
+        "golden": {"running": golden_running, "waiting": golden_waiting},
+        "uptime": STARTED.elapsed().as_secs(), "host_uptime": host_up.map(|u| u as u64),
+    }))
+}
+
 // ---------- sampler ----------
 
 /// Every open page gets the samples ("res" events); a page that just opened gets the last one at once.
 pub static RES: LazyLock<tokio::sync::broadcast::Sender<String>> =
     LazyLock::new(|| tokio::sync::broadcast::channel(4).0);
 pub static LATEST: LazyLock<Mutex<String>> = LazyLock::new(Default::default);
+
+/// What the server sends each client now, bytes/s by IP: (iSCSI — games disks, Linux goldens; HTTP — golden downloads).
+/// Measured from byte counters between two samples: no rate before the second one, none guessed.
+static TRAFFIC: LazyLock<Mutex<HashMap<String, (f64, f64)>>> = LazyLock::new(Default::default);
+
+/// The traffic to `ip` now (Machines page); None = nothing measured for it.
+pub fn traffic(ip: &str) -> Option<(f64, f64)> {
+    TRAFFIC.lock().get(ip).copied()
+}
+
+/// Rate per key between two counter samples `secs` apart. A key without a previous sample, or whose counter went back
+/// (the iSCSI daemon restarted), gets none.
+fn rates(
+    prev: &HashMap<String, u64>,
+    now: &HashMap<String, u64>,
+    secs: f64,
+) -> HashMap<String, f64> {
+    now.iter()
+        .filter_map(|(k, &n)| {
+            let p = *prev.get(k)?;
+            (n >= p && secs > 0.0).then(|| (k.clone(), (n - p) as f64 / secs))
+        })
+        .collect()
+}
 
 const EVERY: Duration = Duration::from_secs(2);
 /// Samples in a row above the threshold before the banner shows (6 s): a short burst is not an alert.
@@ -456,6 +522,7 @@ fn alerts(
 
 /// Sample forever (mgmt's lifetime): push each to the open pages, log when an alert starts / ends.
 pub async fn run(st: SharedState) {
+    LazyLock::force(&STARTED); // mgmt's uptime counts from here
     let (mut cpu0, mut net0, mut io0, mut t0) = (
         cpu_times(),
         None::<(u64, u64)>,
@@ -465,6 +532,7 @@ pub async fn run(st: SharedState) {
     let cores = std::thread::available_parallelism().map_or(1, |n| n.get());
     let mut streak = HashMap::new();
     let mut shown: Vec<String> = Vec::new();
+    let (mut iscsi0, mut http0) = (HashMap::new(), HashMap::new());
     loop {
         tokio::time::sleep(EVERY).await;
         let iface = boot_iface(&st.db.get_config("dhcp_iface", ""));
@@ -512,6 +580,33 @@ pub async fn run(st: SharedState) {
             .and_then(link_mbit)
             .filter(|_| virt.is_none());
         let net_pct = link.map(|l| 100.0 * rx.max(tx) * 8.0 / (l as f64 * 1e6));
+
+        // Per client: iSCSI bytes read (the daemon's counters, a socket call → off the async threads) + golden bytes
+        // sent over HTTP.
+        let iscsi1: HashMap<String, u64> = tokio::task::spawn_blocking(crate::iscsi::stats)
+            .await
+            .ok()
+            .flatten()
+            .and_then(|s| s.peers)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|p| (p.ip, p.read_bytes))
+            .collect();
+        let http1: HashMap<String, u64> = crate::goldenram::sent()
+            .into_iter()
+            .map(|(ip, n)| (ip.to_string(), n))
+            .collect();
+        let (ri, rh) = (rates(&iscsi0, &iscsi1, secs), rates(&http0, &http1, secs));
+        (iscsi0, http0) = (iscsi1, http1);
+        let egress = (ri.values().sum::<f64>(), rh.values().sum::<f64>());
+        *TRAFFIC.lock() = ri
+            .keys()
+            .chain(rh.keys())
+            .map(|ip| {
+                let r = (*ri.get(ip).unwrap_or(&0.0), *rh.get(ip).unwrap_or(&0.0));
+                (ip.clone(), r)
+            })
+            .collect();
 
         let disk = disk_stat(&images);
         let (busy, rd, wr) = match (&io0, &disk) {
@@ -563,6 +658,7 @@ pub async fn run(st: SharedState) {
             "cpu": {"pct": cpu, "cores": cores, "load": load},
             "ram": {"pct": ram, "used": ram_used, "total": mt, "cache": cache},
             "net": {"iface": iface, "rx": rx, "tx": tx, "link": link, "pct": net_pct, "virtual": virt},
+            "egress": {"iscsi": egress.0, "http": egress.1},
             "disk": {"dev": dev, "busy": busy, "read": rd, "write": wr, "health": health},
             "space": {"pct": used, "used": sp.map(|s| s.0), "total": sp.map(|s| s.1)},
             "limit": limit, "alerts": shown,

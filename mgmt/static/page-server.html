@@ -7,6 +7,19 @@
     <div id="b_res" class="msg">—</div>
   </div>
   <div class="card card-body mb-3">
+    <h2 class="h6 text-uppercase text-body-secondary mb-3">Last 10 minutes</h2>
+    <div class="row g-3">
+      <div class="col-lg-4"><div class="small text-body-secondary mb-1">CPU · RAM (%)</div><div style="position:relative;height:180px"><canvas id="ch_cpu"></canvas></div></div>
+      <div class="col-lg-4"><div class="small text-body-secondary mb-1">Network (MB/s)</div><div style="position:relative;height:180px"><canvas id="ch_net"></canvas></div></div>
+      <div class="col-lg-4"><div class="small text-body-secondary mb-1">Image disk busy (%)</div><div style="position:relative;height:180px"><canvas id="ch_disk"></canvas></div></div>
+    </div>
+    <p class="small text-body-secondary mb-0 mt-2">Kept by this browser tab from the moment it opened (one sample every 2 s); hover for values.</p>
+  </div>
+  <div class="card card-body mb-3">
+    <h2 class="h6 text-uppercase text-body-secondary mb-3">Services</h2>
+    <div id="b_svc" class="msg">—</div>
+  </div>
+  <div class="card card-body mb-3">
     <h2 class="h6 text-uppercase text-body-secondary mb-3">iSCSI now</h2>
     <div id="b_iscsi" class="msg">—</div>
   </div>

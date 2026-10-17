@@ -62,6 +62,8 @@ struct Agent {
     to_agent: mpsc::Sender<Message>,
     /// The viewer now watching.
     viewer: Option<Viewer>,
+    /// Unix time it connected (the agent starts with Windows: ≈ how long the machine has been up).
+    since: u64,
 }
 
 /// Connected agents by MAC (lower case).
@@ -79,6 +81,7 @@ fn register(mac: &str, host: &str, grp: Option<String>, to_agent: mpsc::Sender<M
             grp,
             to_agent,
             viewer: None,
+            since: crate::now_secs(),
         },
     );
     id
@@ -157,6 +160,16 @@ fn detach(mac: &str, vid: u64) -> bool {
 /// Has machine `mac` an agent connected (Machines page: Remote button).
 pub fn connected(mac: &str) -> bool {
     AGENTS.lock().contains_key(&mac.to_lowercase())
+}
+
+/// When machine `mac`'s agent connected (unix time), None = not connected.
+pub fn since(mac: &str) -> Option<u64> {
+    AGENTS.lock().get(&mac.to_lowercase()).map(|a| a.since)
+}
+
+/// Agents connected now (Services card).
+pub fn count() -> usize {
+    AGENTS.lock().len()
 }
 
 #[derive(serde::Serialize)]
@@ -272,6 +285,7 @@ fn same_origin(h: &HeaderMap) -> bool {
 /// GET /api/vnc/view?host=<hostname>&q= (admin, WebSocket) — watch and control that machine.
 async fn view(
     ws: WebSocketUpgrade,
+    State(st): State<SharedState>,
     Query(q): Query<ViewQuery>,
     headers: HeaderMap,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
@@ -291,12 +305,31 @@ async fn view(
     if thumb && busy(&mac) {
         return (StatusCode::CONFLICT, format!("{host}: in use")).into_response();
     }
-    let start = start_msg(
-        q.q.unwrap_or(60).clamp(20, 95),
-        q.w.unwrap_or(0),
-        q.codec.as_deref() == Some("h264"),
-    );
-    ws.on_upgrade(move |s| run_view(s, mac, host, to_agent, start, thumb, peer))
+    let v = ViewSession {
+        start: start_msg(
+            q.q.unwrap_or(60).clamp(20, 95),
+            q.w.unwrap_or(0),
+            q.codec.as_deref() == Some("h264"),
+        ),
+        mac,
+        host,
+        to_agent,
+        thumb,
+        peer,
+    };
+    // Watching can go on for hours: the session is checked again every 30 s (auth::until_invalid).
+    let gone = crate::auth::until_invalid(st, crate::auth::session_token(&headers));
+    ws.on_upgrade(move |s| run_view(s, v, gone))
+}
+
+/// One viewer's side of a session.
+struct ViewSession {
+    mac: String,
+    host: String,
+    to_agent: mpsc::Sender<Message>,
+    start: Message,
+    thumb: bool,
+    peer: SocketAddr,
 }
 
 /// Someone is controlling `mac` (a full-size viewer).
@@ -313,15 +346,15 @@ fn start_msg(q: u8, w: u16, h264: bool) -> Message {
     Message::Text(format!("{{\"op\":\"start\",\"q\":{q},\"w\":{w},\"codec\":\"{codec}\"}}").into())
 }
 
-async fn run_view(
-    ws: WebSocket,
-    mac: String,
-    host: String,
-    to_agent: mpsc::Sender<Message>,
-    start: Message,
-    thumb: bool,
-    peer: SocketAddr,
-) {
+async fn run_view(ws: WebSocket, v: ViewSession, gone: impl std::future::Future<Output = ()>) {
+    let ViewSession {
+        mac,
+        host,
+        to_agent,
+        start,
+        thumb,
+        peer,
+    } = v;
     let (vq, mut queue) = mpsc::channel::<Message>(QUEUE);
     let vid = NEXT.fetch_add(1, Ordering::Relaxed);
     // Busy (someone took control between the check and now) / gone: the socket just closes; the wall retries later.
@@ -357,6 +390,11 @@ async fn run_view(
     tokio::select! {
         _ = down => {}
         _ = up => {}
+        _ = gone => {
+            if !thumb {
+                tracing::info!("remote: {host} — the admin session ended, closing the view");
+            }
+        }
     }
     if detach(&mac, vid) {
         let _ = to_agent.try_send(Message::Text("{\"op\":\"stop\"}".into()));

@@ -25,7 +25,8 @@ change between versions; check their own documentation for current details.
 | Secure Boot / TPM / HVCI | yes, no MOK enrollment — [works with FACEIT](faceit-diskless.md) | check the product |
 | Games | shared games disks, versioned, updated from one PC | product-specific game update tools |
 | Remote view / control | built in: live wall of every PC's screen, control in the browser | check the product |
-| Client health | CPU, RAM, temperatures, disk SMART / bad sectors per PC | check the product |
+| Client health | CPU, RAM, temperatures, disk SMART / bad sectors, uptime, traffic per PC | check the product |
+| Server monitoring | live load charts, disk SMART, services up/down, logs in the browser | check the product |
 | Track record | young project | many years, many sites |
 
 ## Where Broom is different
@@ -40,8 +41,8 @@ change between versions; check their own documentation for current details.
 - **Versions in a click.** Snapshots of the golden are hard links: instant and free until the golden changes. Games
   disks get a new version on every save, and PCs already playing keep the old one until they reboot.
 - **The room in one browser tab.** A live wall of every PC's screen, take one over with the mouse and keyboard
-  (full-screen games included), and each PC's CPU, RAM, temperature and disk health — no separate remote tool, no
-  port open on the PCs.
+  (full-screen games included), each PC's CPU, RAM, temperature, disk health and traffic, the server's load charts
+  and its log — no separate remote or monitoring tool, no port open on the PCs.
 - **Open.** You can read, audit, fork and fix the code; no licence keys or per-PC fees.
 
 ## Where Broom is behind

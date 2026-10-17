@@ -17,7 +17,8 @@ Linux server, DHCP / TFTP / iSCSI / web admin built in. For internet cafés, gam
 - **Remote control in the browser** — a live wall of every PC's screen; click one to take over mouse and keyboard.
   Full-screen games show too. No VNC client to install, no port open on the PCs.
 - **Health at a glance** — CPU %, RAM %, temperatures and each disk's SMART status / bad sectors, for every PC and the
-  server.
+  server; each PC's uptime and traffic now; live server charts and services up/down.
+- **Logs in the browser** — level filter, search, follow live: no SSH needed to see why a PC did not boot.
 - **Snapshot / rollback, machine groups, web admin.** Free, Apache-2.0.
 
 **Guides:** [broom.hainth.edu.vn](https://broom.hainth.edu.vn/)
@@ -209,9 +210,9 @@ The menu is grouped (each group folds; the one holding the open page stays open)
 
 | Group | Page | What it does |
 |---|---|---|
-| Monitor | **Machines** | every machine: on/off, health badge, license, Wake / Manage / Remote |
+| Monitor | **Machines** | every machine: on/off, uptime, traffic now, health badge, license, Wake / Manage / Remote |
 | | **Remote** | live wall of every Windows machine's screen; click one to control it |
-| | **Server** | the server's CPU / RAM / network / disk load, its disk's SMART, live iSCSI; alert threshold, RAM reserve |
+| | **Server** | the server's CPU / RAM / network / disk load + 10-minute charts, services up/down, its disk's SMART, live iSCSI; alert threshold, RAM reserve |
 | Manage | **Devices** | register / edit / import machines, a machine's detail (lease, license, drivers, health) |
 | | **Groups** | which images, games disks and drivers each group of machines gets |
 | Content | **Images** | goldens: upload, publish, cache (disk / RAM), versions, export, boot menu |
@@ -221,6 +222,7 @@ The menu is grouped (each group folds; the one holding the open page stays open)
 | | **Windows** | guest user, SSD room, golden downloads at once |
 | | **Settings** | admin password, boot menu countdown |
 | Tools | **Benchmark** | server disk speed; per machine boot time and disk / network read speed |
+| | **Logs** | the server's newest log lines: level filter, search, follow live |
 
 A banner on every page shows when the server stays at its resource limit (Server → *Resource alert*).
 
@@ -339,6 +341,13 @@ someone is controlling shows "in use" on the wall: a thumbnail never takes it aw
   boot). Machines without it — Linux clients, a Windows machine before its first logon — are pinged as before.
 - **Server** page: the server's own load (CPU, RAM, network, image disk), its image disk's SMART (status, temperature,
   bad sectors — read with the kernel's own NVMe / SATA pass-through, no smartmontools) and live iSCSI throughput.
+  Charts of the last 10 minutes (CPU / RAM, network with the iSCSI and golden HTTP share, disk busy), with Chart.js
+  served by the binary itself (no CDN). A **Services** card shows whether DHCP, TFTP, the iSCSI target and the web server are
+  up, the remote agents connected, the golden download queue and the uptime.
+- **Traffic + uptime per machine**: the Machines page shows what the server is sending each machine now (iSCSI + golden
+  over HTTP, counted by broom itself per IP) and how long it has been up (since its agent connected).
+- **Logs** page (Tools → Logs): the newest 2000 log lines in the browser — filter by level, search, follow live. No SSH
+  needed to see why a machine did not boot.
 
 ## Versions, export
 
@@ -371,7 +380,8 @@ Environment overrides: `BOOTROM_HOME` (the whole tree), `BOOTROM_IMAGES_DIR` / `
 (e.g. a bigger disk), `BOOTROM_DB=sqlite:///path/bootrom.db`.
 
 Logs go to stdout (client boots, DHCP/TFTP, publish steps, config changes); warnings and errors to
-stderr. `RUST_LOG=debug` also logs every external command. Under systemd: `journalctl -u bootrom-mgmt -f`.
+stderr; the newest 2000 lines also show on the **Logs** page. `RUST_LOG=debug` also logs every external command.
+Under systemd: `journalctl -u bootrom-mgmt -f`.
 
 ## Backup & restore
 
@@ -394,7 +404,8 @@ rebuilt at startup. `bootrom.db` holds license keys and the shared guest passwor
 The web admin and every `/api/*` route sit behind a login (argon2 password, signed session cookie) plus
 a `Host`-header check. The first password needs the setup token from the server log. Wrong passwords are
 throttled per client IP (after 5 failures: locked 1 s, doubling up to 5 min). **Settings → Admin password**
-changes it and signs out every other session. A few properties are inherent to diskless boot on a shared LAN and are handled by
+changes it and signs out every other session — open streams (live updates, Remote) re-check the session every 30 s and
+close once it is gone. A few properties are inherent to diskless boot on a shared LAN and are handled by
 **network setup**, not the binary:
 
 - **Segment the boot LAN.** The iSCSI portal (`:3260`) and the golden over HTTP are readable by any host

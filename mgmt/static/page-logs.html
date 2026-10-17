@@ -1,0 +1,18 @@
+<section id="page-logs">
+  <div class="d-flex flex-wrap align-items-baseline gap-3 mb-3"><h1 class="h4 mb-0">Logs</h1>
+    <span class="small text-body-secondary">The server's newest log lines (client boots, publishes, DHCP / TFTP, errors) — the last 2000.</span></div>
+  <div class="card card-body mb-3">
+    <div class="d-flex flex-wrap gap-2 align-items-center mb-2">
+      <label class="visually-hidden" for="lg_level">Level</label>
+      <select class="form-select form-select-sm w-auto" id="lg_level" data-change="logsReload">
+        <option value="">All</option><option value="warn">Warnings + errors</option><option value="error">Errors</option>
+      </select>
+      <label class="visually-hidden" for="lg_q">Search</label>
+      <input class="form-control form-control-sm w-auto" id="lg_q" placeholder="search (MAC, hostname…)" size="24" data-input="logsSearch">
+      <div class="form-check ms-2"><input class="form-check-input" id="lg_follow" type="checkbox" checked data-change="logsFollow"><label class="form-check-label small" for="lg_follow">Follow</label></div>
+      <span class="flex-grow-1"></span>
+      <span id="lg_n" class="mono small text-body-secondary"></span>
+    </div>
+    <pre id="lg_out" class="mono small mb-0 border rounded p-2" style="height:65vh;overflow:auto;white-space:pre-wrap"></pre>
+  </div>
+</section>

@@ -43,7 +43,9 @@ cũng mất sau khi restart.
   máy để dùng chuột, bàn phím như ngồi tại chỗ, kể cả khi khách đang chơi game toàn màn hình. Không cần cài VNC, máy
   trạm không mở cổng nào.
 - **Theo dõi sức khoẻ máy** — CPU, RAM, nhiệt độ, tình trạng ổ cứng (SMART, bad sector) của từng máy trạm và của máy
-  chủ, báo đỏ khi ổ sắp hỏng hoặc máy quá nóng.
+  chủ, báo đỏ khi ổ sắp hỏng hoặc máy quá nóng; máy trạm nào đã bật bao lâu, đang kéo bao nhiêu MB/s từ máy chủ;
+  biểu đồ tải máy chủ 10 phút gần nhất và trạng thái từng dịch vụ (DHCP, TFTP, iSCSI).
+- **Xem log ngay trên web** — lọc lỗi, tìm theo tên máy, theo dõi trực tiếp lúc máy boot; không cần SSH vào máy chủ.
 - **Snapshot / rollback image** tức thì, **chia nhóm máy** (mỗi nhóm một menu boot, image, ổ game riêng),
   **Wake-on-LAN** và xem trạng thái máy trên web.
 - **Miễn phí, mã nguồn mở** (Apache-2.0) — không tính phí theo số máy, dùng cho quán kinh doanh được.
@@ -115,7 +117,9 @@ Mở trang **Remote** (nhóm Monitor): màn hình mọi máy trạm Windows hi�
 **Ctrl+Alt+Del**, phím **Windows**, **Alt+Tab** và **Paste** (dán clipboard của bạn vào máy trạm). Trên Chrome / Edge
 hình chạy mượt (H.264); mạng đông thì hạ chất lượng xuống **Low**.
 
-Sức khoẻ từng máy (CPU, RAM, nhiệt độ, ổ cứng, bad sector) hiện ở trang **Machines**; của máy chủ ở trang **Server**.
+Sức khoẻ từng máy (CPU, RAM, nhiệt độ, ổ cứng, bad sector, thời gian bật, MB/s đang tải) hiện ở trang **Machines**.
+Trang **Server** có tải máy chủ kèm biểu đồ 10 phút, sức khoẻ ổ và bảng **Services** (DHCP, TFTP, iSCSI chạy hay
+không). Máy không boot được thì mở **Tools → Logs**, chọn *Warn+* hoặc gõ tên máy để xem lỗi.
 
 ## Câu hỏi thường gặp
 

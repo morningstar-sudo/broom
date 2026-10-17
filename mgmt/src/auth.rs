@@ -162,7 +162,12 @@ pub fn init_setup_token(st: &SharedState) {
 }
 
 fn cookie_token(req: &Request<Body>) -> Option<String> {
-    let raw = req.headers().get(header::COOKIE)?.to_str().ok()?;
+    session_token(req.headers())
+}
+
+/// The session cookie's token in these request headers.
+pub(crate) fn session_token(h: &axum::http::HeaderMap) -> Option<String> {
+    let raw = h.get(header::COOKIE)?.to_str().ok()?;
     raw.split(';').find_map(|c| {
         c.trim()
             .strip_prefix(&format!("{COOKIE}="))
@@ -208,18 +213,38 @@ fn sign(key: &[u8; 32], exp: u64) -> String {
 
 /// A valid, unexpired session cookie? Verifies the signature (constant-time via blake3::Hash eq) and expiry.
 fn logged_in(st: &SharedState, req: &Request<Body>) -> bool {
-    let Some(tok) = cookie_token(req) else {
-        return false;
-    };
+    cookie_token(req).is_some_and(|t| token_valid(st, &t))
+}
+
+/// Is this session token still good: signed with the current secret (a password change rotates it) and not expired.
+/// Long-lived streams (SSE, Remote WebSocket) ask again every so often — the guard only checked when they opened.
+pub(crate) fn token_valid(st: &SharedState, tok: &str) -> bool {
+    token_ok(&secret(st), tok, now())
+}
+
+/// `tok` signed with `key` and not expired at `now`.
+fn token_ok(key: &[u8; 32], tok: &str, now: u64) -> bool {
     let Some((exp_s, sig)) = tok.split_once('.') else {
         return false;
     };
     let Ok(exp) = exp_s.parse::<u64>() else {
         return false;
     };
-    exp > now()
-        && blake3::Hash::from_hex(sig)
-            .is_ok_and(|h| h == blake3::keyed_hash(&secret(st), exp_s.as_bytes()))
+    exp > now
+        && blake3::Hash::from_hex(sig).is_ok_and(|h| h == blake3::keyed_hash(key, exp_s.as_bytes()))
+}
+
+/// How often an open stream re-checks its session.
+pub(crate) const RECHECK: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Resolves once the session `tok` is no longer valid (checked every RECHECK): ends an SSE stream / WebSocket.
+pub(crate) async fn until_invalid(st: SharedState, tok: Option<String>) {
+    loop {
+        tokio::time::sleep(RECHECK).await;
+        if !tok.as_deref().is_some_and(|t| token_valid(&st, t)) {
+            return;
+        }
+    }
 }
 
 /// Paths reachable without a session: boot/client endpoints + the login API + the static shell (HTML only, no data).

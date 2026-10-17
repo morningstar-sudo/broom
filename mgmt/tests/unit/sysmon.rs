@@ -15,6 +15,22 @@ fn alert_after_a_streak_and_cleared_below() {
 }
 
 #[test]
+fn traffic_rate_between_two_samples() {
+    let m = |v: &[(&str, u64)]| {
+        v.iter()
+            .map(|(k, n)| (k.to_string(), *n))
+            .collect::<HashMap<_, _>>()
+    };
+    let prev = m(&[("10.0.0.5", 1_000), ("10.0.0.6", 9_000)]);
+    let now = m(&[("10.0.0.5", 5_000), ("10.0.0.6", 10), ("10.0.0.7", 777)]);
+    let r = rates(&prev, &now, 2.0);
+    assert_eq!(r.get("10.0.0.5"), Some(&2_000.0));
+    assert!(!r.contains_key("10.0.0.6"), "counter went back → no rate");
+    assert!(!r.contains_key("10.0.0.7"), "first sample → no rate");
+    assert!(rates(&HashMap::new(), &now, 2.0).is_empty());
+}
+
+#[test]
 fn reads_this_machine() {
     assert!(mem_total() > 0 && fd_limit() > 0);
     let (total, idle) = cpu_times();

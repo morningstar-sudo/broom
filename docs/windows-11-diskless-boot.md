@@ -89,7 +89,10 @@ PC restarts once by itself, and from then on every boot is clean.
 - **Versions** — snapshot the golden before a change, roll back in a click.
 - **Remote** — a live wall of every PC's screen in the web admin; click one to control it with the mouse and keyboard,
   full-screen games included.
-- **Health** — each PC's CPU, RAM, temperatures and disk health (SMART, bad sectors) on the Machines page; the
-  server's own on the Server page.
+- **Health** — each PC's CPU, RAM, temperatures, disk health (SMART, bad sectors), uptime and the traffic it draws
+  now on the Machines page; the server's own load with 10-minute charts, its disk health and whether DHCP, TFTP and
+  the iSCSI target are up on the Server page.
+- **Logs** — the server's log in the browser (Tools → Logs): filter warnings and errors, search a PC's name, follow
+  live while it boots.
 
 The [full manual](https://github.com/morningstar-sudo/broom#readme) covers every option, backup and security.

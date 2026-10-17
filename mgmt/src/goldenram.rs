@@ -272,6 +272,18 @@ pub fn queue_stats() -> (usize, usize) {
     (q.active.values().sum(), q.waiting.len())
 }
 
+/// Golden bytes sent to each client since the server started (the per-machine traffic on the Machines page).
+static SENT: LazyLock<Mutex<HashMap<IpAddr, u64>>> = LazyLock::new(Default::default);
+
+fn count(ip: IpAddr, n: usize) {
+    *SENT.lock().entry(ip).or_default() += n as u64;
+}
+
+/// Bytes sent per client IP so far (counters only grow; sysmon turns them into a rate).
+pub fn sent() -> HashMap<IpAddr, u64> {
+    SENT.lock().clone()
+}
+
 /// GET /api/golden-slot (public: the Windows stage, before it downloads a golden) → "go" or "wait <place> <of>".
 pub async fn slot(
     State(st): State<SharedState>,
@@ -370,7 +382,9 @@ pub async fn get(
                 // The place goes with the body (no "done": a short file is rare enough to hold it a minute).
                 let (parts, body) = r.into_response().into_parts();
                 let body = body.into_data_stream().map(move |c| {
-                    let _ = &p;
+                    if let Ok(b) = &c {
+                        count(p.ip, b.len());
+                    }
                     c
                 });
                 Response::from_parts(parts, Body::from_stream(body))
@@ -411,6 +425,7 @@ fn serve(img: Arc<Golden>, headers: &HeaderMap, ip: IpAddr) -> Response {
             if at + n as u64 == end {
                 p.done.store(true, Ordering::Relaxed);
             }
+            count(p.ip, n);
             async move {
                 tokio::task::spawn_blocking(move || {
                     let mut buf = vec![0u8; n];

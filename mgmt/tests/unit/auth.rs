@@ -120,3 +120,18 @@ fn throttle_per_ip() {
 fn setup_token_compare() {
     assert!(same("abc", "abc") && !same("abc", "abd") && !same("abc", ""));
 }
+
+/// What open streams re-check every 30 s: a token stays good only with the current secret and before its expiry.
+#[test]
+fn token_recheck() {
+    let key = [7u8; 32];
+    let tok = sign(&key, 2_000);
+    assert!(token_ok(&key, &tok, 1_000), "valid");
+    assert!(!token_ok(&key, &tok, 2_000), "expired");
+    assert!(
+        !token_ok(&[8u8; 32], &tok, 1_000),
+        "secret rotated (password changed)"
+    );
+    assert!(!token_ok(&key, "garbage", 1_000));
+    assert!(!token_ok(&key, "2000.nothex", 1_000));
+}

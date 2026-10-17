@@ -26,7 +26,7 @@ for(const ev of ['click','change','input'])document.addEventListener(ev,e=>{
 });
 
 // ---- tabs: load HTML fragments on demand (/ui/<page>) + only load data for the tab being viewed ----
-const loaders={machines:loadStatus,remote:loadRemote,server:loadServer,devices:loadDevices,groups:loadGroups,images:loadImages,games:loadGames,drivers:loadDrivers,network:loadDhcp,windows:loadCafe,system:loadCafe,benchmark:loadBench};
+const loaders={machines:loadStatus,remote:loadRemote,server:loadServer,devices:loadDevices,groups:loadGroups,images:loadImages,games:loadGames,drivers:loadDrivers,network:loadDhcp,windows:loadCafe,system:loadCafe,benchmark:loadBench,logs:loadLogs};
 const fragCache={};
 let curPage=null;
 async function showPage(p){
@@ -98,7 +98,7 @@ function renderMachines(){
        <td>${m.hostname?esc(m.hostname):'<span class="mono">—</span>'} ${m.registered?'':'<span class="badge rounded-pill text-bg-warning">new</span>'}</td>
        <td class="mono">${m.grp?esc(m.grp):'—'}</td>
        <td class="mono">${esc(m.ip)}</td><td class="mono">${esc(m.mac)}</td>
-       <td>${led(m.online)}${m.not_reset?' <span class="badge text-bg-danger" title="Windows started from the SSD without a PXE boot at '+new Date(m.not_reset*1000).toLocaleString()+' — this session was NOT reset (cable out, server down, boot order changed?). Cleared by the next PXE boot.">not reset</span>':''}${m.ssd_low?' <span class="badge text-bg-danger" title="SSD almost full during the session: '+gbs(m.ssd_low[0])+' free at '+new Date(m.ssd_low[1]*1000).toLocaleString()+' (the guest wrote a lot; Windows → SSD room). Cleared by the next PXE boot.">SSD full</span>':''}${mxBadge(m.metrics)}</td>
+       <td>${led(m.online)}${m.not_reset?' <span class="badge text-bg-danger" title="Windows started from the SSD without a PXE boot at '+new Date(m.not_reset*1000).toLocaleString()+' — this session was NOT reset (cable out, server down, boot order changed?). Cleared by the next PXE boot.">not reset</span>':''}${m.ssd_low?' <span class="badge text-bg-danger" title="SSD almost full during the session: '+gbs(m.ssd_low[0])+' free at '+new Date(m.ssd_low[1]*1000).toLocaleString()+' (the guest wrote a lot; Windows → SSD room). Cleared by the next PXE boot.">SSD full</span>':''}${mxBadge(m.metrics)}${upBadge(m)}</td>
        <td class="mono" title="${esc(m.license_result||'')}">${licCell(m)}</td>
        <td><div class="d-flex gap-1">${m.registered
           ? `<button class="btn btn-sm btn-outline-secondary" ${act('wake',m.mac)}>Wake</button>
@@ -250,6 +250,8 @@ async function dvOpen(id){
     <table class="table table-sm align-middle mt-3 mb-0"><tbody>
       <tr><td class="mono">Lease</td><td class="mono">${lease}</td></tr>
       ${st.metrics?`<tr><td class="mono">Health</td><td class="mono" style="white-space:pre-line">${esc(mxText(st.metrics))}</td></tr>`:''}
+      ${st.agent_since?`<tr><td class="mono">Up</td><td class="mono">${upFor(st.agent_since)} (agent connected ${new Date(st.agent_since*1000).toLocaleString()})</td></tr>`:''}
+      ${st.traffic?`<tr><td class="mono">Traffic</td><td class="mono">${esc(trText(st.traffic))}</td></tr>`:''}
       <tr><td class="mono">License</td><td class="mono" style="white-space:normal">${licCell(m,true)}</td></tr>
       <tr><td class="mono">Driver packages</td><td class="mono">${d.drivers.length?esc(d.drivers.join(', ')):'—'}</td></tr>
       <tr><td class="mono">Hardware (${d.hwids.length})</td><td class="mono" style="white-space:normal">${d.hwids.length
@@ -279,6 +281,15 @@ function mxBadge(m){if(!m)return'';
   if(m.temps&&m.temps.length)bits.push(Math.max(...m.temps)+'°C');
   bits.push('⛁ '+(badDisk?'check':'OK'));
   return ` <span class="badge ${hot||badDisk?'text-bg-danger':'text-bg-light border'}" title="${esc(mxText(m))}">${bits.join(' · ')}</span>`;}
+// Uptime ≈ since the agent connected (it starts with Windows); traffic = what the server sends it now (sysmon.rs).
+function dur(secs){const s=Math.max(0,secs|0),d=s/86400|0,h=(s%86400)/3600|0,m=(s%3600)/60|0;
+  return d?`${d}d ${h}h`:h?`${h}h ${m}m`:`${m}m`;}
+const upFor=since=>dur(Date.now()/1000-since);
+const trText=t=>`iSCSI ${(t[0]/1e6).toFixed(1)} MB/s · golden HTTP ${(t[1]/1e6).toFixed(1)} MB/s`;
+function upBadge(m){let s='';
+  if(m.agent_since)s+=` <span class="badge text-bg-light border" title="agent connected ${new Date(m.agent_since*1000).toLocaleString()}">up ${upFor(m.agent_since)}</span>`;
+  const t=m.traffic;if(t&&t[0]+t[1]>=1e5)s+=` <span class="badge text-bg-info" title="${esc(trText(t))}">↓ ${((t[0]+t[1])/1e6).toFixed(1)} MB/s</span>`;
+  return s;}
 function mxText(m){const l=[`CPU ${m.cpu}%  RAM ${m.ram}%`];
   if(m.temps&&m.temps.length)l.push('ACPI temps (best-effort): '+m.temps.map(t=>t+'°C').join(', '));
   for(const d of (m.disks||[])){let s=d.name+': '+(d.health||'?');
@@ -595,6 +606,26 @@ async function setAlert(){const m=document.getElementById('al_msg');
   try{await j('/api/config/alert',mk({pct:+document.getElementById('alert_pct').value}));say(m,' ✓ saved');}catch(e){say(m,' ✗ '+e.message);}}
 async function setZramReserve(){await j('/api/config/zram-reserve',mk({mb:+document.getElementById('zram_reserve').value}));say(document.getElementById('zr_msg'),' ✓ saved');}
 
+// ---- logs (logbuf.rs): the server's newest log lines; Follow asks for the new ones every 3 s ----
+let lgLast=0,lgTimer=null,lgSearch=null;
+async function loadLogs(){logsReload();logsFollow();}
+function logsReload(){lgLast=0;const o=document.getElementById('lg_out');if(o)o.textContent='';logsFetch(true);}
+function logsSearch(){clearTimeout(lgSearch);lgSearch=setTimeout(logsReload,300);}
+async function logsFetch(first){const o=document.getElementById('lg_out');if(!o)return;
+  const p=new URLSearchParams({after:lgLast,level:document.getElementById('lg_level').value,q:document.getElementById('lg_q').value.trim()});
+  let r;try{r=await j('/api/logs?'+p);}catch(e){return;}
+  const atEnd=o.scrollTop+o.clientHeight>=o.scrollHeight-20;
+  for(const l of r.lines){const s=document.createElement('span');s.textContent=l.text+'\n';
+    const head=l.text.slice(0,48);if(head.includes(' ERROR '))s.className='text-danger';else if(head.includes(' WARN '))s.className='text-warning';
+    o.appendChild(s);}
+  while(o.childNodes.length>2000)o.removeChild(o.firstChild);   // the page holds no more than the server keeps
+  lgLast=r.last;
+  document.getElementById('lg_n').textContent=o.childNodes.length+' lines';
+  if(first||atEnd)o.scrollTop=o.scrollHeight;}   // stay at the bottom unless the reader scrolled up
+function logsFollow(){clearInterval(lgTimer);lgTimer=null;
+  if(!document.getElementById('lg_follow')?.checked)return;
+  lgTimer=setInterval(()=>{if(curPage!=='logs'){clearInterval(lgTimer);lgTimer=null;return;}if(!document.hidden)logsFetch(false);},3000);}
+
 // ---- remote (vnc.rs): watch + control a Windows machine over a WebSocket ----
 let rmWs=null, rmCtx=null, rmW=0, rmH=0;
 const rmProto=()=>location.protocol==='https:'?'wss:':'ws:';
@@ -810,7 +841,54 @@ async function loadBench(){
   loadBenchHist();
 }
 // Server page: live load + disk health ("res" SSE), iSCSI now, and its alert / RAM-reserve settings.
-function loadServer(){loadIscsi();if(lastRes)showRes(lastRes);loadCafe();}
+function loadServer(){loadIscsi();if(lastRes)showRes(lastRes);loadCafe();drawCharts();loadServices();
+  if(!svcTimer)svcTimer=setInterval(()=>{if(curPage!=='server'){clearInterval(svcTimer);svcTimer=null;return;}loadServices();},10000);}
+// Services (sysmon.rs /api/server/status): each one up or down, refreshed every 10 s while the page is open.
+let svcTimer=null;
+async function loadServices(){const el=document.getElementById('b_svc');if(!el)return;
+  let s;try{s=await j('/api/server/status');}catch(e){el.textContent='✗ '+e.message;return;}
+  // ok: true running · false down · null off (by choice) · a string = a plain label.
+  const row=(name,ok,detail)=>`<tr><td>${name}</td><td><span class="badge ${ok===true?'text-bg-success':ok===false?'text-bg-danger':'text-bg-secondary'}">${typeof ok==='string'?esc(ok):ok===true?'running':ok===false?'down':'off'}</span></td><td class="mono">${esc(detail)}</td></tr>`;
+  const i=s.iscsi;
+  el.innerHTML=`<table class="table table-sm w-auto mb-0"><tbody>
+    ${row('Web admin + boot HTTP',true,`bootrom-mgmt up ${dur(s.uptime)}`+(s.host_uptime!=null?` · server up ${dur(s.host_uptime)}`:''))}
+    ${s.dhcp.mode==='full'?row('DHCP server',s.dhcp.running,`:67 on ${s.dhcp.iface||'?'}`+(s.dhcp.running?'':' — could not bind (see Logs)')):row('DHCP server',null,'the LAN\'s own DHCP hands out addresses')}
+    ${row('TFTP (iPXE)',s.tftp.running,':69')}
+    ${row('iSCSI target',!!i,i?`${i.targets} targets, ${i.sessions} sessions`+(i.clients!=null?`, ${i.clients} clients`:''):'daemon not running')}
+    ${row('Remote agents',String(s.agents),'Windows machines connected')}
+    ${row('Golden downloads',String(s.golden.running),`running, ${s.golden.waiting} waiting their turn`)}
+  </tbody></table>`;}
+
+// Charts (Chart.js, vendored: chart.umd.min.js). The tab keeps the last RES_KEEP "res" samples (10 min at 2 s), across
+// page changes; they are drawn only while the Server page shows.
+const RES_KEEP=300, resHist=[], charts={};
+const fmtNum=v=>String(Number(v.toFixed(v>=10?0:v>=1?1:2)));
+// Per canvas: its lines (sample field, label, Bootstrap color variable) and y axis (max = fixed top, unit).
+const CHARTS={
+  ch_cpu:[[['cpu','CPU','--bs-primary'],['ram','RAM','--bs-success']],{max:100,unit:'%'}],
+  ch_net:[[['tx','out','--bs-primary'],['rx','in','--bs-success'],['iscsi','iSCSI','--bs-warning'],['http','golden HTTP','--bs-danger']],{unit:' MB/s'}],
+  ch_disk:[[['busy','busy','--bs-primary']],{max:100,unit:'%'}],
+};
+// Colors from Bootstrap's variables, read when the chart is made (each visit of the page): light / dark theme follow.
+function mkChart(cv,lines,o){
+  const css=getComputedStyle(document.documentElement),col=v=>css.getPropertyValue(v).trim()||'#888';
+  const fg=col('--bs-secondary-color'),grid=col('--bs-border-color-translucent');
+  return new Chart(cv,{type:'line',
+    data:{labels:[],datasets:lines.map(([,label,c])=>({label,data:[],borderColor:col(c),backgroundColor:col(c),borderWidth:1.5,pointRadius:0,tension:.2}))},
+    options:{animation:false,responsive:true,maintainAspectRatio:false,interaction:{mode:'index',intersect:false},
+      plugins:{legend:{labels:{color:fg,boxWidth:10,boxHeight:3}},
+        tooltip:{callbacks:{label:c=>`${c.dataset.label}: ${c.parsed.y==null?'—':fmtNum(c.parsed.y)+o.unit}`}}},
+      scales:{x:{ticks:{color:fg,maxTicksLimit:6,maxRotation:0},grid:{color:grid}},
+        y:{min:0,max:o.max,ticks:{color:fg,maxTicksLimit:5},grid:{color:grid}}}}});}
+function drawCharts(){if(curPage!=='server'||typeof Chart==='undefined')return;
+  const labels=resHist.map(r=>new Date(r.t).toLocaleTimeString());
+  for(const [id,[lines,o]] of Object.entries(CHARTS)){const cv=document.getElementById(id);if(!cv)return;
+    let c=charts[id];if(!c||c.canvas!==cv){c?.destroy();c=charts[id]=mkChart(cv,lines,o);} // the page was re-rendered
+    c.data.labels=labels;lines.forEach(([k],i)=>{c.data.datasets[i].data=resHist.map(r=>r[k]);});c.update('none');}}
+function resSample(d){const mb=b=>b==null?null:b/1e6;
+  resHist.push({t:Date.now(),cpu:d.cpu.pct,ram:d.ram.pct,rx:mb(d.net.rx),tx:mb(d.net.tx),
+    iscsi:mb(d.egress?.iscsi),http:mb(d.egress?.http),busy:d.disk.busy});
+  if(resHist.length>RES_KEEP)resHist.shift();}
 async function loadBenchHist(){
   const sel=document.getElementById('b_hmac');if(!sel)return;
   const rows=await j('/api/bench/history?mac='+encodeURIComponent(sel.value));
@@ -922,7 +1000,7 @@ const ACTIONS={
   loadGames,saveGames,setGamesUpdate,toggleGamesRam,saveGamesUpdate,discardGamesUpdate,editGames,delGames,
   loadDrivers,uploadDriver,saveDrvTargets,delDriver,
   loadGroups,editGroup,closeGroup,saveGroup,createGroup,renameGroup,deleteGroup,
-  loadServer,loadBench,loadBenchHist,benchServer,benchRequest:()=>benchAsk(false),benchCancel:()=>benchAsk(true),bSelAll,
+  loadServer,loadBench,loadBenchHist,logsReload,logsFollow,logsSearch,benchServer,benchRequest:()=>benchAsk(false),benchCancel:()=>benchAsk(true),bSelAll,
   applyDhcp,savePw,saveCafe,setTimeout_,setZramReserve,setAlert,setSsd,gsMode,setGoldenStreams,logout,
   remoteTo,rmGo,rmConnect,rmClose,rmBack,rmWallSize,rmWallFilter,rmWallPrev,rmWallNext,rmQuality,rmFull,rmSas,rmWin,rmAltTab,rmPaste,loadRemote,
 };
@@ -933,7 +1011,9 @@ function startApp(){
   const srvEvents=new EventSource('/api/events');
   srvEvents.addEventListener('ping',alive);
   srvEvents.addEventListener('job',e=>{alive();const d=JSON.parse(e.data);showJob(d.name,d.status);});
-  srvEvents.addEventListener('res',e=>{alive();showRes(JSON.parse(e.data));});
+  srvEvents.addEventListener('res',e=>{alive();const d=JSON.parse(e.data);showRes(d);resSample(d);drawCharts();});
+  // The server ended the stream because the session is gone (expired / password changed elsewhere) → sign in again.
+  srvEvents.addEventListener('logout',()=>{srvEvents.close();location.replace('/login');});
   srvEvents.onerror=()=>setServer(false);
   // (Re)connected: job events sent while the link was down are lost → ask for the status of every followed job.
   srvEvents.onopen=()=>{for(const n in jobWatch)j('/api/images/job?name='+encodeURIComponent(n)).then(r=>showJob(n,r.status)).catch(()=>{});};

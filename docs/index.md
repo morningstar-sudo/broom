@@ -39,7 +39,10 @@ enroll, no MokManager screen on any client. With TPM 2.0 + HVCI, [FACEIT Anti-Ch
 - **Remote control in the browser** — a live wall of every PC's screen; click one to take over mouse and keyboard,
   full-screen games included. No VNC client, no port open on the PCs.
 - **Health at a glance** — CPU, RAM, temperatures and each disk's SMART status and bad sectors, for every PC and the
-  server.
+  server; each PC's uptime and the traffic it draws now; live charts of the server's load and whether each of its
+  services is up.
+- **Logs in the browser** — the server's log with level filter, search and live follow; no SSH needed to see why a PC
+  did not boot.
 - **Snapshot / rollback, machine groups, web admin.**
 
 ![Broom web admin Remote page controlling a Windows 11 client](images/remote-control.webp){: width="1241" height="691"}
