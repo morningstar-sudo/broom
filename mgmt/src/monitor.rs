@@ -183,7 +183,7 @@ async fn status(State(st): State<SharedState>) -> Json<Vec<MachineStatus>> {
 const PING_WAIT: std::time::Duration = std::time::Duration::from_millis(300);
 
 /// One ICMP echo over a raw socket (root) — no iputils `ping` needed. true = reply within PING_WAIT. Silent.
-fn ping(ip: &str) -> bool {
+pub(crate) fn ping(ip: &str) -> bool {
     use socket2::{Domain, Protocol, Socket, Type};
     use std::io::Read;
     use std::time::Instant;

@@ -66,6 +66,10 @@ pub enum Req {
         name: String,
     },
     GamesStatus,
+    /// Close every session of this client IP (a machine known to be off). Answers the count in `msg`.
+    KickPeer {
+        ip: String,
+    },
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -296,6 +300,7 @@ async fn handle(req: Req) -> Resp {
         },
         Req::GamesDiscard { name } => r.err = games::discard(&name).err(),
         Req::GamesStatus => r.games = games::info(),
+        Req::KickPeer { ip } => r.msg = conn::kick_peer(&ip).to_string(),
     }
     r
 }

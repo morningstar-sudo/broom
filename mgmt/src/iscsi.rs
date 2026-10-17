@@ -107,6 +107,11 @@ pub fn games_discard(name: &str) -> Result<(), String> {
     call(&Req::GamesDiscard { name: name.into() }).map(|_| ())
 }
 
+/// Close every iSCSI session of client `ip` (that machine is off). Err from a daemon of a build without it.
+pub fn kick_peer(ip: &str) -> Result<usize, String> {
+    call(&Req::KickPeer { ip: ip.into() }).map(|r| r.msg.parse().unwrap_or(0))
+}
+
 /// The daemon of this build is running: reused if so; started if none; one of another build is asked to quit once no
 /// client uses it (until then it keeps serving — upgrade_if_idle retries). Blocking.
 pub fn ensure_daemon() -> Result<String, String> {

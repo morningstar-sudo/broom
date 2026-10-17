@@ -167,10 +167,25 @@ pub async fn writer(w: impl AsyncWrite + Unpin, mut rx: mpsc::Receiver<Out>, exp
     let _ = tokio::time::timeout(Duration::from_secs(5), w.flush()).await;
 }
 
-type Sessions = HashMap<(String, [u8; 6]), Arc<Notify>>;
-/// Logged-in sessions by (initiator name, ISID): a new login with the same ones replaces the old session (the
-/// initiator lost it, e.g. a network blip) — the old connection is told to close instead of waiting for TCP to time out.
+type Sessions = HashMap<(String, [u8; 6]), (Arc<Notify>, String)>;
+/// Logged-in sessions by (initiator name, ISID), with the client's IP: a new login with the same ones replaces the old
+/// session (the initiator lost it, e.g. a network blip) — the old connection is told to close instead of waiting for
+/// TCP to time out.
 static ACTIVE: LazyLock<Mutex<Sessions>> = LazyLock::new(Default::default);
+
+/// Close every session of client `ip` (mgmt knows that machine is off: Windows powers off without logging out, and
+/// TCP alone notices only after ~1 min — the games update machine would block its Save until then). How many.
+pub fn kick_peer(ip: &str) -> usize {
+    let a = ACTIVE.lock();
+    let mut n = 0;
+    for (k, p) in a.values() {
+        if p == ip {
+            k.notify_one();
+            n += 1;
+        }
+    }
+    n
+}
 static TSIH: AtomicU16 = AtomicU16::new(1);
 
 struct Login {
@@ -389,7 +404,10 @@ pub async fn serve(sock: tokio::net::TcpStream, peer: String) {
     let kick = Arc::new(Notify::new());
     let _counted = l.disk.as_ref().map(|d| {
         d.lun.sessions.fetch_add(1, Ordering::Relaxed);
-        if let Some(old) = ACTIVE.lock().insert(l.key.clone(), kick.clone()) {
+        if let Some((old, _)) = ACTIVE
+            .lock()
+            .insert(l.key.clone(), (kick.clone(), peer.clone()))
+        {
             old.notify_one();
         }
         Counted(d.lun.clone())
@@ -397,7 +415,7 @@ pub async fn serve(sock: tokio::net::TcpStream, peer: String) {
     full_feature(&mut r, &tx, &exp, &l, &kick, &local).await;
     if l.disk.is_some() {
         let mut a = ACTIVE.lock();
-        if a.get(&l.key).is_some_and(|k| Arc::ptr_eq(k, &kick)) {
+        if a.get(&l.key).is_some_and(|(k, _)| Arc::ptr_eq(k, &kick)) {
             a.remove(&l.key);
         }
     }

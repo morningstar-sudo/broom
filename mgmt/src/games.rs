@@ -375,17 +375,74 @@ async fn set_cache(
     Ok(ok())
 }
 
+/// Run a Save / Discard of disk `name`; refused because the daemon still counts the update machine as connected →
+/// check whether it is really on. Windows powers off without logging out of iSCSI, and TCP notices a dead client only
+/// after ~1 min, so right after a shutdown the daemon still holds its session. The machine's agent connection
+/// (vnc.rs, its health check) is the answer: no agent and no answer to ping = off → its iSCSI sessions are closed
+/// (the daemon flushes its writes) and the step runs again. Agent connected or ping answered = really on → refused.
+/// Blocking.
+fn with_update_off<T>(
+    st: &SharedState,
+    name: &str,
+    step: impl Fn() -> Result<T, String>,
+) -> Result<T, String> {
+    let e = match step() {
+        Err(e) if e.contains("still connected") => e,
+        r => return r,
+    };
+    let Some(m) = disks(st)
+        .into_iter()
+        .find(|d| d.name == name)
+        .and_then(|d| d.update)
+        .and_then(|id| machine_by_id(st, id).ok())
+    else {
+        return Err(e);
+    };
+    let Some(ip) = ip_of(st, m.id) else {
+        return Err(e);
+    };
+    let who = who(&m);
+    if crate::vnc::connected(&m.mac) {
+        return Err(format!(
+            "the update machine {who} is still on (its agent is connected) — shut it down first"
+        ));
+    }
+    if crate::monitor::ping(&ip) {
+        return Err(format!(
+            "the update machine {who} still answers on the network (shutting down?) — wait for it to power off"
+        ));
+    }
+    let n = crate::iscsi::kick_peer(&ip).map_err(|_| e.clone())?;
+    tracing::info!(
+        "games disk {name}: update machine {who} is off (no agent, no ping) — its {n} iSCSI session(s) closed"
+    );
+    // The daemon lets go of the update once the closed sessions finish (their last writes flushed).
+    for _ in 0..20 {
+        let busy = crate::iscsi::games_status()
+            .unwrap_or_default()
+            .iter()
+            .any(|i| i.name == name && i.update_connected);
+        if !busy {
+            return step();
+        }
+        std::thread::sleep(std::time::Duration::from_millis(500));
+    }
+    Err(e)
+}
+
 /// POST /api/games/save {name} — the update becomes the disk's new version (the update machine must be off).
 async fn save(
     State(st): State<SharedState>,
     Json(b): Json<NameBody>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     find(&st, &b.name)?;
-    let name = b.name.clone();
-    let msg = tokio::task::spawn_blocking(move || crate::iscsi::games_save(&name))
-        .await
-        .map_err(ise)?
-        .map_err(|e| (StatusCode::CONFLICT, e))?;
+    let (name, st2) = (b.name.clone(), st.clone());
+    let msg = tokio::task::spawn_blocking(move || {
+        with_update_off(&st2, &name, || crate::iscsi::games_save(&name))
+    })
+    .await
+    .map_err(ise)?
+    .map_err(|e| (StatusCode::CONFLICT, e))?;
     tracing::info!("games disk {}: {msg}", b.name);
     Ok(Json(serde_json::json!({"ok": true, "status": msg})))
 }
@@ -396,11 +453,13 @@ async fn discard(
     Json(b): Json<NameBody>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     find(&st, &b.name)?;
-    let name = b.name.clone();
-    tokio::task::spawn_blocking(move || crate::iscsi::games_discard(&name))
-        .await
-        .map_err(ise)?
-        .map_err(|e| (StatusCode::CONFLICT, e))?;
+    let (name, st2) = (b.name.clone(), st.clone());
+    tokio::task::spawn_blocking(move || {
+        with_update_off(&st2, &name, || crate::iscsi::games_discard(&name))
+    })
+    .await
+    .map_err(ise)?
+    .map_err(|e| (StatusCode::CONFLICT, e))?;
     tracing::info!("games disk {}: update discarded", b.name);
     Ok(ok())
 }
