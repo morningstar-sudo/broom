@@ -29,6 +29,8 @@ public static class BroomVnc {
   [DllImport("user32.dll")] static extern uint SendInput(uint n, INPUT[] inputs, int size);
   [DllImport("user32.dll")] static extern bool GetCursorInfo(ref CURSORINFO ci);
   [DllImport("user32.dll")] static extern bool DrawIconEx(IntPtr hdc, int x, int y, IntPtr icon, int w, int h, int step, IntPtr brush, int flags);
+  [DllImport("user32.dll")] static extern bool GetIconInfo(IntPtr icon, out ICONINFO info);
+  [DllImport("gdi32.dll")] static extern bool DeleteObject(IntPtr obj);
   [DllImport("gdi32.dll")] static extern bool BitBlt(IntPtr dst, int x, int y, int w, int h, IntPtr src, int sx, int sy, int rop);
   [DllImport("kernel32.dll")] static extern uint WTSGetActiveConsoleSessionId();
   [DllImport("kernel32.dll")] static extern bool ProcessIdToSessionId(uint pid, out uint session);
@@ -49,6 +51,7 @@ public static class BroomVnc {
   [StructLayout(LayoutKind.Sequential)] struct PROCESS_INFORMATION { public IntPtr process, thread; public uint pid, tid; }
 
   [StructLayout(LayoutKind.Sequential)] struct CURSORINFO { public int cbSize; public int flags; public IntPtr hCursor; public int x; public int y; }
+  [StructLayout(LayoutKind.Sequential)] struct ICONINFO { public bool fIcon; public int xHotspot; public int yHotspot; public IntPtr hbmMask; public IntPtr hbmColor; }
   [StructLayout(LayoutKind.Sequential)] struct INPUT { public uint type; public InputUnion u; }
   [StructLayout(LayoutKind.Explicit)] struct InputUnion { [FieldOffset(0)] public MOUSEINPUT mi; [FieldOffset(0)] public KEYBDINPUT ki; }
   [StructLayout(LayoutKind.Sequential)] struct MOUSEINPUT { public int dx; public int dy; public uint data; public uint flags; public uint time; public IntPtr extra; }
@@ -63,7 +66,8 @@ public static class BroomVnc {
   static Dupl _dupl;              // Desktop Duplication, re-created after it is lost; null = use GDI
   static int _ddNext;             // TickCount before which not to retry Desktop Duplication
   // The previous frame's 16-row bands, so SendFrame can diff (a reference type: async can't take a ref parameter).
-  class FrameState { public byte[][] Prev; }
+  // Cur: the cursor shape the viewer was last sent (-1 = none yet, Zero = hidden).
+  class FrameState { public byte[][] Prev; public IntPtr Cur = new IntPtr(-1); }
 
   static void Main(string[] args) {
     if (args.Length < 1) return;
@@ -195,7 +199,7 @@ public static class BroomVnc {
         string text = System.Text.Encoding.UTF8.GetString(msg.ToArray());
         msg.Clear();
         string op = Field(text, "op");
-        if (op == "start") { Quality = Clamp(IntField(text, "q", 60), 20, 95); MaxW = IntField(text, "w", 0); WantH264 = Field(text, "codec") == "h264" ? 1 : 0; Codec = -1; if (_h264 != null) { _h264.Dispose(); _h264 = null; } fr.Prev = null; streaming = true; Drain(frameReady); frameReady.Release(); }
+        if (op == "start") { Quality = Clamp(IntField(text, "q", 60), 20, 95); MaxW = IntField(text, "w", 0); WantH264 = Field(text, "codec") == "h264" ? 1 : 0; Codec = -1; if (_h264 != null) { _h264.Dispose(); _h264 = null; } fr.Prev = null; fr.Cur = new IntPtr(-1); streaming = true; Drain(frameReady); frameReady.Release(); }
         else if (op == "stop") { streaming = false; }
         else if (op == "ack") { if (frameReady.CurrentCount == 0) frameReady.Release(); }
         else if (op == "mouse") { Mouse(IntField(text, "x", 0), IntField(text, "y", 0), IntField(text, "b", 0)); }
@@ -301,6 +305,7 @@ public static class BroomVnc {
   }
 
   static async Task<bool> SendFrame(ClientWebSocket ws, SemaphoreSlim sendLock, FrameState fr) {
+    await SendCursor(ws, sendLock, fr);   // its shape changes without the screen changing (hovering a link)
     byte[][] prev = fr.Prev;
     using (var bmp = Capture()) {
       if (bmp == null) return false;
@@ -401,10 +406,87 @@ public static class BroomVnc {
     return true;
   }
 
+  // The cursor drawn into the picture: wall thumbnails only. A controlling viewer gets its shape instead (SendCursor)
+  // and the browser draws it: one cursor that follows the mouse at once, not a second one lagging a frame behind.
   static void DrawCursor(IntPtr hdc) {
+    if (MaxW <= 0) return;
     var ci = new CURSORINFO(); ci.cbSize = Marshal.SizeOf(ci);
-    if (GetCursorInfo(ref ci) && ci.flags == 1 && ci.hCursor != IntPtr.Zero)
-      DrawIconEx(hdc, ci.x - VX - 16, ci.y - VY - 16, ci.hCursor, 0, 0, 0, IntPtr.Zero, DI_NORMAL);
+    if (!GetCursorInfo(ref ci) || ci.flags != 1 || ci.hCursor == IntPtr.Zero) return;
+    int hx, hy; Hotspot(ci.hCursor, out hx, out hy);
+    DrawIconEx(hdc, ci.x - VX - hx, ci.y - VY - hy, ci.hCursor, 0, 0, 0, IntPtr.Zero, DI_NORMAL);
+  }
+
+  // The point of the cursor image that is the mouse position (the arrow's tip, the I-beam's middle).
+  static IntPtr _hotFor; static int _hotX, _hotY;
+  static void Hotspot(IntPtr cur, out int hx, out int hy) {
+    if (cur != _hotFor) {
+      ICONINFO ii; _hotX = 0; _hotY = 0;
+      if (GetIconInfo(cur, out ii)) {
+        _hotX = ii.xHotspot; _hotY = ii.yHotspot;
+        if (ii.hbmMask != IntPtr.Zero) DeleteObject(ii.hbmMask);
+        if (ii.hbmColor != IntPtr.Zero) DeleteObject(ii.hbmColor);
+      }
+      _hotFor = cur;
+    }
+    hx = _hotX; hy = _hotY;
+  }
+
+  // Controlling viewer: the cursor's shape whenever it changes -> [5, hotspot x u16, y u16, PNG]; [5] alone = hidden
+  // (a game that hides it: the browser hides its own too).
+  static async Task SendCursor(ClientWebSocket ws, SemaphoreSlim sendLock, FrameState fr) {
+    if (MaxW > 0) return;
+    var ci = new CURSORINFO(); ci.cbSize = Marshal.SizeOf(ci);
+    if (!GetCursorInfo(ref ci)) return;
+    IntPtr cur = ci.flags == 1 ? ci.hCursor : IntPtr.Zero;
+    if (cur == fr.Cur) return;
+    fr.Cur = cur;
+    byte[] msg = cur == IntPtr.Zero ? new byte[] { 5 } : CursorMsg(cur);
+    if (msg != null) await Send(ws, sendLock, msg);
+  }
+
+  // The cursor as a PNG with transparency: drawn once on black and once on white, the difference is its opacity
+  // (works for colour, alpha and old black-and-white cursors alike; pixels that invert the screen come out black).
+  static byte[] CursorMsg(IntPtr cur) {
+    int hx, hy; Hotspot(cur, out hx, out hy);
+    const int S = 128;
+    using (var black = new Bitmap(S, S, PixelFormat.Format32bppRgb))
+    using (var white = new Bitmap(S, S, PixelFormat.Format32bppRgb)) {
+      foreach (var p in new[] { new { B = black, C = Color.Black }, new { B = white, C = Color.White } })
+        using (var g = Graphics.FromImage(p.B)) {
+          g.Clear(p.C);
+          IntPtr hdc = g.GetHdc();
+          DrawIconEx(hdc, 0, 0, cur, 0, 0, 0, IntPtr.Zero, DI_NORMAL);
+          g.ReleaseHdc(hdc);
+        }
+      int w = 1, h = 1;
+      var px = new Color[S, S];
+      for (int y = 0; y < S; y++)
+        for (int x = 0; x < S; x++) {
+          Color k = black.GetPixel(x, y), wt = white.GetPixel(x, y);
+          int diff = ((wt.R - k.R) + (wt.G - k.G) + (wt.B - k.B)) / 3;
+          Color c;
+          if (diff < 0) c = Color.FromArgb(255, 0, 0, 0);           // inverts the screen
+          else if (diff >= 255) c = Color.Transparent;
+          else {
+            int a = 255 - diff;
+            c = Color.FromArgb(a, Math.Min(255, k.R * 255 / a), Math.Min(255, k.G * 255 / a), Math.Min(255, k.B * 255 / a));
+          }
+          px[x, y] = c;
+          if (c.A > 0) { w = Math.Max(w, x + 1); h = Math.Max(h, y + 1); }
+        }
+      w = Math.Max(w, hx + 1); h = Math.Max(h, hy + 1);   // the hotspot must lie inside the image
+      using (var outp = new Bitmap(w, h, PixelFormat.Format32bppArgb))
+      using (var ms = new MemoryStream()) {
+        for (int y = 0; y < h; y++)
+          for (int x = 0; x < w; x++) outp.SetPixel(x, y, px[x, y]);
+        outp.Save(ms, ImageFormat.Png);
+        var png = ms.ToArray();
+        var msg = new byte[5 + png.Length]; msg[0] = 5;
+        U16(msg, 1, hx); U16(msg, 3, hy);
+        Buffer.BlockCopy(png, 0, msg, 5, png.Length);
+        return msg;
+      }
+    }
   }
 
   static byte[] Header2(int w, int h) {

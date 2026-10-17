@@ -823,7 +823,7 @@ function rmConnect(){
   const h264='VideoDecoder'in window;
   const ws=new WebSocket(`${rmProto()}//${location.host}/api/vnc/view?host=${encodeURIComponent(host)}&q=${q}${h264?'&codec=h264':''}`);
   ws.binaryType='arraybuffer';rmWs=ws;rmSay(' connecting…');
-  const canvas=document.getElementById('rm_canvas');
+  const canvas=document.getElementById('rm_canvas');canvas.style.cursor='';
   const ack=()=>{if(rmWs===ws&&ws.readyState===1)ws.send('{"op":"ack"}');};
   ws.onopen=()=>{rmSay(' connected');canvas.classList.remove('d-none');canvas.focus();};
   ws.onclose=()=>{if(rmWs===ws){rmWs=null;rmCloseDec();rmSay(' ✗ connection closed (agent gone or another viewer took over)');canvas.classList.add('d-none');}};
@@ -831,6 +831,11 @@ function rmConnect(){
   ws.onmessage=ev=>{
     const b=new Uint8Array(ev.data);
     if(b[0]===2){rmW=b[1]|b[2]<<8;rmH=b[3]|b[4]<<8;canvas.width=rmW;canvas.height=rmH;rmCtx=canvas.getContext('2d');return;}
+    if(b[0]===5){ // the machine's cursor shape: drawn by the browser, so it follows the mouse at once (no second,
+      // lagging cursor in the picture). [5] alone = hidden (a game hides it).
+      if(b.length<6){canvas.style.cursor='none';return;}
+      const hx=b[1]|b[2]<<8,hy=b[3]|b[4]<<8;let s='';for(const c of b.subarray(5))s+=String.fromCharCode(c);
+      canvas.style.cursor=`url(data:image/png;base64,${btoa(s)}) ${hx} ${hy}, default`;return;}
     if(b[0]===4){ // codec decision: 0 JPEG, 1 H.264
       rmCloseDec();
       if(b[1]===1){rmDec=new VideoDecoder({
