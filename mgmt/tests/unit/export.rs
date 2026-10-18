@@ -45,7 +45,7 @@ fn region_copy_keeps_bytes_and_holes() {
     f.write_all_at(b"head", 100).unwrap();
     f.write_all_at(b"tail", (7 << 20) + 5).unwrap();
     let dst = d.join("dst");
-    copy_region(&src, 50, (8 << 20) - 50, &dst).unwrap();
+    crate::disk::copy_region(&src, 50, Some((8 << 20) - 50), &dst).unwrap();
     let got = std::fs::read(&dst).unwrap();
     assert_eq!(got.len(), (8 << 20) - 50);
     assert_eq!(&got[50..54], b"head");

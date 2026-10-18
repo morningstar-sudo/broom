@@ -16,7 +16,6 @@ use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, AtomicUsize};
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
@@ -134,27 +133,13 @@ fn cfg_file() -> Option<PathBuf> {
 }
 
 fn open_lun(cfg: &Config) -> Result<Arc<Lun>, String> {
-    let f = std::fs::File::open(&cfg.path).map_err(|e| format!("{}: {e}", cfg.path))?;
-    let size = f.metadata().map_err(|e| e.to_string())?.len();
-    Ok(Arc::new(Lun {
-        iqn: cfg.iqn.clone(),
-        size,
-        data: super::Data::File(f),
-        sessions: AtomicUsize::new(0),
-        read_bytes: AtomicU64::new(0),
-    }))
+    Ok(Arc::new(Lun::file(&cfg.iqn, &cfg.path)?))
 }
 
 /// The disk's games.img now served from `data` (sessions already in keep theirs); the read counter goes on.
 fn swap_lun(s: &mut State, data: super::Data) {
     let read = s.lun.read_bytes.load(std::sync::atomic::Ordering::Relaxed);
-    s.lun = Arc::new(Lun {
-        iqn: s.cfg.iqn.clone(),
-        size: s.lun.size,
-        data,
-        sessions: AtomicUsize::new(0),
-        read_bytes: AtomicU64::new(read),
-    });
+    s.lun = Arc::new(Lun::new(s.cfg.iqn.clone(), s.lun.size, data, read));
 }
 
 /// Back to reading games.img (RAM option off, or the copy went stale).
@@ -529,9 +514,7 @@ pub fn merge_if_idle(name: &str, grace: Duration) {
         for (_, l) in &layers {
             l.merge_into(&f)?; // oldest first: a newer layer's block wins
         }
-        let tmp = dir.join("base.gen.tmp");
-        std::fs::write(&tmp, target.to_string())
-            .and_then(|_| std::fs::rename(&tmp, dir.join("base.gen")))
+        crate::versions::write_durable(&dir.join("base.gen"), target.to_string().as_bytes())
             .map_err(|e| format!("base.gen: {e}"))
     })();
     with(|d| {

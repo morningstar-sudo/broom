@@ -422,7 +422,7 @@ pub(crate) fn fs_uuid(head: &[u8], fstype: &str) -> Option<String> {
     if u.iter().all(|b| *b == 0) {
         return None;
     }
-    let h: String = u.iter().map(|b| format!("{b:02x}")).collect();
+    let h = crate::auth::hex(u);
     Some(format!(
         "{}-{}-{}-{}-{}",
         &h[..8],
@@ -567,7 +567,7 @@ pub(crate) fn copy_tree(
     {
         return std::fs::hard_link(first, dst).map_err(|e| format!("{}: {e}", dst.display()));
     }
-    crate::versions::copy_sparse(src, dst)?;
+    crate::disk::copy_region(src, 0, None, dst)?;
     if m.nlink() > 1 {
         links.insert(key, dst.to_path_buf());
     }
@@ -874,49 +874,29 @@ async fn move_item(
     } else {
         return Err(bad("kind: image | games"));
     };
-    {
-        let mut jobs = st.jobs.lock();
-        if jobs.get(&job).is_some_and(|s| s.starts_with('⏳')) {
-            return Err(bad(format!("{name} has a running job — wait for it")));
-        }
-        jobs.insert(job.clone(), "⏳ moving...".into());
-    }
-    let _ = st.job_tx.send((job.clone(), "⏳ moving...".into()));
-    let st2 = st.clone();
-    tokio::task::spawn_blocking(move || {
-        let r = (|| -> Result<(), String> {
-            if kind == "image" {
-                if crate::publish::image_in_use(&st2, &name) {
-                    return Err("clients are booted from it — shut them down first".into());
-                }
-                // Its iSCSI targets point at the old files: dropped, made again from the new place after.
-                crate::publish::drop_all_targets(&st2, &name);
-                let r = {
-                    let _g = st2.versions_lock.lock();
-                    move_blocking(&st2, "image", &name, to.as_deref())
-                };
-                crate::publish::restore_targets(&st2);
-                r
-            } else {
-                crate::games::idle(&name)?;
-                // Out of the iSCSI daemon while its files move (it holds them open), back in after.
-                crate::games::sync_except(&st2, Some(&name))?;
-                let r = move_blocking(&st2, "games", &name, to.as_deref());
-                let _ = crate::games::sync(&st2);
-                r
+    crate::images::spawn_job(&st, job, "move", move |st2, _, _| {
+        let r = if kind == "image" {
+            if crate::publish::image_in_use(st2, &name) {
+                return Err("clients are booted from it — shut them down first".into());
             }
-        })();
-        let status = match &r {
-            Ok(()) => format!("✓ moved to {}", to.as_deref().unwrap_or("home")),
-            Err(e) => format!("✗ move: {e}"),
+            // Its iSCSI targets point at the old files: dropped, made again from the new place after.
+            crate::publish::drop_all_targets(st2, &name);
+            let r = {
+                let _g = st2.versions_lock.lock();
+                move_blocking(st2, "image", &name, to.as_deref())
+            };
+            crate::publish::restore_targets(st2);
+            r
+        } else {
+            crate::games::idle(&name)?;
+            // Out of the iSCSI daemon while its files move (it holds them open), back in after.
+            crate::games::sync_except(st2, Some(&name))?;
+            let r = move_blocking(st2, "games", &name, to.as_deref());
+            let _ = crate::games::sync(st2);
+            r
         };
-        match &r {
-            Ok(()) => tracing::info!("{kind} {name} moved to {}", to.as_deref().unwrap_or("home")),
-            Err(e) => tracing::warn!("{kind} {name} not moved: {e}"),
-        }
-        st2.jobs.lock().insert(job.clone(), status.clone());
-        let _ = st2.job_tx.send((job, status));
-    });
+        r.map(|()| format!("moved to {}", to.as_deref().unwrap_or("home")))
+    })?;
     Ok(ok())
 }
 

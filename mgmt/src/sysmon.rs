@@ -15,7 +15,7 @@ pub fn mem_total() -> u64 {
     meminfo("MemTotal:")
 }
 
-fn meminfo(key: &str) -> u64 {
+pub(crate) fn meminfo(key: &str) -> u64 {
     std::fs::read_to_string("/proc/meminfo")
         .unwrap_or_default()
         .lines()
@@ -536,11 +536,7 @@ pub async fn run(st: SharedState) {
     loop {
         tokio::time::sleep(EVERY).await;
         let iface = boot_iface(&st.db.get_config("dhcp_iface", ""));
-        let limit = st
-            .db
-            .get_config("alert_pct", "80")
-            .parse::<f64>()
-            .unwrap_or(80.0);
+        let limit = crate::db::num(&*st.db, "alert_pct", 80.0);
         let images = crate::images_dir();
         let secs = t0.elapsed().as_secs_f64().max(1e-3);
         t0 = Instant::now();

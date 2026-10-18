@@ -66,13 +66,6 @@ fn edit<R>(
     crate::db::edit_json(&*st.db, &key(mac), f).map_err(ise)?
 }
 
-fn mac_ok(mac: &str) -> bool {
-    mac.len() == 17
-        && mac
-            .split(':')
-            .all(|b| b.len() == 2 && b.chars().all(|c| c.is_ascii_hexdigit()))
-}
-
 /// The stage's lines `<id> <bytes> <broom 0|1> <dev> <model…>`; malformed lines skipped, at most 32 disks.
 pub fn parse_report(body: &str) -> Vec<Disk> {
     let id_ok = |s: &str| {
@@ -117,12 +110,9 @@ pub fn hide_for(st: &SharedState, mac: &str) -> bool {
 }
 
 fn group_hides(st: &SharedState, mac: &str) -> bool {
-    let grp = st
-        .db
-        .machines()
-        .unwrap_or_default()
-        .into_iter()
-        .find(|m| m.mac.eq_ignore_ascii_case(mac))
+    let grp = crate::machines::by_mac(st, mac)
+        .ok()
+        .flatten()
         .and_then(|m| m.grp);
     grp.is_some_and(|g| hidden_groups(st).iter().any(|h| h.eq_ignore_ascii_case(&g)))
 }
@@ -139,18 +129,10 @@ async fn report(
     Query(q): Query<MacQ>,
     body: String,
 ) -> Result<String, ApiError> {
-    let mac = q.mac.to_lowercase();
-    if !mac_ok(&mac) {
-        return Err(bad("bad mac"));
-    }
+    let mac = crate::devices::norm_mac(&q.mac).ok_or_else(|| bad("bad mac"))?;
     // Open to anyone: only a registered machine is stored (made-up MACs can't grow the table); any other one gets
     // the defaults — no Broom disk chosen, nothing hidden.
-    let registered = st
-        .db
-        .machines()
-        .map_err(ise)?
-        .iter()
-        .any(|m| m.mac.eq_ignore_ascii_case(&mac));
+    let registered = crate::machines::by_mac(&st, &mac)?.is_some();
     if !registered {
         return Ok("broom=\nhide=0\n".into());
     }
@@ -188,12 +170,7 @@ async fn set_broom(
     State(st): State<SharedState>,
     Json(b): Json<BroomReq>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let m = st
-        .db
-        .machines()
-        .map_err(ise)?
-        .into_iter()
-        .find(|m| m.mac.eq_ignore_ascii_case(&b.mac))
+    let m = crate::machines::by_mac(&st, &b.mac)?
         .ok_or_else(|| bad("register the machine first (Machines page)"))?;
     let d = edit(&st, &b.mac, |e| {
         let d = e
@@ -227,10 +204,8 @@ async fn set_hide(
     State(st): State<SharedState>,
     Json(b): Json<HideReq>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    if !mac_ok(&b.mac.to_lowercase()) {
-        return Err(bad("bad mac"));
-    }
-    edit(&st, &b.mac, |e| {
+    let mac = crate::devices::norm_mac(&b.mac).ok_or_else(|| bad("bad mac"))?;
+    edit(&st, &mac, |e| {
         e.hide = b.hide;
         Ok(())
     })?;

@@ -73,20 +73,10 @@ pub fn list() -> Option<Vec<TargetInfo>> {
     call(&Req::List).ok().map(|r| r.targets)
 }
 
-/// What the benchmark page shows: the goldens' targets, the games disks, bytes read per client IP. None = no daemon;
-/// peers None = a daemon of an older build (no counters).
-pub struct Stats {
-    pub targets: Vec<TargetInfo>,
-    pub games: Vec<crate::iscsid::games::Info>,
-    pub peers: Option<Vec<crate::iscsid::PeerInfo>>,
-}
-
-pub fn stats() -> Option<Stats> {
-    call(&Req::List).ok().map(|r| Stats {
-        targets: r.targets,
-        games: r.games,
-        peers: r.peers,
-    })
+/// The daemon's state: the goldens' targets, the games disks, bytes read per client IP. None = no daemon; peers None =
+/// a daemon of an older build (no counters).
+pub fn stats() -> Option<crate::iscsid::Resp> {
+    call(&Req::List).ok()
 }
 
 /// Serve exactly these games disks.

@@ -236,10 +236,7 @@ impl Cfg {
             dns: if g("dns_mode", "off") == "on" {
                 vec![server]
             } else {
-                g("dhcp_dns", "")
-                    .split([',', ' '])
-                    .filter_map(|s| s.trim().parse().ok())
-                    .collect()
+                crate::dns::ip_list(&g("dhcp_dns", ""))
             },
             lease_s: lease_secs(&g("dhcp_lease", "12h")),
             sb: g("ipxe_signed", "0") == "1",

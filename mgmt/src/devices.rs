@@ -30,10 +30,6 @@ pub fn routes() -> Router<SharedState> {
         .route("/api/machines/detail", get(detail))
 }
 
-fn ok_json(v: serde_json::Value) -> Json<serde_json::Value> {
-    Json(v)
-}
-
 /// "AA-BB-CC-DD-EE-FF", "aabb.ccdd.eeff", "aabbccddeeff" → "aa:bb:cc:dd:ee:ff"; None unless 12 hex digits.
 pub(crate) fn norm_mac(s: &str) -> Option<String> {
     let s = s.trim();
@@ -196,7 +192,7 @@ async fn update(
     );
     rearm_on_rename(&st, Some(&old), &m);
     crate::drivers::rearm_changed(&st, before); // another group → maybe other driver packages
-    Ok(ok_json(serde_json::json!({"ok": true})))
+    Ok(crate::api::ok())
 }
 
 #[derive(Deserialize)]
@@ -219,7 +215,7 @@ async fn delete(
         tracing::info!("machine {} deleted - mac {}", who(&m), m.mac);
         n += 1;
     }
-    Ok(ok_json(serde_json::json!({"ok": true, "deleted": n})))
+    Ok(Json(serde_json::json!({"ok": true, "deleted": n})))
 }
 
 #[derive(Deserialize)]
@@ -306,9 +302,7 @@ async fn bulk(
         names.len(),
         names.join(", ")
     );
-    Ok(ok_json(
-        serde_json::json!({"ok": true, "count": names.len()}),
-    ))
+    Ok(Json(serde_json::json!({"ok": true, "count": names.len()})))
 }
 
 /// The next `count` free names prefix+number (zero-padded to `digits`), from `start`, skipping taken ones.
@@ -385,7 +379,7 @@ async fn register_bulk(
         );
         done.push(serde_json::json!({"mac": mac, "hostname": host, "ip": ip}));
     }
-    Ok(ok_json(serde_json::json!({"ok": true, "registered": done})))
+    Ok(Json(serde_json::json!({"ok": true, "registered": done})))
 }
 
 /// One CSV field, quoted when needed.
@@ -529,16 +523,7 @@ fn plan_import(
                 Machine {
                     id: next_new,
                     mac: mac.clone(),
-                    ip: None,
-                    hostname: None,
-                    image_id: None,
-                    license_key: None,
-                    license_tail: None,
-                    license_state: None,
-                    license_gen: 0,
-                    license_result: None,
-                    grp: None,
-                    notes: None,
+                    ..Default::default()
                 }
             });
         if let Some(v) = get(c_host) {
@@ -643,7 +628,7 @@ async fn import_csv(
         "machines imported: {added} added, {updated} updated, {} license key(s) set",
         keys.len()
     );
-    Ok(ok_json(
+    Ok(Json(
         serde_json::json!({"ok": true, "added": added, "updated": updated, "keys": keys.len()}),
     ))
 }
@@ -688,7 +673,7 @@ async fn detail(
         .license_key
         .clone()
         .filter(|_| w.role == crate::auth::Role::Owner);
-    Ok(ok_json(serde_json::json!({
+    Ok(Json(serde_json::json!({
         "machine": m,
         "license_key": license_key,
         "image": image,

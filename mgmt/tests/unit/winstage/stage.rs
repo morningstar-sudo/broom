@@ -65,15 +65,15 @@ fn stage_guid_patch() {
         logical_sector: 512,
         physical_sector: 4096,
     };
-    vhdx::write_empty(base, &parent, Some(".\\golden.vhdx")).unwrap();
-    let want = vhdx::guid_str(&vhdx::read_info(base).unwrap().data_write_guid);
+    vhdx::write_empty(base, &parent, ".\\golden.vhdx").unwrap();
+    let want = vhdx::guid_str(&vhdx::tests::read_info(base).unwrap().data_write_guid);
     let off = vhdx::write_empty(
         child,
         &vhdx::Info {
             data_write_guid: [0; 16],
             ..parent
         },
-        Some(".\\base.vhdx"),
+        ".\\base.vhdx",
     )
     .unwrap();
     let sh = format!("{funcs}\ng=$(vhdx_guid {base}); echo \"$g\"; patch16 {child} \"$g\" {off}");

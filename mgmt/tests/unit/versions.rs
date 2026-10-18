@@ -110,7 +110,7 @@ fn copy_sparse_keeps_holes() {
     let f = File::create(&a).unwrap();
     f.set_len(64 << 20).unwrap();
     f.write_all_at(&[3u8; 5000], 40 << 20).unwrap();
-    copy_sparse(&a, &b).unwrap();
+    crate::disk::copy_region(&a, 0, None, &b).unwrap();
     assert_eq!(std::fs::read(&a).unwrap(), std::fs::read(&b).unwrap());
     assert!(
         std::fs::metadata(&b).unwrap().blocks() * 512 <= 1 << 20,

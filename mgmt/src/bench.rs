@@ -123,15 +123,10 @@ fn save(
     })
 }
 
-fn norm_mac(m: &str) -> Option<String> {
-    let m = m.trim().to_lowercase().replace('-', ":");
-    (m.len() == 17 && m.chars().all(|c| c.is_ascii_hexdigit() || c == ':')).then_some(m)
-}
-
 /// The client's MAC: ?mac= (the stage knows it from BOOTIF), else the peer IP's (ARP / lease / fixed IP).
 fn client_mac(st: &SharedState, q: Option<&str>, peer: &SocketAddr) -> Option<String> {
     match q {
-        Some(m) => norm_mac(m),
+        Some(m) => crate::devices::norm_mac(m),
         None => crate::license::mac_at(st, &peer.ip().to_canonical().to_string()),
     }
 }
@@ -185,7 +180,10 @@ async fn history(
             .collect(),
         Some(m) => st
             .db
-            .bench_rows(Some(&norm_mac(m).ok_or_else(|| bad("bad mac"))?), 200)
+            .bench_rows(
+                Some(&crate::devices::norm_mac(m).ok_or_else(|| bad("bad mac"))?),
+                200,
+            )
             .map_err(ise)?,
     };
     Ok(Json(rows))
@@ -211,7 +209,7 @@ async fn request(Json(b): Json<ReqBody>) -> Result<Json<serde_json::Value>, ApiE
     let macs = b
         .macs
         .iter()
-        .map(|m| norm_mac(m).ok_or_else(|| bad(format!("bad mac {m:?}"))))
+        .map(|m| crate::devices::norm_mac(m).ok_or_else(|| bad(format!("bad mac {m:?}"))))
         .collect::<Result<Vec<_>, _>>()?;
     if macs.len() > BOOTS_MAX {
         return Err(bad("too many machines"));
@@ -229,7 +227,7 @@ async fn request(Json(b): Json<ReqBody>) -> Result<Json<serde_json::Value>, ApiE
 }
 
 /// One sample of the iSCSI daemon's counters (None = no daemon) and when it was taken.
-type Sample = (Option<crate::iscsi::Stats>, Instant);
+type Sample = (Option<crate::iscsid::Resp>, Instant);
 
 async fn sample() -> Sample {
     (
@@ -436,13 +434,9 @@ async fn booted(
     State(st): State<SharedState>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
 ) -> StatusCode {
-    let (ip, now) = (peer.ip().to_canonical().to_string(), crate::now_secs());
-    {
-        let mut seen = BOOTED_SEEN.lock();
-        seen.retain(|_, t| now.saturating_sub(*t) < 60);
-        if seen.insert(ip.clone(), now).is_some() {
-            return StatusCode::TOO_MANY_REQUESTS;
-        }
+    let ip = peer.ip().to_canonical().to_string();
+    if !crate::license::once_a_minute(&BOOTED_SEEN, &ip) {
+        return StatusCode::TOO_MANY_REQUESTS;
     }
     let Some(mac) = crate::license::mac_at(&st, &ip) else {
         return StatusCode::NO_CONTENT;

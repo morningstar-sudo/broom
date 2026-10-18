@@ -2,10 +2,10 @@
 // and pushes over its own WebSocket (vnc.rs routes a "metrics" text message here). No HTTP endpoint and no ping: it
 // rides the connection the agent already keeps open. The newest reading per machine is kept; one older than STALE is
 // treated as gone (the machine is off / the agent stopped).
+use crate::now_secs as now;
 use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::sync::LazyLock;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
@@ -49,13 +49,6 @@ pub struct Metrics {
 }
 
 static METRICS: LazyLock<Mutex<HashMap<String, Metrics>>> = LazyLock::new(Default::default);
-
-fn now() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
-}
 
 /// Store the agent's JSON reading for `mac` (ignored if it doesn't parse).
 pub fn store(mac: &str, json: &str) {

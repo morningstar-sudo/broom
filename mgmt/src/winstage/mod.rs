@@ -18,10 +18,7 @@ mod prep;
 mod stage;
 
 pub use prep::prep_script;
-use prep::{
-    boot_storage_done, broom_bootorder, broom_done, broom_fw_cs, broom_games, broom_vnc_cs,
-    broom_watch, has_stub,
-};
+use prep::{boot_storage_done, has_stub};
 pub(crate) use stage::STAGE_PIN; // `bootrom-mgmt pins`
 #[cfg(feature = "external-assets")]
 pub(crate) use stage::download;
@@ -40,15 +37,27 @@ fn stage_dir() -> String {
         .into_owned()
 }
 
-type Script = (&'static str, fn() -> &'static str);
-/// The Windows scripts the stage puts in BROOMWIN broom\ (the golden only holds fixed stubs that run them).
-const SCRIPTS: [Script; 6] = [
-    ("broom-done.ps1", broom_done),
-    ("broom-bootorder.ps1", broom_bootorder),
-    ("broom-games.ps1", broom_games),
-    ("broom-watch.ps1", broom_watch),
-    ("broom-fw.cs", broom_fw_cs),
-    ("broom-vnc.cs", broom_vnc_cs),
+/// The Windows scripts (scripts/<name>) the stage puts in BROOMWIN broom\ (the golden only holds fixed stubs that run
+/// them). ASCII only.
+/// - broom-done.ps1: first logon (when base.vhdx is created on each machine): writes base.ok to BROOMWIN, then restarts
+///   at once → the stage commits base. With base mode on for the image (broom\basemode.txt from the stage): a popup
+///   tells the technician to set up apps (FACEIT AC...) and restart; that restart → the stage commits base. BROOMWIN
+///   has no drive letter (GPT bit 63, set by the stage) → written through its volume path `\\?\Volume{..}\`.
+/// - broom-bootorder.ps1: the BroomBootOrder task (SYSTEM, at startup + every 5 minutes). Windows pulls "Windows Boot
+///   Manager" to the top of BootOrder every boot → the next power-on would skip PXE (no reset): restores the order the
+///   stage wrote to broom\bootorder.txt — by Boot#### NUMBER, never by entry name (PXE entries are named anything).
+///   Entries not in the file (added later) are kept, after. Writes NVRAM only when different. Also the pagefile.
+/// - broom-games.ps1: games disks as drive letters (games.rs), run by broom-bootorder.ps1.
+/// - broom-watch.ps1: the session watchdog (SSD room) + Remote agent, started by broom-bootorder.ps1 as its own task.
+/// - broom-fw.cs / broom-vnc.cs: C# sources of the UEFI/pagefile helper and of the Remote agent, compiled by the
+///   client when the release ships no broom-fw.dll / broom-vnc.exe (BINARIES).
+const SCRIPTS: [&str; 6] = [
+    "broom-done.ps1",
+    "broom-bootorder.ps1",
+    "broom-games.ps1",
+    "broom-watch.ps1",
+    "broom-fw.cs",
+    "broom-vnc.cs",
 ];
 /// Compiled broom-fw.cs / broom-vnc.cs, next to the scripts when this release has them (CI). Not listed = the stage
 /// removes BROOMWIN's copy: a DLL / exe SYSTEM runs must never be one a guest left there.
@@ -63,7 +72,10 @@ pub fn install_scripts() -> Result<(), String> {
     std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     let mut files: Vec<(&str, std::borrow::Cow<[u8]>)> = SCRIPTS
         .iter()
-        .map(|(f, body)| (*f, body().replace('\n', "\r\n").into_bytes().into()))
+        .map(|f| {
+            let body = crate::assets::text(&format!("scripts/{f}"));
+            (*f, body.replace('\n', "\r\n").into_bytes().into())
+        })
         .collect();
     for b in BINARIES {
         match crate::assets::optional(&format!("scripts/{b}")) {
@@ -77,19 +89,16 @@ pub fn install_scripts() -> Result<(), String> {
     for (f, body) in files {
         let p = dir.join(f);
         if std::fs::read(&p).ok().as_deref() != Some(&body[..]) {
-            let tmp = dir.join(format!("{f}.tmp"));
-            std::fs::write(&tmp, &body)
-                .and_then(|_| std::fs::rename(&tmp, &p))
+            crate::versions::write_durable(&p, &body)
                 .map_err(|e| format!("{}: {e}", p.display()))?;
         }
         let h =
             crate::hash::file_hash(&p.to_string_lossy()).ok_or(format!("sha256 of {f} failed"))?;
         sums.push_str(&format!("{h}  {f}\n"));
     }
-    let (p, tmp) = (dir.join("scripts.sha256"), dir.join("scripts.sha256.tmp"));
+    let p = dir.join("scripts.sha256");
     if std::fs::read_to_string(&p).ok().as_deref() != Some(sums.as_str()) {
-        std::fs::write(&tmp, &sums)
-            .and_then(|_| std::fs::rename(&tmp, &p))
+        crate::versions::write_durable(&p, sums.as_bytes())
             .map_err(|e| format!("{}: {e}", p.display()))?;
     }
     Ok(())
@@ -203,7 +212,7 @@ pub fn publish(
     // First line: the golden these files belong to — the stage applies them only to that golden (a client still on
     // the previous hash during a publish never gets the new templates next to its old golden).
     // (The Windows scripts are not per image: install_scripts.)
-    for f in SCRIPTS.iter().map(|(f, _)| f) {
+    for f in SCRIPTS {
         let _ = std::fs::remove_file(format!("{out}/{f}")); // per-image copies of older versions
     }
     let mut sums = format!("{hash}  golden\n");
@@ -373,7 +382,12 @@ fn build_golden(
     });
     let outside: Vec<(u64, u64)> = holes
         .into_iter()
-        .filter(|&(off, len)| len > 0 && has_data(raw, off, len))
+        .filter(|&(off, len)| {
+            // Not entirely a hole.
+            len > 0
+                && crate::disk::Source::new(&[(Path::new(raw), off, Some(len))])
+                    .is_ok_and(|s| !s.data_ranges().is_empty())
+        })
         .collect();
     if !single || !outside.is_empty() {
         // A whole-file version shares this very file (its publish failed before the trim): trim a copy of it.
@@ -383,7 +397,7 @@ fn build_golden(
         {
             steps.go("trim disk (own copy: a version shares image.img)");
             let tmp = format!("{raw}.new");
-            crate::versions::copy_sparse(Path::new(raw), Path::new(&tmp))
+            crate::disk::copy_region(Path::new(raw), 0, None, Path::new(&tmp))
                 .and_then(|_| std::fs::rename(&tmp, raw).map_err(|e| e.to_string()))
                 .inspect_err(|_| {
                     let _ = std::fs::remove_file(&tmp);
@@ -396,8 +410,13 @@ fn build_golden(
             crate::disk::write_single_gpt(raw, start, size)
                 .map_err(|e| format!("golden single partition: {e}"))?;
         }
+        let f = std::fs::OpenOptions::new()
+            .write(true)
+            .open(raw)
+            .map_err(|e| format!("{raw}: {e}"))?;
         for (off, len) in outside {
-            punch_hole(raw, off, len)?;
+            crate::disk::punch_hole(&f, off, len)
+                .map_err(|e| format!("punch hole {raw} +{len}: {e}"))?;
         }
     }
 
@@ -421,7 +440,7 @@ fn build_golden(
     crate::vhdx::write_empty(
         &format!("{out}/base-template.vhdx"),
         &v.info,
-        Some(".\\golden.vhdx"),
+        ".\\golden.vhdx",
     )?;
     let placeholder = crate::vhdx::Info {
         data_write_guid: [0; 16],
@@ -430,7 +449,7 @@ fn build_golden(
     let off = crate::vhdx::write_empty(
         &format!("{out}/child-template.vhdx"),
         &placeholder,
-        Some(".\\base.vhdx"),
+        ".\\base.vhdx",
     )?;
     std::fs::write(format!("{out}/child-template.off"), off.to_string())
         .map_err(|e| e.to_string())?;
@@ -443,43 +462,6 @@ fn build_golden(
     }
     std::fs::write(format!("{out}/golden.id"), &id).map_err(|e| format!("golden.id: {e}"))?;
     Ok((drivers, hash))
-}
-
-/// [off, off+len) of a file holds data (not entirely a hole).
-fn has_data(path: &str, off: u64, len: u64) -> bool {
-    use std::os::fd::AsRawFd;
-    let Ok(f) = std::fs::File::open(path) else {
-        return true;
-    };
-    // SAFETY: lseek on a valid fd, no memory involved.
-    let d = unsafe { libc::lseek(f.as_raw_fd(), off as libc::off_t, libc::SEEK_DATA) };
-    d >= 0 && (d as u64) < off + len
-}
-
-/// Free [off, off+len) of a file without changing its size (fallocate PUNCH_HOLE|KEEP_SIZE; replaces
-/// the util-linux `fallocate` binary). Reads there return zeros.
-pub(crate) fn punch_hole(path: &str, off: u64, len: u64) -> Result<(), String> {
-    use std::os::fd::AsRawFd;
-    let f = std::fs::OpenOptions::new()
-        .write(true)
-        .open(path)
-        .map_err(|e| format!("{path}: {e}"))?;
-    // SAFETY: valid open fd; offsets are plain integers.
-    let r = unsafe {
-        libc::fallocate(
-            f.as_raw_fd(),
-            libc::FALLOC_FL_PUNCH_HOLE | libc::FALLOC_FL_KEEP_SIZE,
-            off as i64,
-            len as i64,
-        )
-    };
-    if r != 0 {
-        return Err(format!(
-            "punch hole {path} @{off}+{len}: {}",
-            std::io::Error::last_os_error()
-        ));
-    }
-    Ok(())
 }
 
 #[cfg(test)]

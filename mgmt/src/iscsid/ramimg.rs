@@ -108,37 +108,15 @@ pub fn fits(need: u64, avail: u64, reserve: u64) -> bool {
     avail == 0 || need.saturating_add(reserve) <= avail
 }
 
-/// Available RAM (bytes) from /proc/meminfo MemAvailable (free + reclaimable page cache). 0 if unreadable.
-fn mem_available() -> u64 {
-    let s = std::fs::read_to_string("/proc/meminfo").unwrap_or_default();
-    s.lines()
-        .find_map(|l| l.strip_prefix("MemAvailable:"))
-        .and_then(|r| r.split_whitespace().next()?.parse::<u64>().ok())
-        .map_or(0, |kb| kb * 1024)
-}
-
-/// Blocks of a file that hold data (not entirely inside a hole): SEEK_DATA / SEEK_HOLE over the file.
-fn data_blocks(f: &std::fs::File, size: u64) -> u64 {
-    use std::os::fd::AsRawFd;
-    let (fd, b) = (f.as_raw_fd(), BLOCK as u64);
-    let (mut n, mut pos) = (0u64, 0u64);
-    while pos < size {
-        // SAFETY: lseek on a valid fd, no memory involved.
-        let data = unsafe { libc::lseek(fd, pos as libc::off_t, libc::SEEK_DATA) };
-        if data < 0 {
-            break; // ENXIO: no data after pos
-        }
-        // SAFETY: as above.
-        let hole = unsafe { libc::lseek(fd, data, libc::SEEK_HOLE) };
-        let end = if hole < 0 {
-            size
-        } else {
-            (hole as u64).min(size)
-        };
-        let (first, last) = (data as u64 / b, end.div_ceil(b));
-        // Blocks [first, last), minus one already counted when this extent starts in the previous extent's last block.
-        n += last - first - u64::from(pos > 0 && first < pos.div_ceil(b));
-        pos = end;
+/// Blocks of a file that hold data (not entirely inside a hole).
+fn data_blocks(path: &str) -> u64 {
+    let b = BLOCK as u64;
+    let (mut n, mut counted) = (0, 0); // blocks [0, counted) already looked at
+    let ranges = crate::disk::Source::file(std::path::Path::new(path)).map(|s| s.data_ranges());
+    for (start, end) in ranges.unwrap_or_default() {
+        let (first, last) = ((start / b).max(counted), end.div_ceil(b));
+        n += last.saturating_sub(first);
+        counted = counted.max(last);
     }
     n
 }
@@ -158,7 +136,7 @@ impl RamImage {
         use std::os::unix::fs::FileExt;
         let f = std::fs::File::open(path).map_err(|e| format!("{path}: {e}"))?;
         let size = f.metadata().map_err(|e| format!("{path}: {e}"))?.len();
-        let blocks = data_blocks(&f, size);
+        let blocks = data_blocks(path);
         Self::load_with(path, size, blocks, reserve, |off, buf| {
             f.read_exact_at(buf, off)
                 .map_err(|e| format!("{path} @{off}: {e}"))
@@ -187,7 +165,7 @@ impl RamImage {
             if let Ok(l) = &lock {
                 unsafe { libc::flock(l.as_raw_fd(), libc::LOCK_EX) };
             }
-            let avail = mem_available();
+            let avail = crate::sysmon::meminfo("MemAvailable:"); // free + reclaimable page cache; 0 if unreadable
             if !fits(worst, avail, reserve) {
                 let gb = |b: u64| b as f64 / (1024.0 * 1024.0 * 1024.0);
                 return Err(format!(

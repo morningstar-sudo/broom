@@ -1,8 +1,8 @@
 // vhdx.rs — minimal VHDX (MS-VHDX v1.0) reader/writer for Windows native boot.
 // Write: the golden as a DYNAMIC VHDX of its raw disk, made on the fly, never stored (Virtual), and empty DIFFERENCING
 // files (BAT all "not present" → every read falls through to the parent) pointing to their parent via
-// parent_linkage + relative_path (write_empty). Read (tests only — they check what was written): disk parameters +
-// DataWriteGuid (read_info).
+// parent_linkage + relative_path (write_empty). The reader (disk parameters + DataWriteGuid) lives in the tests,
+// which check what was written.
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom, Write};
 
@@ -45,34 +45,21 @@ fn crc32c(data: &[u8]) -> u32 {
     !c
 }
 
-/// "XXXXXXXX-XXXX-..." → 16 bytes in Windows layout (first 3 fields little-endian).
+/// "XXXXXXXX-XXXX-..." → 16 bytes in Windows layout (first 3 fields little-endian), as GPT stores them.
 fn guid_bytes(s: &str) -> [u8; 16] {
-    let hex: String = s.chars().filter(|c| c.is_ascii_hexdigit()).collect();
-    let mut b = [0u8; 16];
-    for i in 0..16 {
-        b[i] = u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16).unwrap_or(0);
-    }
-    b[0..4].reverse();
-    b[4..6].reverse();
-    b[6..8].reverse();
-    b
+    crate::disk::guid_bytes(s).unwrap_or_default()
 }
 
 /// 16 bytes in Windows layout → "{xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx}" (parent_linkage format).
 pub fn guid_str(b: &[u8; 16]) -> String {
-    let h = |r: &[u8]| r.iter().map(|x| format!("{x:02x}")).collect::<String>();
-    let mut a = b.to_vec();
-    a[0..4].reverse();
-    a[4..6].reverse();
-    a[6..8].reverse();
-    format!(
-        "{{{}-{}-{}-{}-{}}}",
-        h(&a[0..4]),
-        h(&a[4..6]),
-        h(&a[6..8]),
-        h(&a[8..10]),
-        h(&a[10..16])
-    )
+    format!("{{{}}}", crate::disk::guid_str(b).to_ascii_lowercase())
+}
+
+/// Version 4 marks (byte 7 = high byte of field 3, LE layout).
+fn v4(mut b: [u8; 16]) -> [u8; 16] {
+    b[7] = (b[7] & 0x0f) | 0x40;
+    b[8] = (b[8] & 0x3f) | 0x80;
+    b
 }
 
 fn rand_guid() -> [u8; 16] {
@@ -80,93 +67,7 @@ fn rand_guid() -> [u8; 16] {
     if let Ok(mut f) = File::open("/dev/urandom") {
         let _ = f.read_exact(&mut b);
     }
-    b[7] = (b[7] & 0x0f) | 0x40; // version 4 (byte 7 = high byte of field 3, LE layout)
-    b[8] = (b[8] & 0x3f) | 0x80;
-    b
-}
-
-#[cfg(test)]
-fn u16le(b: &[u8], o: usize) -> u16 {
-    u16::from_le_bytes([b[o], b[o + 1]])
-}
-#[cfg(test)]
-fn u32le(b: &[u8], o: usize) -> u32 {
-    u32::from_le_bytes(b[o..o + 4].try_into().unwrap())
-}
-#[cfg(test)]
-fn u64le(b: &[u8], o: usize) -> u64 {
-    u64::from_le_bytes(b[o..o + 8].try_into().unwrap())
-}
-
-#[cfg(test)]
-fn read_at(f: &mut File, off: u64, len: usize) -> Result<Vec<u8>, String> {
-    let mut buf = vec![0u8; len];
-    f.seek(SeekFrom::Start(off)).map_err(|e| e.to_string())?;
-    f.read_exact(&mut buf)
-        .map_err(|e| format!("read VHDX @{off}: {e}"))?;
-    Ok(buf)
-}
-
-/// Verify the checksum of a block whose crc field is at bytes 4..8.
-#[cfg(test)]
-fn crc_ok(block: &[u8]) -> bool {
-    let mut t = block.to_vec();
-    let want = u32le(&t, 4);
-    t[4..8].fill(0);
-    crc32c(&t) == want
-}
-
-/// Read parameters + DataWriteGuid (current header = highest valid seq).
-#[cfg(test)] // the stage reads goldens on the clients; here only the tests check what was written
-pub fn read_info(path: &str) -> Result<Info, String> {
-    let mut f = File::open(path).map_err(|e| format!("{path}: {e}"))?;
-    if read_at(&mut f, 0, 8)? != b"vhdxfile" {
-        return Err(format!("{path}: not a VHDX"));
-    }
-    let mut hdr: Option<Vec<u8>> = None;
-    for off in [KB64, 2 * KB64] {
-        let h = read_at(&mut f, off, 4096)?;
-        if &h[0..4] == b"head"
-            && crc_ok(&h)
-            && hdr.as_ref().is_none_or(|c| u64le(&h, 8) > u64le(c, 8))
-        {
-            hdr = Some(h);
-        }
-    }
-    let hdr = hdr.ok_or(format!("{path}: corrupt VHDX header"))?;
-    if hdr[48..64].iter().any(|&x| x != 0) {
-        return Err(format!(
-            "{path}: VHDX has an unreplayed log (unclean shutdown?)"
-        ));
-    }
-    let rt = read_at(&mut f, 3 * KB64, KB64 as usize)?;
-    if &rt[0..4] != b"regi" || !crc_ok(&rt) {
-        return Err(format!("{path}: corrupt region table"));
-    }
-    let meta = guid_bytes(META_GUID);
-    let (moff, mlen) = (0..u32le(&rt, 8) as usize)
-        .map(|i| 16 + i * 32)
-        .find(|&e| rt[e..e + 16] == meta)
-        .map(|e| (u64le(&rt, e + 16), u32le(&rt, e + 24) as usize))
-        .ok_or(format!("{path}: missing metadata region"))?;
-    let m = read_at(&mut f, moff, mlen)?;
-    if &m[0..8] != b"metadata" {
-        return Err(format!("{path}: corrupt metadata"));
-    }
-    let item = |id: &str| -> Result<usize, String> {
-        let g = guid_bytes(id);
-        (0..u16le(&m, 10) as usize)
-            .map(|i| 32 + i * 32)
-            .find(|&e| m[e..e + 16] == g)
-            .map(|e| u32le(&m, e + 16) as usize)
-            .ok_or(format!("{path}: missing metadata {id}"))
-    };
-    Ok(Info {
-        data_write_guid: hdr[32..48].try_into().unwrap(),
-        virtual_size: u64le(&m, item(VDISK_SIZE)?),
-        logical_sector: u32le(&m, item(LOGICAL_SS)?),
-        physical_sector: u32le(&m, item(PHYSICAL_SS)?),
-    })
+    v4(b)
 }
 
 fn utf16(s: &str) -> Vec<u8> {
@@ -309,11 +210,11 @@ fn layout(info: &Info, block: u64, rel_parent: Option<&str>, ids: [[u8; 16]; 3])
 /// (parent_linkage = parent DataWriteGuid, relative_path); None → plain dynamic (tests only).
 /// Returns the absolute offset of the parent_linkage GUID string (UTF-16, 76 bytes) — the client stage patches
 /// it there when the parent (base.vhdx) GUID is only known at run time.
-pub fn write_empty(path: &str, parent: &Info, rel_parent: Option<&str>) -> Result<u64, String> {
+pub fn write_empty(path: &str, parent: &Info, rel_parent: &str) -> Result<u64, String> {
     let l = layout(
         parent,
         CHILD_BLOCK,
-        rel_parent,
+        Some(rel_parent),
         [rand_guid(), rand_guid(), rand_guid()],
     );
     // BAT + log = all zeros (sparse, set_len). Write the header area + metadata.
@@ -358,13 +259,11 @@ impl Virtual {
             ));
         }
         let guid = |tag: &str| -> [u8; 16] {
-            let mut b: [u8; 16] = blake3::hash(format!("broom golden {id} {tag}").as_bytes())
-                .as_bytes()[..16]
-                .try_into()
-                .unwrap();
-            b[7] = (b[7] & 0x0f) | 0x40; // version 4 layout, like rand_guid
-            b[8] = (b[8] & 0x3f) | 0x80;
-            b
+            v4(
+                blake3::hash(format!("broom golden {id} {tag}").as_bytes()).as_bytes()[..16]
+                    .try_into()
+                    .unwrap(),
+            )
         };
         let ids = [guid("file"), guid("data"), guid("page83")];
         let info = Info {
@@ -442,4 +341,4 @@ impl Virtual {
 
 #[cfg(test)]
 #[path = "../tests/unit/vhdx.rs"]
-mod tests;
+pub(crate) mod tests;

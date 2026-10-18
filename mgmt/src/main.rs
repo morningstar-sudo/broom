@@ -199,64 +199,22 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 async fn index() -> Html<String> {
     Html(assets::text("static/index.html").replace("__VERSION__", VERSION))
 }
-async fn app_js() -> impl axum::response::IntoResponse {
+/// The web admin's files: `/app.js` → static/app.js, … Bootstrap 5.3.8 and Chart.js 4.4.7 (MIT) are vendored as released:
+/// no CDN (offline servers, CSP 'self').
+async fn asset(uri: axum::http::Uri) -> impl axum::response::IntoResponse {
+    let name = uri.path().trim_start_matches('/');
+    let ctype = match name.rsplit('.').next() {
+        Some("js") => "text/javascript; charset=utf-8",
+        Some("css") => "text/css; charset=utf-8",
+        _ => "image/svg+xml",
+    };
     (
-        [(
-            axum::http::header::CONTENT_TYPE,
-            "text/javascript; charset=utf-8",
-        )],
-        assets::text("static/app.js"),
-    )
-}
-async fn app_css() -> impl axum::response::IntoResponse {
-    (
-        [(axum::http::header::CONTENT_TYPE, "text/css; charset=utf-8")],
-        assets::text("static/app.css"),
-    )
-}
-// Bootstrap 5.3.8 (MIT), vendored as released: no CDN (offline servers, CSP 'self').
-async fn bootstrap_css() -> impl axum::response::IntoResponse {
-    (
-        [(axum::http::header::CONTENT_TYPE, "text/css; charset=utf-8")],
-        assets::text("static/bootstrap.min.css"),
-    )
-}
-async fn bootstrap_js() -> impl axum::response::IntoResponse {
-    (
-        [(
-            axum::http::header::CONTENT_TYPE,
-            "text/javascript; charset=utf-8",
-        )],
-        assets::text("static/bootstrap.bundle.min.js"),
-    )
-}
-// Chart.js 4.4.7 (MIT), vendored the same way: the Server page's charts.
-async fn chart_js() -> impl axum::response::IntoResponse {
-    (
-        [(
-            axum::http::header::CONTENT_TYPE,
-            "text/javascript; charset=utf-8",
-        )],
-        assets::text("static/chart.umd.min.js"),
-    )
-}
-async fn icons() -> impl axum::response::IntoResponse {
-    (
-        [(axum::http::header::CONTENT_TYPE, "image/svg+xml")],
-        assets::text("static/icons.svg"),
+        [(axum::http::header::CONTENT_TYPE, ctype)],
+        assets::text(&format!("static/{name}")),
     )
 }
 async fn login_page() -> Html<&'static str> {
     Html(assets::text("static/login.html"))
-}
-async fn login_js() -> impl axum::response::IntoResponse {
-    (
-        [(
-            axum::http::header::CONTENT_TYPE,
-            "text/javascript; charset=utf-8",
-        )],
-        assets::text("static/login.js"),
-    )
 }
 
 /// GET /broom-capture — this very binary: the stage runs it as `bootrom-mgmt capture` (boot menu [C], capture.rs), so
@@ -338,13 +296,27 @@ async fn events(
     )
 }
 
+/// The web admin's pages (one URL each, + their fragment /ui/<page>).
+const PAGES: [&str; 13] = [
+    "machines",
+    "images",
+    "network",
+    "system",
+    "drivers",
+    "devices",
+    "groups",
+    "benchmark",
+    "remote",
+    "server",
+    "games",
+    "windows",
+    "logs",
+];
+
 // Per-tab fragments — loaded on demand via /ui/<page> (the web only fetches the tab being viewed).
 async fn ui_page(axum::extract::Path(p): axum::extract::Path<String>) -> Html<&'static str> {
     Html(match p.as_str() {
-        "machines" | "images" | "network" | "system" | "drivers" | "devices" | "groups"
-        | "benchmark" | "remote" | "server" | "games" | "windows" | "logs" => {
-            assets::text(&format!("static/page-{p}.html"))
-        }
+        p if PAGES.contains(&p) => assets::text(&format!("static/page-{p}.html")),
         _ => "",
     })
 }
@@ -411,6 +383,14 @@ impl AppState {
         self.not_reset.lock().remove(mac);
         self.ssd_low.lock().remove(mac);
         metrics::forget(mac);
+    }
+
+    /// A job (publish, snapshot, export…) is running on image `name`.
+    pub fn job_running(&self, name: &str) -> bool {
+        self.jobs
+            .lock()
+            .get(name)
+            .is_some_and(|s| s.starts_with('⏳'))
     }
 
     /// Record an image job status + push it to open web tabs.
@@ -553,9 +533,7 @@ async fn main() {
         tokio::spawn(async move {
             loop {
                 tokio::time::sleep(std::time::Duration::from_secs(600)).await;
-                let now = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map_or(0, |d| d.as_secs()) as i64;
+                let now = crate::now_secs() as i64;
                 match st.db.prune_leases(now) {
                     Ok(n) if n > 0 => info!("pruned {n} expired DHCP lease(s)"),
                     Err(e) => warn!("lease prune: {e}"),
@@ -584,11 +562,7 @@ async fn main() {
                         .into_iter()
                         .filter(|i| i.os == "linux")
                     {
-                        let busy = st
-                            .jobs
-                            .lock()
-                            .get(&img.name)
-                            .is_some_and(|s| s.starts_with('⏳'));
+                        let busy = st.job_running(&img.name);
                         if !busy {
                             publish::gc_superseded(&st, &img.name);
                         }
@@ -604,28 +578,20 @@ async fn main() {
 
     let app = Router::new()
         .route("/login", get(login_page)) // standalone sign-in page (auth.rs); public
-        .route("/login.js", get(login_js))
+        .route("/login.js", get(asset))
         .route("/", get(index)) // web admin shell (embedded in the binary)
-        .route("/app.js", get(app_js))
-        .route("/app.css", get(app_css)) // public: the login page uses it too
-        .route("/bootstrap.min.css", get(bootstrap_css)) // public too
-        .route("/bootstrap.bundle.min.js", get(bootstrap_js))
-        .route("/chart.umd.min.js", get(chart_js))
-        .route("/icons.svg", get(icons)) // public: the login page uses it too
+        .route("/app.js", get(asset))
+        .route("/app.css", get(asset)) // public: the login page uses it too
+        .route("/bootstrap.min.css", get(asset)) // public too
+        .route("/bootstrap.bundle.min.js", get(asset))
+        .route("/chart.umd.min.js", get(asset))
+        .route("/icons.svg", get(asset)) // public: the login page uses it too
         // One URL per page (F5 / bookmarks keep the page); same shell, JS picks the page from the path.
-        .route("/machines", get(index))
-        .route("/images", get(index))
-        .route("/network", get(index))
-        .route("/system", get(index))
-        .route("/drivers", get(index))
-        .route("/devices", get(index))
-        .route("/groups", get(index))
-        .route("/benchmark", get(index))
-        .route("/remote", get(index))
-        .route("/server", get(index))
-        .route("/games", get(index))
-        .route("/windows", get(index))
-        .route("/logs", get(index))
+        .merge(
+            PAGES
+                .iter()
+                .fold(Router::new(), |r, p| r.route(&format!("/{p}"), get(index))),
+        )
         .route("/ui/{page}", get(ui_page)) // fragment tab on-demand
         .route("/api/events", get(events)) // SSE: server liveness (sidebar dot) + image job status
         .route("/boot.ipxe", get(boot::render)) // iPXE menu

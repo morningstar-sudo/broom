@@ -55,7 +55,7 @@ pub fn recursive(st: &SharedState) -> bool {
     st.db.get_config("dns_resolve", "forward") == "recursive"
 }
 
-fn ip_list(s: &str) -> Vec<Ipv4Addr> {
+pub(crate) fn ip_list(s: &str) -> Vec<Ipv4Addr> {
     s.split([',', ' ', '\n'])
         .filter_map(|s| s.trim().parse().ok())
         .collect()
@@ -103,13 +103,8 @@ pub fn exempt_groups(st: &SharedState) -> Vec<String> {
     serde_json::from_str(&st.db.get_config("dns_exempt_groups", "[]")).unwrap_or_default()
 }
 
-pub fn set_exempt_groups(st: &SharedState, g: &[String]) -> Result<(), String> {
-    st.db
-        .set_config("dns_exempt_groups", &serde_json::to_string(g).unwrap())
-}
-
 fn grace_min(st: &SharedState) -> u64 {
-    st.db.get_config("dns_grace_min", "5").parse().unwrap_or(5)
+    crate::db::num(&*st.db, "dns_grace_min", 5)
 }
 
 /// One machine (or a MAC seen PXE-booting): may it resolve?
@@ -214,47 +209,24 @@ pub fn allowed_count() -> usize {
 
 // ---------- packets ----------
 
-/// End of the first question (name + type + class) of a DNS message; None = malformed.
-fn question_end(q: &[u8]) -> Option<usize> {
+/// The first question of a DNS message: (its name lower case and dot-separated, where it ends — name + type + class).
+/// None = malformed.
+fn question(q: &[u8]) -> Option<(String, usize)> {
     if q.len() < 12 || u16::from_be_bytes([q[4], q[5]]) == 0 {
         return None;
     }
-    let mut i = 12;
-    loop {
-        let n = *q.get(i)? as usize;
-        if n == 0 {
-            i += 1;
-            break;
-        }
-        if n & 0xc0 != 0 {
-            i += 2; // a pointer ends the name
-            break;
-        }
-        i += 1 + n;
-    }
-    (i + 4 <= q.len()).then_some(i + 4)
+    let (name, end) = crate::dnsrec::read_name(q, 12)?;
+    (end + 4 <= q.len()).then_some((name, end + 4))
 }
 
-/// The first question's name, lower case, dot-separated (labels only — a query carries no compression).
 pub(crate) fn qname(q: &[u8]) -> Option<String> {
-    question_end(q)?;
-    let mut i = 12;
-    let mut labels = Vec::new();
-    loop {
-        let n = *q.get(i)? as usize;
-        if n == 0 || n & 0xc0 != 0 {
-            break;
-        }
-        labels.push(String::from_utf8_lossy(q.get(i + 1..i + 1 + n)?).to_ascii_lowercase());
-        i += 1 + n;
-    }
-    Some(labels.join("."))
+    question(q).map(|(name, _)| name)
 }
 
 /// An answer to query `q` with no records and this response code (3 NXDOMAIN, 5 REFUSED): its ID, opcode, RD flag
 /// and first question.
 pub(crate) fn answer(q: &[u8], rcode: u8) -> Option<Vec<u8>> {
-    let end = question_end(q)?;
+    let (_, end) = question(q)?;
     let mut r = q[..end].to_vec();
     r[2] = 0x80 | (q[2] & 0x79); // QR, opcode, RD (AA, TC off)
     r[3] = 0x80 | (rcode & 0x0f); // RA
@@ -575,7 +547,12 @@ async fn set(
     ] {
         st.db.set_config(k, &v).map_err(ise)?;
     }
-    set_exempt_groups(&st, &b.exempt_groups).map_err(ise)?;
+    st.db
+        .set_config(
+            "dns_exempt_groups",
+            &serde_json::to_string(&b.exempt_groups).unwrap(),
+        )
+        .map_err(ise)?;
     tracing::info!("dns: settings saved (mode {})", b.mode);
     // The DHCP server hands out this server as DNS (or the list again): restart it like an Apply — it restarts DNS too.
     let msg = crate::dhcp::start(&st).await.map_err(bad)?;

@@ -10,7 +10,7 @@ use std::io::Read;
 use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
 
-use crate::disk::Source;
+use crate::disk::{Source, rd, u32le, u64le};
 
 const SECTOR: u64 = 512;
 const GD_AT_END: u64 = u64::MAX;
@@ -37,19 +37,6 @@ struct Header {
     desc_size: u64,
     gtes: u64,
     gd_off: u64,
-}
-
-fn rd(f: &File, off: u64, len: usize) -> Result<Vec<u8>, String> {
-    let mut b = vec![0u8; len];
-    f.read_exact_at(&mut b, off)
-        .map_err(|e| format!("read VMDK at {off}: {e}"))?;
-    Ok(b)
-}
-fn u32le(b: &[u8], o: usize) -> u32 {
-    u32::from_le_bytes(b[o..o + 4].try_into().unwrap())
-}
-fn u64le(b: &[u8], o: usize) -> u64 {
-    u64::from_le_bytes(b[o..o + 8].try_into().unwrap())
 }
 
 fn header(b: &[u8]) -> Option<Header> {
@@ -189,7 +176,7 @@ pub fn to_raw(path: &Path, dest: &Path) -> Result<(), String> {
         let n = e.sectors * SECTOR;
         match (&e.kind, &e.file) {
             (Kind::Sparse, Some(p)) => sparse_to(p, n, &out, base)?,
-            (Kind::Flat(start), Some(p)) => flat_to(
+            (Kind::Flat(start), Some(p)) => crate::disk::copy_into(
                 p,
                 start
                     .checked_mul(SECTOR)
@@ -204,38 +191,6 @@ pub fn to_raw(path: &Path, dest: &Path) -> Result<(), String> {
     }
     out.sync_all()
         .map_err(|e| format!("{}: {e}", dest.display()))
-}
-
-fn write_nonzero(out: &File, data: &[u8], at: u64) -> Result<(), String> {
-    if data.iter().any(|&b| b != 0) {
-        out.write_all_at(data, at)
-            .map_err(|e| format!("write raw: {e}"))?;
-    }
-    Ok(())
-}
-
-/// Pieces copied per thread.
-const PIECE: u64 = 32 << 20;
-
-fn flat_to(p: &Path, start: u64, n: u64, out: &File, base: u64) -> Result<(), String> {
-    let src = Source::new(&[(p, start, Some(n))])?;
-    let mut pieces = Vec::new();
-    for (a, b) in src.data_ranges() {
-        pieces.extend(
-            (a..b)
-                .step_by(PIECE as usize)
-                .map(|o| (o, (b - o).min(PIECE))),
-        );
-    }
-    crate::disk::par_map(&pieces, |&(o, len)| {
-        let mut buf = vec![0u8; len as usize];
-        src.read_at(o, &mut buf)?;
-        for (k, mb) in buf.chunks(1 << 20).enumerate() {
-            write_nonzero(out, mb, base + o + ((k as u64) << 20))?;
-        }
-        Ok(())
-    })?;
-    Ok(())
 }
 
 fn sparse_to(p: &Path, n: u64, out: &File, base: u64) -> Result<(), String> {

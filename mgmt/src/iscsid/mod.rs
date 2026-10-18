@@ -125,26 +125,29 @@ enum Data {
 }
 
 impl Lun {
-    fn open(e: &Entry) -> Result<Lun, String> {
-        let (data, size) = if e.ram {
-            let img = ramimg::RamImage::load(&e.path, e.reserve)?;
-            let size = img.size();
-            (Data::Ram(img), size)
-        } else {
-            let f = std::fs::File::open(&e.path).map_err(|err| format!("{}: {err}", e.path))?;
-            let size = f
-                .metadata()
-                .map_err(|err| format!("{}: {err}", e.path))?
-                .len();
-            (Data::File(f), size)
-        };
-        Ok(Lun {
-            iqn: e.iqn.clone(),
+    fn new(iqn: String, size: u64, data: Data, read_bytes: u64) -> Lun {
+        Lun {
+            iqn,
             size,
             data,
             sessions: AtomicUsize::new(0),
-            read_bytes: AtomicU64::new(0),
-        })
+            read_bytes: AtomicU64::new(read_bytes),
+        }
+    }
+
+    /// A LUN reading the file at `path`.
+    fn file(iqn: &str, path: &str) -> Result<Lun, String> {
+        let f = std::fs::File::open(path).map_err(|err| format!("{path}: {err}"))?;
+        let size = f.metadata().map_err(|err| format!("{path}: {err}"))?.len();
+        Ok(Lun::new(iqn.into(), size, Data::File(f), 0))
+    }
+
+    fn open(e: &Entry) -> Result<Lun, String> {
+        if !e.ram {
+            return Lun::file(&e.iqn, &e.path);
+        }
+        let img = ramimg::RamImage::load(&e.path, e.reserve)?;
+        Ok(Lun::new(e.iqn.clone(), img.size(), Data::Ram(img), 0))
     }
 
     pub fn is_ram(&self) -> bool {
@@ -211,9 +214,7 @@ fn save() {
     let Some(p) = STATE.get() else { return };
     let mut list: Vec<Entry> = TARGETS.lock().values().map(|(e, _)| e.clone()).collect();
     list.sort_by(|a, b| a.iqn.cmp(&b.iqn));
-    let tmp = p.with_extension("tmp");
-    let r = std::fs::write(&tmp, serde_json::to_vec_pretty(&list).unwrap())
-        .and_then(|_| std::fs::rename(&tmp, p));
+    let r = crate::versions::write_durable(p, &serde_json::to_vec_pretty(&list).unwrap());
     if let Err(e) = r {
         tracing::warn!("iscsid: save {}: {e}", p.display());
     }

@@ -332,9 +332,7 @@ fn zero(f: &File, off: u64, len: u64) -> std::io::Result<()> {
     if unsafe { libc::ioctl(f.as_raw_fd(), BLKZEROOUT as _, range.as_ptr()) } == 0 {
         return Ok(());
     }
-    // SAFETY: fallocate on an open fd, no memory involved.
-    let punch = libc::FALLOC_FL_PUNCH_HOLE | libc::FALLOC_FL_KEEP_SIZE;
-    if unsafe { libc::fallocate(f.as_raw_fd(), punch, off as i64, len as i64) } == 0 {
+    if crate::disk::punch_hole(f, off, len).is_ok() {
         return Ok(());
     }
     let buf = vec![0u8; CHUNK as usize];

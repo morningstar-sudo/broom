@@ -218,14 +218,7 @@ fn answer(k: &str, v: &str) -> Option<String> {
         | "SessionType"
         | "InitiatorAlias"
         | "MaxRecvDataSegmentLength" => return None,
-        "AuthMethod" => {
-            if v.split(',').any(|m| m == "None") {
-                "None".into()
-            } else {
-                "Reject".into()
-            }
-        }
-        "HeaderDigest" | "DataDigest" => {
+        "AuthMethod" | "HeaderDigest" | "DataDigest" => {
             if v.split(',').any(|m| m == "None") {
                 "None".into()
             } else {

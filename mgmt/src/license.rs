@@ -12,7 +12,7 @@ use serde::Deserialize;
 use std::net::SocketAddr;
 
 use crate::SharedState;
-use crate::api::{ApiError, ise, ok};
+use crate::api::{ApiError, bad, ise, ok};
 use crate::db::Machine;
 use crate::machines::{machine_by_id, who};
 
@@ -54,6 +54,17 @@ pub(crate) fn mac_at(st: &SharedState, ip: &str) -> Option<String> {
         .map(|m| m.to_lowercase())
 }
 
+/// `ip` asks a public endpoint (its own `seen` map): false when it already did in the last minute.
+pub(crate) fn once_a_minute(
+    seen: &parking_lot::Mutex<std::collections::HashMap<String, u64>>,
+    ip: &str,
+) -> bool {
+    let now = crate::now_secs();
+    let mut s = seen.lock();
+    s.retain(|_, t| now.saturating_sub(*t) < 60);
+    s.insert(ip.to_string(), now).is_none()
+}
+
 /// One report per IP per minute (public endpoint).
 static BOOTED_SEEN: std::sync::LazyLock<
     parking_lot::Mutex<std::collections::HashMap<String, u64>>,
@@ -67,12 +78,8 @@ async fn booted(
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
 ) -> StatusCode {
     let (ip, now) = (peer.ip().to_string(), crate::now_secs());
-    {
-        let mut seen = BOOTED_SEEN.lock();
-        seen.retain(|_, t| now.saturating_sub(*t) < 60);
-        if seen.insert(ip.clone(), now).is_some() {
-            return StatusCode::TOO_MANY_REQUESTS;
-        }
+    if !crate::license::once_a_minute(&BOOTED_SEEN, &ip) {
+        return StatusCode::TOO_MANY_REQUESTS;
     }
     let Some(mac) = mac_at(&st, &ip) else {
         return StatusCode::NO_CONTENT;
@@ -83,12 +90,9 @@ async fn booted(
         .get(&mac)
         .is_some_and(|t| now.saturating_sub(*t) <= BOOT_WINDOW_S);
     if !recent {
-        let name = st
-            .db
-            .machines()
-            .unwrap_or_default()
-            .into_iter()
-            .find(|m| m.mac.eq_ignore_ascii_case(&mac))
+        let name = crate::machines::by_mac(&st, &mac)
+            .ok()
+            .flatten()
             .map(|m| who(&m));
         tracing::warn!(
             "machine {} ({mac}, {ip}) started Windows WITHOUT a PXE boot just before — this session was NOT reset",
@@ -118,22 +122,15 @@ async fn ssd_low(
     axum::extract::Query(q): axum::extract::Query<SsdLow>,
 ) -> StatusCode {
     let (ip, now) = (peer.ip().to_canonical().to_string(), crate::now_secs());
-    {
-        let mut seen = SSD_SEEN.lock();
-        seen.retain(|_, t| now.saturating_sub(*t) < 60);
-        if seen.insert(ip.clone(), now).is_some() {
-            return StatusCode::TOO_MANY_REQUESTS;
-        }
+    if !crate::license::once_a_minute(&SSD_SEEN, &ip) {
+        return StatusCode::TOO_MANY_REQUESTS;
     }
     let Some(mac) = mac_at(&st, &ip) else {
         return StatusCode::NO_CONTENT;
     };
-    let name = st
-        .db
-        .machines()
-        .unwrap_or_default()
-        .into_iter()
-        .find(|m| m.mac.eq_ignore_ascii_case(&mac))
+    let name = crate::machines::by_mac(&st, &mac)
+        .ok()
+        .flatten()
         .map(|m| who(&m));
     tracing::warn!(
         "machine {} ({mac}, {ip}): SSD almost full during the session — {:.1} GB free (guest writes; see Windows → SSD room)",
@@ -228,10 +225,7 @@ async fn rearm_license(
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let m = machine_by_id(&st, b.id)?;
     if m.license_key.is_none() {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            "this machine has no license key".into(),
-        ));
+        return Err(bad("this machine has no license key"));
     }
     st.db.rearm_license(m.id).map_err(ise)?;
     tracing::info!("license key of {} re-armed", who(&m));

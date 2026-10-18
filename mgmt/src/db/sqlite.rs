@@ -200,8 +200,8 @@ fn migrate(c: &mut Connection) -> rusqlite::Result<()> {
         return Ok(());
     }
     let tx = c.transaction()?;
-    if v < 1 {
-        // DBs from before user_version: columns added over time (a new DB already has them all from SCHEMA).
+    if v < 2 {
+        // Columns added over time (a new DB already has them all from SCHEMA); v2: images per machine group + preloading.
         const COLS: &[(&str, &str, &str)] = &[
             ("images", "boot_script", "TEXT"),
             ("images", "hash", "TEXT"),
@@ -215,6 +215,8 @@ fn migrate(c: &mut Connection) -> rusqlite::Result<()> {
             ("machines", "license_result", "TEXT"),
             ("machines", "grp", "TEXT"),
             ("machines", "notes", "TEXT"),
+            ("images", "grps", "TEXT NOT NULL DEFAULT ''"),
+            ("images", "preload", "INTEGER NOT NULL DEFAULT 0"),
         ];
         for (table, col, ddl) in COLS {
             if !has_column(&tx, table, col)? {
@@ -223,17 +225,6 @@ fn migrate(c: &mut Connection) -> rusqlite::Result<()> {
         }
         if has_column(&tx, "images", "dataset")? {
             tx.execute("ALTER TABLE images DROP COLUMN dataset", [])?; // ZFS versioning removed
-        }
-    }
-    if v < 2 {
-        // Images per machine group + preloading.
-        for (col, ddl) in [
-            ("grps", "TEXT NOT NULL DEFAULT ''"),
-            ("preload", "INTEGER NOT NULL DEFAULT 0"),
-        ] {
-            if !has_column(&tx, "images", col)? {
-                tx.execute(&format!("ALTER TABLE images ADD COLUMN {col} {ddl}"), [])?;
-            }
         }
     }
     if v < 3 {
@@ -333,6 +324,24 @@ impl Sqlite {
         self.c.lock()
     }
 
+    /// One statement whose row count is not needed.
+    fn run(&self, sql: &str, p: impl rusqlite::Params) -> DbResult<()> {
+        self.c().execute(sql, p).map(|_| ()).map_err(e)
+    }
+
+    /// Every row of a query, each through `f`.
+    fn all<T>(
+        &self,
+        sql: &str,
+        p: impl rusqlite::Params,
+        f: impl FnMut(&Row) -> rusqlite::Result<T>,
+    ) -> DbResult<Vec<T>> {
+        let c = self.c();
+        let mut s = c.prepare_cached(sql).map_err(e)?;
+        let rows = s.query_map(p, f).map_err(e)?;
+        rows.collect::<Result<_, _>>().map_err(e)
+    }
+
     fn one_image(&self, sql_where: &str, p: impl rusqlite::Params) -> DbResult<Option<Image>> {
         self.c()
             .query_row(
@@ -381,29 +390,22 @@ impl Db for Sqlite {
     }
 
     fn delete_config(&self, key: &str) -> DbResult<()> {
-        self.c()
-            .execute("DELETE FROM config WHERE key=?1", [key])
-            .map(|_| ())
-            .map_err(e)
+        self.run("DELETE FROM config WHERE key=?1", [key])
     }
 
     fn set_config(&self, key: &str, value: &str) -> DbResult<()> {
-        self.c()
-            .execute(
-                "INSERT INTO config(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-                [key, value],
-            )
-            .map(|_| ())
-            .map_err(e)
+        self.run(
+            "INSERT INTO config(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            [key, value],
+        )
     }
 
     fn images(&self) -> DbResult<Vec<Image>> {
-        let c = self.c();
-        let mut s = c
-            .prepare(&format!("SELECT {IMAGE_COLS} FROM images ORDER BY id"))
-            .map_err(e)?;
-        let rows = s.query_map([], image_row).map_err(e)?;
-        rows.collect::<Result<_, _>>().map_err(e)
+        self.all(
+            &format!("SELECT {IMAGE_COLS} FROM images ORDER BY id"),
+            [],
+            image_row,
+        )
     }
 
     fn image(&self, id: i64) -> DbResult<Option<Image>> {
@@ -459,95 +461,67 @@ impl Db for Sqlite {
     }
 
     fn set_boot_script(&self, id: i64, boot_script: &str) -> DbResult<()> {
-        self.c()
-            .execute(
-                "UPDATE images SET boot_script=?1 WHERE id=?2",
-                params![boot_script, id],
-            )
-            .map(|_| ())
-            .map_err(e)
+        self.run(
+            "UPDATE images SET boot_script=?1 WHERE id=?2",
+            params![boot_script, id],
+        )
     }
 
     fn set_published(&self, id: i64, boot_script: &str, hash: &str) -> DbResult<()> {
-        self.c()
-            .execute(
-                "UPDATE images SET boot_script=?1, hash=?2 WHERE id=?3",
-                params![boot_script, hash, id],
-            )
-            .map(|_| ())
-            .map_err(e)
+        self.run(
+            "UPDATE images SET boot_script=?1, hash=?2 WHERE id=?3",
+            params![boot_script, hash, id],
+        )
     }
 
     fn set_cache_mode(&self, id: i64, mode: &str) -> DbResult<()> {
-        self.c()
-            .execute(
-                "UPDATE images SET cache_mode=?1 WHERE id=?2",
-                params![mode, id],
-            )
-            .map(|_| ())
-            .map_err(e)
+        self.run(
+            "UPDATE images SET cache_mode=?1 WHERE id=?2",
+            params![mode, id],
+        )
     }
 
     fn set_base_mode(&self, id: i64, on: bool) -> DbResult<()> {
-        self.c()
-            .execute(
-                "UPDATE images SET base_mode=?1 WHERE id=?2",
-                params![on as i64, id],
-            )
-            .map(|_| ())
-            .map_err(e)
+        self.run(
+            "UPDATE images SET base_mode=?1 WHERE id=?2",
+            params![on as i64, id],
+        )
     }
 
     fn set_use_ssd(&self, id: i64, on: bool) -> DbResult<()> {
-        self.c()
-            .execute(
-                "UPDATE images SET use_ssd=?1 WHERE id=?2",
-                params![on as i64, id],
-            )
-            .map(|_| ())
-            .map_err(e)
+        self.run(
+            "UPDATE images SET use_ssd=?1 WHERE id=?2",
+            params![on as i64, id],
+        )
     }
 
     fn set_image_groups(&self, id: i64, groups: &[String]) -> DbResult<()> {
-        self.c()
-            .execute(
-                "UPDATE images SET grps=?1 WHERE id=?2",
-                params![groups.join(","), id],
-            )
-            .map(|_| ())
-            .map_err(e)
+        self.run(
+            "UPDATE images SET grps=?1 WHERE id=?2",
+            params![groups.join(","), id],
+        )
     }
 
     fn set_preload(&self, id: i64, on: bool) -> DbResult<()> {
-        self.c()
-            .execute(
-                "UPDATE images SET preload=?1 WHERE id=?2",
-                params![on as i64, id],
-            )
-            .map(|_| ())
-            .map_err(e)
+        self.run(
+            "UPDATE images SET preload=?1 WHERE id=?2",
+            params![on as i64, id],
+        )
     }
 
     fn set_active_version(&self, id: i64, version: Option<&str>) -> DbResult<()> {
-        self.c()
-            .execute(
-                "UPDATE images SET active_version=?1 WHERE id=?2",
-                params![version, id],
-            )
-            .map(|_| ())
-            .map_err(e)
+        self.run(
+            "UPDATE images SET active_version=?1 WHERE id=?2",
+            params![version, id],
+        )
     }
 
     fn machines(&self) -> DbResult<Vec<Machine>> {
-        let c = self.c();
-        let mut s = c
-            .prepare(
-                "SELECT id,mac,ip,hostname,image_id,license_key,license_state,license_gen,license_result,grp,notes
-                 FROM machines ORDER BY hostname",
-            )
-            .map_err(e)?;
-        let rows = s
-            .query_map([], |r| {
+        self.all(
+            "SELECT id,mac,ip,hostname,image_id,license_key,license_state,license_gen,license_result,grp,notes
+             FROM machines ORDER BY hostname",
+            [],
+            |r| {
                 let key: Option<String> = r.get(5)?;
                 Ok(Machine {
                     id: r.get(0)?,
@@ -565,19 +539,15 @@ impl Db for Sqlite {
                     grp: r.get(9)?,
                     notes: r.get(10)?,
                 })
-            })
-            .map_err(e)?;
-        rows.collect::<Result<_, _>>().map_err(e)
+            },
+        )
     }
 
     fn update_machine(&self, m: &Machine) -> DbResult<()> {
-        self.c()
-            .execute(
-                "UPDATE machines SET mac=?1, ip=?2, hostname=?3, grp=?4, notes=?5, image_id=?6 WHERE id=?7",
-                params![m.mac, m.ip, m.hostname, m.grp, m.notes, m.image_id, m.id],
-            )
-            .map(|_| ())
-            .map_err(e)
+        self.run(
+            "UPDATE machines SET mac=?1, ip=?2, hostname=?3, grp=?4, notes=?5, image_id=?6 WHERE id=?7",
+            params![m.mac, m.ip, m.hostname, m.grp, m.notes, m.image_id, m.id],
+        )
     }
 
     fn delete_machine(&self, machine_id: i64) -> DbResult<()> {
@@ -595,13 +565,10 @@ impl Db for Sqlite {
     }
 
     fn set_machine_image(&self, machine_id: i64, image_id: Option<i64>) -> DbResult<()> {
-        self.c()
-            .execute(
-                "UPDATE machines SET image_id=?1 WHERE id=?2",
-                params![image_id, machine_id],
-            )
-            .map(|_| ())
-            .map_err(e)
+        self.run(
+            "UPDATE machines SET image_id=?1 WHERE id=?2",
+            params![image_id, machine_id],
+        )
     }
 
     fn set_license(&self, machine_id: i64, key: Option<&str>) -> DbResult<()> {
@@ -610,21 +577,15 @@ impl Db for Sqlite {
         } else {
             "UPDATE machines SET license_key=?1, license_state=NULL, license_result=NULL WHERE id=?2"
         };
-        self.c()
-            .execute(sql, params![key, machine_id])
-            .map(|_| ())
-            .map_err(e)
+        self.run(sql, params![key, machine_id])
     }
 
     fn rearm_license(&self, machine_id: i64) -> DbResult<()> {
-        self.c()
-            .execute(
-                "UPDATE machines SET license_state='armed', license_gen=license_gen+1, license_result=NULL
-                 WHERE id=?1 AND license_key IS NOT NULL",
-                [machine_id],
-            )
-            .map(|_| ())
-            .map_err(e)
+        self.run(
+            "UPDATE machines SET license_state='armed', license_gen=license_gen+1, license_result=NULL
+             WHERE id=?1 AND license_key IS NOT NULL",
+            [machine_id],
+        )
     }
 
     fn rearm_quiet(&self, machine_id: i64) -> DbResult<bool> {
@@ -657,54 +618,38 @@ impl Db for Sqlite {
     }
 
     fn set_license_result(&self, machine_id: i64, result: &str) -> DbResult<()> {
-        self.c()
-            .execute(
-                "UPDATE machines SET license_result=?1 WHERE id=?2",
-                params![result, machine_id],
-            )
-            .map(|_| ())
-            .map_err(e)
+        self.run(
+            "UPDATE machines SET license_result=?1 WHERE id=?2",
+            params![result, machine_id],
+        )
     }
 
     fn set_machine_group(&self, machine_id: i64, grp: Option<&str>) -> DbResult<()> {
-        self.c()
-            .execute(
-                "UPDATE machines SET grp=?1 WHERE id=?2",
-                params![grp, machine_id],
-            )
-            .map(|_| ())
-            .map_err(e)
+        self.run(
+            "UPDATE machines SET grp=?1 WHERE id=?2",
+            params![grp, machine_id],
+        )
     }
 
     fn put_machine_hw(&self, mac: &str, hwids: &[String], seen: i64) -> DbResult<()> {
-        self.c()
-            .execute(
-                "INSERT INTO machine_hw(mac,hwids,seen) VALUES(?1,?2,?3)
-                 ON CONFLICT(mac) DO UPDATE SET hwids=excluded.hwids, seen=excluded.seen",
-                params![mac, hwids.join("\n"), seen],
-            )
-            .map(|_| ())
-            .map_err(e)
+        self.run(
+            "INSERT INTO machine_hw(mac,hwids,seen) VALUES(?1,?2,?3)
+             ON CONFLICT(mac) DO UPDATE SET hwids=excluded.hwids, seen=excluded.seen",
+            params![mac, hwids.join("\n"), seen],
+        )
     }
 
     fn machine_hw(&self) -> DbResult<Vec<(String, Vec<String>)>> {
-        let c = self.c();
-        let mut s = c.prepare("SELECT mac,hwids FROM machine_hw").map_err(e)?;
-        let rows = s
-            .query_map([], |r| {
-                Ok((r.get::<_, String>(0)?, lines(&r.get::<_, String>(1)?)))
-            })
-            .map_err(e)?;
-        rows.collect::<Result<_, _>>().map_err(e)
+        self.all("SELECT mac,hwids FROM machine_hw", [], |r| {
+            Ok((r.get::<_, String>(0)?, lines(&r.get::<_, String>(1)?)))
+        })
     }
 
     fn drivers(&self) -> DbResult<Vec<Driver>> {
-        let c = self.c();
-        let mut s = c
-            .prepare("SELECT id,name,sha256,size,hwids,all_machines,groups,created FROM drivers ORDER BY name")
-            .map_err(e)?;
-        let rows = s
-            .query_map([], |r| {
+        self.all(
+            "SELECT id,name,sha256,size,hwids,all_machines,groups,created FROM drivers ORDER BY name",
+            [],
+            |r| {
                 Ok(Driver {
                     id: r.get(0)?,
                     name: r.get(1)?,
@@ -715,9 +660,8 @@ impl Db for Sqlite {
                     groups: lines(&r.get::<_, String>(6)?),
                     created: r.get(7)?,
                 })
-            })
-            .map_err(e)?;
-        rows.collect::<Result<_, _>>().map_err(e)
+            },
+        )
     }
 
     fn put_driver(
@@ -728,32 +672,23 @@ impl Db for Sqlite {
         hwids: &[String],
         created: i64,
     ) -> DbResult<()> {
-        self.c()
-            .execute(
-                "INSERT INTO drivers(name,sha256,size,hwids,created) VALUES(?1,?2,?3,?4,?5)
-                 ON CONFLICT(name) DO UPDATE SET sha256=excluded.sha256, size=excluded.size,
-                   hwids=excluded.hwids, created=excluded.created",
-                params![name, sha256, size as i64, hwids.join("\n"), created],
-            )
-            .map(|_| ())
-            .map_err(e)
+        self.run(
+            "INSERT INTO drivers(name,sha256,size,hwids,created) VALUES(?1,?2,?3,?4,?5)
+             ON CONFLICT(name) DO UPDATE SET sha256=excluded.sha256, size=excluded.size,
+               hwids=excluded.hwids, created=excluded.created",
+            params![name, sha256, size as i64, hwids.join("\n"), created],
+        )
     }
 
     fn set_driver_targets(&self, id: i64, all_machines: bool, groups: &[String]) -> DbResult<()> {
-        self.c()
-            .execute(
-                "UPDATE drivers SET all_machines=?1, groups=?2 WHERE id=?3",
-                params![all_machines as i64, groups.join("\n"), id],
-            )
-            .map(|_| ())
-            .map_err(e)
+        self.run(
+            "UPDATE drivers SET all_machines=?1, groups=?2 WHERE id=?3",
+            params![all_machines as i64, groups.join("\n"), id],
+        )
     }
 
     fn delete_driver(&self, id: i64) -> DbResult<()> {
-        self.c()
-            .execute("DELETE FROM drivers WHERE id=?1", [id])
-            .map(|_| ())
-            .map_err(e)
+        self.run("DELETE FROM drivers WHERE id=?1", [id])
     }
 
     fn add_machine(&self, mac: &str, ip: Option<&str>, hostname: Option<&str>) -> DbResult<i64> {
@@ -767,12 +702,10 @@ impl Db for Sqlite {
     }
 
     fn leases(&self) -> DbResult<Vec<Lease>> {
-        let c = self.c();
-        let mut s = c
-            .prepare("SELECT mac,ip,hostname,expires,source FROM leases")
-            .map_err(e)?;
-        let rows = s
-            .query_map([], |r| {
+        self.all(
+            "SELECT mac,ip,hostname,expires,source FROM leases",
+            [],
+            |r| {
                 Ok(Lease {
                     mac: r.get(0)?,
                     ip: r.get(1)?,
@@ -780,28 +713,21 @@ impl Db for Sqlite {
                     expires: r.get(3)?,
                     source: r.get(4)?,
                 })
-            })
-            .map_err(e)?;
-        rows.collect::<Result<_, _>>().map_err(e)
+            },
+        )
     }
 
     fn put_lease(&self, l: &Lease) -> DbResult<()> {
-        self.c()
-            .execute(
-                "INSERT INTO leases(mac,ip,hostname,expires,source) VALUES(?1,?2,?3,?4,?5)
-                 ON CONFLICT(mac) DO UPDATE SET ip=COALESCE(excluded.ip,ip),
-                   hostname=COALESCE(excluded.hostname,hostname), expires=excluded.expires, source=excluded.source",
-                params![l.mac, l.ip, l.hostname, l.expires, l.source],
-            )
-            .map(|_| ())
-            .map_err(e)
+        self.run(
+            "INSERT INTO leases(mac,ip,hostname,expires,source) VALUES(?1,?2,?3,?4,?5)
+             ON CONFLICT(mac) DO UPDATE SET ip=COALESCE(excluded.ip,ip),
+               hostname=COALESCE(excluded.hostname,hostname), expires=excluded.expires, source=excluded.source",
+            params![l.mac, l.ip, l.hostname, l.expires, l.source],
+        )
     }
 
     fn delete_lease(&self, mac: &str) -> DbResult<()> {
-        self.c()
-            .execute("DELETE FROM leases WHERE mac=?1", [mac])
-            .map(|_| ())
-            .map_err(e)
+        self.run("DELETE FROM leases WHERE mac=?1", [mac])
     }
 
     fn prune_leases(&self, cutoff: i64) -> DbResult<usize> {
@@ -811,40 +737,33 @@ impl Db for Sqlite {
     }
 
     fn add_bench(&self, r: &BenchRow) -> DbResult<()> {
-        self.c()
-            .execute(
-                "INSERT INTO bench(at,mac,kind,value,detail) VALUES(?1,?2,?3,?4,?5)",
-                params![r.at, r.mac, r.kind, r.value, r.detail],
-            )
-            .map(|_| ())
-            .map_err(e)
+        self.run(
+            "INSERT INTO bench(at,mac,kind,value,detail) VALUES(?1,?2,?3,?4,?5)",
+            params![r.at, r.mac, r.kind, r.value, r.detail],
+        )
     }
 
     fn bench_rows(&self, mac: Option<&str>, limit: usize) -> DbResult<Vec<BenchRow>> {
-        let c = self.c();
         // Two statements: `?1 IS NULL OR mac=?1` would keep SQLite off the bench_mac index for one machine's rows.
-        let mut s = match mac {
-            Some(_) => c.prepare_cached("SELECT at,mac,kind,value,detail FROM bench WHERE mac=?1 ORDER BY at DESC, id DESC LIMIT ?2"),
-            None => c.prepare_cached("SELECT at,mac,kind,value,detail FROM bench WHERE ?1 IS NULL ORDER BY at DESC, id DESC LIMIT ?2"),
-        }
-        .map_err(e)?;
-        let rows = s
-            .query_map(params![mac, limit as i64], bench_row)
-            .map_err(e)?;
-        rows.collect::<Result<_, _>>().map_err(e)
+        let sql = match mac {
+            Some(_) => {
+                "SELECT at,mac,kind,value,detail FROM bench WHERE mac=?1 ORDER BY at DESC, id DESC LIMIT ?2"
+            }
+            None => {
+                "SELECT at,mac,kind,value,detail FROM bench WHERE ?1 IS NULL ORDER BY at DESC, id DESC LIMIT ?2"
+            }
+        };
+        self.all(sql, params![mac, limit as i64], bench_row)
     }
 
     fn bench_latest(&self) -> DbResult<Vec<BenchRow>> {
-        let c = self.c();
         // One pass over the table (not a lookup per row: up to 20k rows, under the lock DHCP waits on).
-        let mut s = c
-            .prepare_cached(
-                "SELECT at,mac,kind,value,detail FROM (SELECT *, ROW_NUMBER() OVER (PARTITION BY mac, kind
-                 ORDER BY at DESC, id DESC) AS n FROM bench) WHERE n=1",
-            )
-            .map_err(e)?;
-        let rows = s.query_map([], bench_row).map_err(e)?;
-        rows.collect::<Result<_, _>>().map_err(e)
+        self.all(
+            "SELECT at,mac,kind,value,detail FROM (SELECT *, ROW_NUMBER() OVER (PARTITION BY mac, kind
+             ORDER BY at DESC, id DESC) AS n FROM bench) WHERE n=1",
+            [],
+            bench_row,
+        )
     }
 
     fn prune_bench(&self, cutoff: i64, keep: usize) -> DbResult<usize> {

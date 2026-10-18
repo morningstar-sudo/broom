@@ -2,12 +2,13 @@
 fn prep_win_filled() {
     let s = super::fill_prep("guest", "1");
     assert!(!s.contains("__"), "placeholder left unreplaced");
-    assert!(
-        super::broom_done().is_ascii(),
-        "broom-done is written with -Encoding ascii"
-    );
-    assert!(super::broom_bootorder().is_ascii());
-    assert!(super::broom_games().is_ascii() && super::broom_watch().is_ascii());
+    // The scripts are written with -Encoding ascii.
+    for f in super::super::SCRIPTS {
+        assert!(
+            crate::assets::text(&format!("scripts/{f}")).is_ascii(),
+            "{f}"
+        );
+    }
     assert!(super::stub().is_ascii());
     // The golden gets the two stubs, not the scripts themselves (those come from BROOMWIN, newest every boot).
     assert!(s.contains("broom\\broom-done.ps1") && s.contains("broom\\broom-bootorder.ps1"));

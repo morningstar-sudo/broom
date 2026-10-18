@@ -269,7 +269,7 @@ async fn wake(
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     wol::wake(&*st.db, &b.mac).map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
     tracing::info!(mac = %b.mac, "wake-on-LAN sent");
-    Ok(Json(serde_json::json!({"ok": true})))
+    Ok(crate::api::ok())
 }
 
 #[cfg(test)]

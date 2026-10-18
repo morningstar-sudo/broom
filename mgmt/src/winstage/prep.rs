@@ -62,47 +62,6 @@ fn prep_win() -> &'static str {
     crate::assets::text("scripts/prep-win.ps1")
 }
 
-/// First logon (when base.vhdx is created on each machine): write base.ok to BROOMWIN, then restart at once → the stage
-/// commits base. With base mode on for the image (broom\basemode.txt from the stage): a popup tells the technician to
-/// set up apps (FACEIT AC...) and restart; that restart → the stage commits base. BROOMWIN has no
-/// drive letter (GPT bit 63, set by the stage) → write directly via the volume path `\\?\Volume{..}\`. ASCII only
-/// (Set-Content -Encoding ascii).
-pub(super) fn broom_done() -> &'static str {
-    crate::assets::text("scripts/broom-done.ps1")
-}
-
-/// BroomBootOrder task (SYSTEM, at startup + every 5 minutes): Windows pulls "Windows Boot Manager"
-/// to the top of BootOrder every boot → the next power-on skips PXE (no reset). Restores the order the stage
-/// wrote to broom\bootorder.txt (Boot#### numbers, PXE = the entry that booted the stage) — by NUMBER, never by
-/// entry name (PXE entries are named anything: "IBA GE Slot 0100", "Realtek PXE B03"...). Reads/writes the UEFI
-/// BootOrder variable directly (kernel32; SYSTEM + SeSystemEnvironmentPrivilege). Entries not in the file (added
-/// later) are kept, after. Writes NVRAM only when different. ASCII only.
-pub(super) fn broom_bootorder() -> &'static str {
-    crate::assets::text("scripts/broom-bootorder.ps1")
-}
-
-/// Games disk as a drive letter (games.rs), run by broom-bootorder.ps1 (no stub of its own: no new prep needed).
-pub(super) fn broom_games() -> &'static str {
-    crate::assets::text("scripts/broom-games.ps1")
-}
-
-/// Session watchdog (SSD room), started by broom-bootorder.ps1 as its own task.
-pub(super) fn broom_watch() -> &'static str {
-    crate::assets::text("scripts/broom-watch.ps1")
-}
-
-/// UEFI BootOrder access for broom-bootorder.ps1: its C# source, compiled by the client when the release ships no
-/// broom-fw.dll (assets::optional).
-pub(super) fn broom_fw_cs() -> &'static str {
-    crate::assets::text("scripts/broom-fw.cs")
-}
-
-/// The Remote agent (vnc.rs) for broom-watch.ps1: its C# source, compiled by the client when the release ships no
-/// broom-vnc.exe (assets::optional).
-pub(super) fn broom_vnc_cs() -> &'static str {
-    crate::assets::text("scripts/broom-vnc.cs")
-}
-
 /// /broom-prep-win: embeds the guest user/password (config shared with Linux).
 pub fn prep_script(db: &dyn Db) -> String {
     let user = db.get_config("ltsp_user", "guest");

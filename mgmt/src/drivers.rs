@@ -173,9 +173,7 @@ async fn list(State(st): State<SharedState>) -> Result<Json<Vec<serde_json::Valu
     for m in &machines {
         let ids = hw.get(&m.mac.to_lowercase()).cloned().unwrap_or_default();
         for d in pick(&drivers, &ids, m.grp.as_deref()) {
-            gets.entry(d.id)
-                .or_default()
-                .push(m.hostname.clone().unwrap_or_else(|| m.mac.clone()));
+            gets.entry(d.id).or_default().push(crate::machines::who(m));
         }
     }
     Ok(Json(
@@ -203,7 +201,7 @@ async fn upload_start(Json(b): Json<NameBody>) -> Result<Json<serde_json::Value>
     let dir = upload_dir(&b.name);
     let _ = tokio::fs::remove_dir_all(&dir).await;
     tokio::fs::create_dir_all(&dir).await.map_err(ise)?;
-    Ok(Json(serde_json::json!({"ok": true})))
+    Ok(crate::api::ok())
 }
 
 #[derive(Deserialize)]
@@ -232,7 +230,7 @@ async fn upload_chunk(
         body,
     )
     .await?;
-    Ok(Json(serde_json::json!({"ok": true})))
+    Ok(crate::api::ok())
 }
 
 /// POST /api/drivers/upload-done {name} — unzip, read the .inf hardware IDs, pack the tar.gz (tens of seconds
@@ -307,7 +305,7 @@ async fn set_targets(
         b.all_machines,
         groups.join(", ")
     );
-    Ok(Json(serde_json::json!({"ok": true})))
+    Ok(crate::api::ok())
 }
 
 #[derive(Deserialize)]
@@ -332,7 +330,7 @@ async fn delete(
     rearm_changed(&st, before);
     let _ = std::fs::remove_file(tar_path(&d.name));
     tracing::info!("driver package {} deleted", d.name);
-    Ok(Json(serde_json::json!({"ok": true})))
+    Ok(crate::api::ok())
 }
 
 /// Machine id → the "name sha256" packages its stage gets, for every machine with a license key (from the hardware
@@ -385,22 +383,14 @@ async fn for_machine(
     Query(q): Query<ForQuery>,
     body: String,
 ) -> Result<String, ApiError> {
-    let mac = q.mac.trim().to_lowercase().replace('-', ":");
-    if mac.len() != 17 || !mac.chars().all(|c| c.is_ascii_hexdigit() || c == ':') {
-        return Err(bad("bad mac"));
-    }
+    let mac = crate::devices::norm_mac(&q.mac).ok_or_else(|| bad("bad mac"))?;
     let hw: BTreeSet<String> = body
         .lines()
         .map(|l| l.trim().to_ascii_uppercase())
         .filter(|l| !l.is_empty())
         .take(4096)
         .collect();
-    let m = st
-        .db
-        .machines()
-        .map_err(ise)?
-        .into_iter()
-        .find(|m| m.mac.eq_ignore_ascii_case(&mac));
+    let m = crate::machines::by_mac(&st, &mac)?;
     // Only remember hardware for a MAC we already know (registered, or currently holding a lease). An unknown MAC
     // still gets its driver list, but can't pollute machine_hw with junk.
     let known = m.is_some()

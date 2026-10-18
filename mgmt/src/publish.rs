@@ -51,16 +51,7 @@ impl<'a> Steps<'a> {
 
 /// Free bytes on the filesystem holding `path` (libc statvfs). 0 on error (callers treat 0 as "unknown → allow").
 pub(crate) fn free_bytes(path: &Path) -> u64 {
-    use std::os::unix::ffi::OsStrExt;
-    let Ok(c) = std::ffi::CString::new(path.as_os_str().as_bytes()) else {
-        return 0;
-    };
-    // SAFETY: c is a valid NUL-terminated path; s is written by statvfs before use.
-    let mut s: libc::statvfs = unsafe { std::mem::zeroed() };
-    if unsafe { libc::statvfs(c.as_ptr(), &mut s) } != 0 {
-        return 0;
-    }
-    (s.f_bavail as u64).saturating_mul(s.f_frsize as u64)
+    crate::sysmon::space(path).map_or(0, |(used, total)| total - used)
 }
 
 /// Refuse a big write up front when the filesystem of `dir` can't take `need` bytes + 1 GiB (instead of failing hours
@@ -82,11 +73,7 @@ pub(crate) fn need_space(dir: &Path, need: u64, what: &str) -> Result<(), String
 /// RAM (bytes) a RAM copy must leave free for the OS and the rest of the server (config zram_reserve_mb, web System
 /// page). The copy checks it itself, when it claims its RAM (iscsid::ramimg).
 pub(crate) fn ram_reserve(st: &SharedState) -> u64 {
-    st.db
-        .get_config("zram_reserve_mb", "2048")
-        .parse::<u64>()
-        .unwrap_or(2048)
-        .saturating_mul(1 << 20)
+    crate::db::num(&*st.db, "zram_reserve_mb", 2048u64).saturating_mul(1 << 20)
 }
 
 /// Publish an image according to its os. Blocking (called from spawn_blocking).

@@ -9,7 +9,7 @@ use axum::{
 use serde::Deserialize;
 
 use crate::SharedState;
-use crate::api::{ise, ok};
+use crate::api::{ApiError, bad, ise, ok};
 use crate::dhcp::{self, DhcpOpts};
 
 pub fn routes() -> Router<SharedState> {
@@ -63,18 +63,14 @@ async fn set_cafe_user(
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let user = b.user.trim();
     if !cafe_user_ok(user) {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            "user: 1-20 letters/digits/-_. only".into(),
-        ));
+        return Err(bad("user: 1-20 letters/digits/-_. only"));
     }
     st.db.set_config("ltsp_user", user).map_err(ise)?;
     // Password write-only: an empty value keeps the stored one (the web never sends it back).
     if !b.password.is_empty() {
         if !cafe_pass_ok(&b.password) {
-            return Err((
-                StatusCode::BAD_REQUEST,
-                "password: 1-64 printable characters, no \" ' ` $ < > & \\".into(),
+            return Err(bad(
+                "password: 1-64 printable characters, no \" ' ` $ < > & \\",
             ));
         }
         st.db
@@ -91,9 +87,9 @@ async fn get_config(State(st): State<SharedState>) -> Json<serde_json::Value> {
     let (streams, _, link) = crate::goldenram::streams(&st);
     let (active, waiting) = crate::goldenram::queue_stats();
     Json(serde_json::json!({
-        "boot_timeout": st.db.get_config("boot_timeout", "3").parse::<u64>().unwrap_or(3),
-        "zram_reserve_mb": st.db.get_config("zram_reserve_mb", "2048").parse::<u64>().unwrap_or(2048),
-        "alert_pct": st.db.get_config("alert_pct", "80").parse::<u64>().unwrap_or(80),
+        "boot_timeout": crate::db::num(&*st.db, "boot_timeout", 3u64),
+        "zram_reserve_mb": crate::db::num(&*st.db, "zram_reserve_mb", 2048u64),
+        "alert_pct": crate::db::num(&*st.db, "alert_pct", 80u64),
         "ssd_room_gb": room,
         "ssd_warn_gb": warn,
         "ssd_reboot_gb": reboot,
@@ -114,12 +110,7 @@ async fn get_config(State(st): State<SharedState>) -> Json<serde_json::Value> {
 /// would crash with its boot disk out of room. Last: the pagefile Windows gets on BROOMWIN (0 = none; its C: is a
 /// VHDX, where Windows refuses one), made by broom-bootorder.ps1 at every boot, kept free on top of the room.
 fn ssd_limits(st: &SharedState) -> (u64, u64, u64, u64) {
-    let n = |k, d: u64| {
-        st.db
-            .get_config(k, &d.to_string())
-            .parse::<u64>()
-            .unwrap_or(d)
-    };
+    let n = |k, d: u64| crate::db::num(&*st.db, k, d);
     (
         n("ssd_room_gb", 20),
         n("ssd_warn_gb", 10),
@@ -154,9 +145,8 @@ async fn set_ssd(
         || !(1..b.warn_gb).contains(&b.reboot_gb)
         || b.pagefile_gb.is_some_and(|p| p > 64)
     {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            "need 5 ≤ room ≤ 2000, 1 ≤ warn ≤ room, 1 ≤ restart < warn, pagefile ≤ 64 (GB)".into(),
+        return Err(bad(
+            "need 5 ≤ room ≤ 2000, 1 ≤ warn ≤ room, 1 ≤ restart < warn, pagefile ≤ 64 (GB)",
         ));
     }
     if let Some(p) = b.pagefile_gb {
@@ -183,6 +173,18 @@ async fn set_ssd(
     Ok(ok())
 }
 
+/// One number setting stored + logged.
+fn save_num(
+    st: &SharedState,
+    key: &str,
+    n: u64,
+    what: &str,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    st.db.set_config(key, &n.to_string()).map_err(ise)?;
+    tracing::info!("{what} set to {n}");
+    Ok(ok())
+}
+
 #[derive(Deserialize)]
 struct Timeout {
     seconds: u64,
@@ -192,12 +194,13 @@ async fn set_timeout(
     State(st): State<SharedState>,
     Json(b): Json<Timeout>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let secs = b.seconds.min(3600); // used as timeout_s * 1000 in the iPXE menu
-    st.db
-        .set_config("boot_timeout", &secs.to_string())
-        .map_err(ise)?;
-    tracing::info!("boot menu countdown set to {secs} s");
-    Ok(ok())
+    // Used as timeout_s * 1000 in the iPXE menu.
+    save_num(
+        &st,
+        "boot_timeout",
+        b.seconds.min(3600),
+        "boot menu countdown (s)",
+    )
 }
 
 #[derive(Deserialize)]
@@ -212,13 +215,14 @@ async fn set_alert(
     Json(b): Json<Alert>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     if !(50..=99).contains(&b.pct) {
-        return Err(crate::api::bad("alert threshold: 50–99 %"));
+        return Err(bad("alert threshold: 50–99 %"));
     }
-    st.db
-        .set_config("alert_pct", &b.pct.to_string())
-        .map_err(ise)?;
-    tracing::info!("server resource alert threshold set to {}%", b.pct);
-    Ok(ok())
+    save_num(
+        &st,
+        "alert_pct",
+        b.pct,
+        "server resource alert threshold (%)",
+    )
 }
 
 #[derive(Deserialize)]
@@ -235,7 +239,7 @@ async fn set_golden_streams(
     let v = b.value.trim().to_ascii_lowercase();
     let max = crate::goldenram::MAX_STREAMS;
     if v != "auto" && !v.parse::<usize>().is_ok_and(|n| n <= max) {
-        return Err(crate::api::bad(format!(
+        return Err(bad(format!(
             "golden downloads at once: auto or 0–{max} (0 = no queue)"
         )));
     }
@@ -255,12 +259,13 @@ async fn set_zram_reserve(
     State(st): State<SharedState>,
     Json(b): Json<ZramReserve>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let mb = b.mb.min(1 << 30); // reserve * 1024 * 1024 later; cap well below u64 overflow
-    st.db
-        .set_config("zram_reserve_mb", &mb.to_string())
-        .map_err(ise)?;
-    tracing::info!("zram RAM reserve set to {mb} MB");
-    Ok(ok())
+    // Reserve * 1024 * 1024 later: capped well below u64 overflow.
+    save_num(
+        &st,
+        "zram_reserve_mb",
+        b.mb.min(1 << 30),
+        "zram RAM reserve (MB)",
+    )
 }
 
 /// Current DHCP config (mode, parameters, optional behaviours) for the web to display.
@@ -297,9 +302,7 @@ async fn get_dhcp(State(st): State<SharedState>) -> Json<serde_json::Value> {
     let g = |k: &str, d: &str| st.db.get_config(k, d);
     let (pool_size, pool_need) = match dhcp::Cfg::load(&*st.db) {
         Ok(c) => {
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map_or(0, |d| d.as_secs() as i64);
+            let now = crate::now_secs() as i64;
             pool_need(
                 c.start,
                 c.end,
@@ -461,7 +464,7 @@ async fn set_dhcp(
         .as_deref()
         .map(normalize_dns)
         .transpose()
-        .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+        .map_err(bad)?;
     let fields = [
         ("dhcp_mode", &b.mode),
         ("dhcp_iface", &b.iface),
@@ -482,7 +485,7 @@ async fn set_dhcp(
     ];
     for (k, v) in &fields {
         if let Some(val) = v {
-            dhcp_field_ok(k, val.trim()).map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+            dhcp_field_ok(k, val.trim()).map_err(bad)?;
         }
     }
     // When the DHCP server is on, it needs a bound interface (empty = all interfaces → a rogue DHCP server on a
@@ -520,9 +523,8 @@ async fn set_dhcp(
         && (cur(&b.gateway, "dhcp_gateway").trim().is_empty()
             || cur(&dns, "dhcp_dns").trim().is_empty())
     {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            "the DHCP server needs a gateway and DNS (clients would get no internet)".into(),
+        return Err(bad(
+            "the DHCP server needs a gateway and DNS (clients would get no internet)",
         ));
     }
     let server = cur(&b.server_ip, "dhcp_server_ip");
@@ -534,15 +536,14 @@ async fn set_dhcp(
             &server,
             &mask,
         )
-        .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+        .map_err(bad)?;
     }
     // Boot scripts, the Host check (auth.rs) and DHCP option 54 all use it: an address this machine doesn't have
     // breaks every boot. Binding to it only works when it is ours.
     if b.server_ip.is_some() && std::net::UdpSocket::bind((server.trim(), 0)).is_err() {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            format!("server IP {server} is not an address of this server"),
-        ));
+        return Err(bad(format!(
+            "server IP {server} is not an address of this server"
+        )));
     }
     for (k, v) in &fields {
         if let Some(val) = v {

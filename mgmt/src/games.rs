@@ -351,7 +351,7 @@ async fn delete(
         crate::volumes::remove_tree(&dir).map_err(|e| format!("{}: {e}", dir.display()))
     })
     .await
-    .map_err(|e| ise(e.to_string()))?
+    .map_err(ise)?
     .map_err(ise)?;
     tracing::info!("iSCSI disk {} deleted", b.name);
     Ok(ok())

@@ -25,17 +25,17 @@ pub struct Table {
     pub parts: Vec<Part>,
 }
 
-fn rd(f: &File, off: u64, len: usize) -> Result<Vec<u8>, String> {
+pub(crate) fn rd(f: &File, off: u64, len: usize) -> Result<Vec<u8>, String> {
     let mut b = vec![0u8; len];
     f.read_exact_at(&mut b, off)
         .map_err(|e| format!("read at {off}: {e}"))?;
     Ok(b)
 }
 
-fn u32le(b: &[u8], o: usize) -> u32 {
+pub(crate) fn u32le(b: &[u8], o: usize) -> u32 {
     u32::from_le_bytes(b[o..o + 4].try_into().unwrap())
 }
-fn u64le(b: &[u8], o: usize) -> u64 {
+pub(crate) fn u64le(b: &[u8], o: usize) -> u64 {
     u64::from_le_bytes(b[o..o + 8].try_into().unwrap())
 }
 
@@ -57,9 +57,12 @@ pub fn guid_str(g: &[u8]) -> String {
     )
 }
 
-/// `XXXXXXXX-…` → GPT bytes.
-fn guid_bytes(s: &str) -> Option<[u8; 16]> {
-    let h: String = s.chars().filter(|c| *c != '-').collect();
+/// `XXXXXXXX-…` (braces allowed) → GPT bytes.
+pub(crate) fn guid_bytes(s: &str) -> Option<[u8; 16]> {
+    let h: String = s
+        .chars()
+        .filter(|c| !matches!(c, '-' | '{' | '}'))
+        .collect();
     if h.len() != 32 {
         return None;
     }
@@ -391,6 +394,73 @@ pub fn par_map<T: Sync, R: Send>(
                 .unwrap_or_else(|| Err("stopped after an error".into()))
         })
         .collect()
+}
+
+/// Free [off, off+len) of a file without changing its size (fallocate PUNCH_HOLE|KEEP_SIZE): reads there give zeros.
+pub fn punch_hole(f: &File, off: u64, len: u64) -> std::io::Result<()> {
+    use std::os::fd::AsRawFd;
+    let mode = libc::FALLOC_FL_PUNCH_HOLE | libc::FALLOC_FL_KEEP_SIZE;
+    // SAFETY: valid open fd; offsets are plain integers.
+    match unsafe { libc::fallocate(f.as_raw_fd(), mode, off as i64, len as i64) } {
+        0 => Ok(()),
+        _ => Err(std::io::Error::last_os_error()),
+    }
+}
+
+/// Pieces copied per thread.
+const PIECE: u64 = 32 << 20;
+
+/// [start, start+n) of `p` → `out` at `base`: only its data ranges are read, in parallel; all-zero MBs are not
+/// written (`out` starts as a hole).
+pub fn copy_into(
+    p: &std::path::Path,
+    start: u64,
+    n: u64,
+    out: &File,
+    base: u64,
+) -> Result<(), String> {
+    let src = Source::new(&[(p, start, Some(n))])?;
+    let mut pieces = Vec::new();
+    for (a, b) in src.data_ranges() {
+        pieces.extend(
+            (a..b)
+                .step_by(PIECE as usize)
+                .map(|o| (o, (b - o).min(PIECE))),
+        );
+    }
+    par_map(&pieces, |&(o, len)| {
+        let mut buf = vec![0u8; len as usize];
+        src.read_at(o, &mut buf)?;
+        for (k, mb) in buf.chunks(1 << 20).enumerate() {
+            if mb.iter().any(|&b| b != 0) {
+                out.write_all_at(mb, base + o + ((k as u64) << 20))
+                    .map_err(|e| format!("write: {e}"))?;
+            }
+        }
+        Ok(())
+    })?;
+    Ok(())
+}
+
+/// [off, off+len) of `src` (None = to its end) → a new sparse file `dst`, flushed.
+pub fn copy_region(
+    src: &std::path::Path,
+    off: u64,
+    len: Option<u64>,
+    dst: &std::path::Path,
+) -> Result<(), String> {
+    let len = match len {
+        Some(l) => l,
+        None => std::fs::metadata(src)
+            .map_err(|e| format!("{}: {e}", src.display()))?
+            .len()
+            .saturating_sub(off),
+    };
+    let out = File::create(dst).map_err(|e| format!("{}: {e}", dst.display()))?;
+    out.set_len(len).map_err(|e| e.to_string())?;
+    copy_into(src, off, len, &out, 0)?;
+    out.sync_all()
+        .map_err(|e| format!("{}: {e}", dst.display()))
 }
 
 /// A virtual disk made of byte ranges of files, back to back (a whole raw golden, or head.raw + the Windows

@@ -14,6 +14,14 @@ pub fn bad(e: impl ToString) -> ApiError {
     (StatusCode::BAD_REQUEST, e.to_string())
 }
 
+/// 409: a job (publish, snapshot, export…) is running on image `name`.
+pub fn busy(name: &str) -> ApiError {
+    (
+        StatusCode::CONFLICT,
+        format!("image '{name}' has a running job — wait for it to finish"),
+    )
+}
+
 pub fn ok() -> Json<serde_json::Value> {
     Json(serde_json::json!({"ok": true}))
 }

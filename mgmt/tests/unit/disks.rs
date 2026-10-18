@@ -18,9 +18,3 @@ fn report_lines_parsed_and_bad_ones_skipped() {
     assert_eq!((d[2].dev.as_str(), d[2].model.as_str()), ("sdb", ""));
     assert_eq!(parse_report(&"a 1 0 sda m\n".repeat(50)).len(), 32);
 }
-
-#[test]
-fn mac_checked() {
-    assert!(mac_ok("00:0c:29:ab:cd:ef"));
-    assert!(!mac_ok("00-0c-29-ab-cd-ef") && !mac_ok("../x") && !mac_ok(""));
-}

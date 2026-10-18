@@ -28,12 +28,11 @@ use std::net::{IpAddr, SocketAddr};
 use std::sync::{LazyLock, OnceLock};
 
 use crate::SharedState;
+use crate::api::{ApiError, ise};
 use crate::now_secs as now;
 
 const COOKIE: &str = "broom_session";
 const SESSION_SECS: u64 = 8 * 3600;
-
-type ApiErr = (StatusCode, String);
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -89,8 +88,8 @@ pub(crate) fn users(st: &SharedState) -> Vec<User> {
 /// not use the database.
 pub(crate) fn edit_users<R>(
     st: &SharedState,
-    f: impl FnOnce(&mut Vec<User>) -> Result<R, ApiErr>,
-) -> Result<R, ApiErr> {
+    f: impl FnOnce(&mut Vec<User>) -> Result<R, ApiError>,
+) -> Result<R, ApiError> {
     crate::db::edit_json(&*st.db, "users", f).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?
 }
 
@@ -151,11 +150,11 @@ pub fn routes() -> Router<SharedState> {
         .route("/api/password", post(change_pw))
 }
 
-fn hex(b: &[u8]) -> String {
+pub(crate) fn hex(b: &[u8]) -> String {
     b.iter().map(|x| format!("{x:02x}")).collect()
 }
 
-fn random32() -> [u8; 32] {
+pub(crate) fn random32() -> [u8; 32] {
     let mut k = [0u8; 32];
     OsRng.fill_bytes(&mut k);
     k
@@ -172,10 +171,6 @@ pub(crate) fn same(a: &str, b: &str) -> bool {
 }
 
 /// argon2id hash (PHC string) of a password — what the accounts keep (config `users`).
-pub(crate) fn hash_password(pw: &str) -> Result<String, String> {
-    hash_pw(pw)
-}
-
 fn hash_pw(pw: &str) -> Result<String, String> {
     let salt = SaltString::generate(&mut OsRng);
     Argon2::default()
@@ -223,7 +218,7 @@ fn record(f: &mut Fails, ip: IpAddr, ok: bool, now: u64) {
         };
 }
 
-fn too_many(wait: u64) -> ApiErr {
+fn too_many(wait: u64) -> ApiError {
     (
         StatusCode::TOO_MANY_REQUESTS,
         format!("too many wrong passwords — retry in {wait}s"),
@@ -231,30 +226,28 @@ fn too_many(wait: u64) -> ApiErr {
 }
 
 /// Throttled password check: 429 while `ip` is locked out, else argon2-verify on a blocking thread and record it.
-async fn check_pw(ip: IpAddr, pw: String, phc: String) -> Result<bool, ApiErr> {
-    let ise = |e: String| (StatusCode::INTERNAL_SERVER_ERROR, e);
+async fn check_pw(ip: IpAddr, pw: String, phc: String) -> Result<bool, ApiError> {
     let wait = || locked_for(&FAILS.lock(), ip, now());
     if wait() > 0 {
         return Err(too_many(wait()));
     }
-    let _permit = ARGON.acquire().await.map_err(|e| ise(e.to_string()))?;
+    let _permit = ARGON.acquire().await.map_err(ise)?;
     if wait() > 0 {
         return Err(too_many(wait())); // locked while queued behind other checks
     }
     let ok = tokio::task::spawn_blocking(move || verify_pw(&pw, &phc))
         .await
-        .map_err(|e| ise(e.to_string()))?;
+        .map_err(ise)?;
     record(&mut FAILS.lock(), ip, ok, now());
     Ok(ok)
 }
 
 /// hash_pw on a blocking thread (same limit as checks).
-async fn hash_blocking(pw: String) -> Result<String, ApiErr> {
-    let ise = |e: String| (StatusCode::INTERNAL_SERVER_ERROR, e);
-    let _permit = ARGON.acquire().await.map_err(|e| ise(e.to_string()))?;
+pub(crate) async fn hash_blocking(pw: String) -> Result<String, ApiError> {
+    let _permit = ARGON.acquire().await.map_err(ise)?;
     tokio::task::spawn_blocking(move || hash_pw(&pw))
         .await
-        .map_err(|e| ise(e.to_string()))?
+        .map_err(ise)?
         .map_err(ise)
 }
 
@@ -284,10 +277,6 @@ pub fn init_setup_token(st: &SharedState) {
     let _ = SETUP_TOKEN.set(tok);
 }
 
-fn cookie_token(req: &Request<Body>) -> Option<String> {
-    session_token(req.headers())
-}
-
 /// The session cookie's token in these request headers.
 pub(crate) fn session_token(h: &axum::http::HeaderMap) -> Option<String> {
     let raw = h.get(header::COOKIE)?.to_str().ok()?;
@@ -309,14 +298,8 @@ fn rotate_secret(st: &SharedState) -> Result<[u8; 32], String> {
 /// A first-request race can generate it twice; last write wins and only invalidates a cookie minted in the same
 /// instant — negligible for a single-admin tool.
 fn secret(st: &SharedState) -> [u8; 32] {
-    let parse = |h: &str| -> Option<[u8; 32]> {
-        let b: Vec<u8> = (0..h.len() / 2)
-            .map(|i| u8::from_str_radix(&h[i * 2..i * 2 + 2], 16).ok())
-            .collect::<Option<_>>()?;
-        b.try_into().ok()
-    };
-    if let Some(k) = parse(&st.db.get_config("session_secret", "")) {
-        return k;
+    if let Ok(k) = blake3::Hash::from_hex(st.db.get_config("session_secret", "")) {
+        return *k.as_bytes();
     }
     rotate_secret(st).unwrap_or_else(|e| {
         tracing::error!(
@@ -358,10 +341,6 @@ pub(crate) fn who(st: &SharedState, tok: &str) -> Option<Who> {
 
 /// Is this session token still good (its account there, its password unchanged, not expired). Long-lived streams
 /// (SSE, Remote WebSocket) ask again every so often — the guard only checked when they opened.
-pub(crate) fn token_valid(st: &SharedState, tok: &str) -> bool {
-    who(st, tok).is_some()
-}
-
 /// How often an open stream re-checks its session.
 pub(crate) const RECHECK: std::time::Duration = std::time::Duration::from_secs(30);
 
@@ -369,7 +348,7 @@ pub(crate) const RECHECK: std::time::Duration = std::time::Duration::from_secs(3
 pub(crate) async fn until_invalid(st: SharedState, tok: Option<String>) {
     loop {
         tokio::time::sleep(RECHECK).await;
-        if !tok.as_deref().is_some_and(|t| token_valid(&st, t)) {
+        if !tok.as_deref().is_some_and(|t| who(&st, t).is_some()) {
             return;
         }
     }
@@ -452,7 +431,7 @@ pub async fn guard(State(st): State<SharedState>, mut req: Request<Body>, next: 
     if is_public(req.method(), &path) {
         return next.run(req).await;
     }
-    if let Some(w) = cookie_token(&req).and_then(|t| who(&st, &t)) {
+    if let Some(w) = session_token(req.headers()).and_then(|t| who(&st, &t)) {
         let m = req.method().clone();
         if w.role == Role::Staff && !staff_may(&m, &path) {
             return (
@@ -516,7 +495,7 @@ pub async fn security_headers(req: Request<Body>, next: Next) -> Response {
 
 /// GET /api/auth/status (public) — is there an account yet, is this browser signed in, as whom.
 async fn status(State(st): State<SharedState>, req: Request<Body>) -> Json<serde_json::Value> {
-    let w = cookie_token(&req).and_then(|t| who(&st, &t));
+    let w = session_token(req.headers()).and_then(|t| who(&st, &t));
     Json(serde_json::json!({
         "configured": !users(&st).is_empty(),
         "authed": w.is_some(),
@@ -572,7 +551,7 @@ async fn setup(
     State(st): State<SharedState>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
     Json(b): Json<SetupBody>,
-) -> Result<impl IntoResponse, ApiErr> {
+) -> Result<impl IntoResponse, ApiError> {
     if !users(&st).is_empty() {
         return Err((StatusCode::CONFLICT, "already set up — log in".into()));
     }
@@ -587,16 +566,10 @@ async fn setup(
         .filter(|n| !n.is_empty())
         .unwrap_or_else(|| "admin".into());
     if !name_ok(&name) {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            "user name: a-z, 0-9, _ or -, at most 32".into(),
-        ));
+        return Err(crate::api::bad("user name: a-z, 0-9, _ or -, at most 32"));
     }
     if b.password.len() < 8 {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            "password must be at least 8 characters".into(),
-        ));
+        return Err(crate::api::bad("password must be at least 8 characters"));
     }
     let u = new_user(&name, Role::Owner, hash_blocking(b.password).await?);
     // Still no account (two setups at once: only the first one).
@@ -610,7 +583,7 @@ async fn setup(
     tracing::warn!("owner account {name} created from {}", peer.ip());
     Ok((
         session_cookie(&new_session(&st, &u), SESSION_SECS),
-        Json(serde_json::json!({"ok": true})),
+        crate::api::ok(),
     ))
 }
 
@@ -620,7 +593,7 @@ async fn login(
     State(st): State<SharedState>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
     Json(b): Json<LoginBody>,
-) -> Result<impl IntoResponse, ApiErr> {
+) -> Result<impl IntoResponse, ApiError> {
     let all = users(&st);
     if all.is_empty() {
         return Err((StatusCode::CONFLICT, "not set up yet".into()));
@@ -640,7 +613,7 @@ async fn login(
     tracing::info!("{} logged in from {}", u.name, peer.ip());
     Ok((
         session_cookie(&new_session(&st, u), SESSION_SECS),
-        Json(serde_json::json!({"ok": true})),
+        crate::api::ok(),
     ))
 }
 
@@ -651,11 +624,10 @@ async fn change_pw(
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
     axum::Extension(w): axum::Extension<Who>,
     Json(b): Json<NewPw>,
-) -> Result<impl IntoResponse, ApiErr> {
+) -> Result<impl IntoResponse, ApiError> {
     if b.new.len() < 8 {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            "new password must be at least 8 characters".into(),
+        return Err(crate::api::bad(
+            "new password must be at least 8 characters",
         ));
     }
     let Some(was) = users(&st).into_iter().find(|u| u.name == w.name) else {
@@ -693,14 +665,14 @@ async fn change_pw(
     );
     Ok((
         session_cookie(&new_session(&st, &u), SESSION_SECS),
-        Json(serde_json::json!({"ok": true})),
+        crate::api::ok(),
     ))
 }
 
 /// POST /api/auth/logout — clear the cookie. Stateless tokens can't be revoked one by one; changing the password ends
 /// every session of that account.
 async fn logout() -> impl IntoResponse {
-    (session_cookie("", 0), Json(serde_json::json!({"ok": true})))
+    (session_cookie("", 0), crate::api::ok())
 }
 
 #[cfg(test)]

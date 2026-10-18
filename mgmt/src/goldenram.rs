@@ -35,9 +35,6 @@ pub struct Golden {
 }
 
 impl Golden {
-    fn size(&self) -> u64 {
-        self.vhdx.len()
-    }
     fn read_at(&self, off: u64, buf: &mut [u8]) -> Result<(), String> {
         match &self.ram {
             Some(r) => r.read_at(off, buf),
@@ -396,7 +393,7 @@ pub async fn get(
 }
 
 fn serve(img: Arc<Golden>, headers: &HeaderMap, ip: IpAddr) -> Response {
-    let size = img.size();
+    let size = img.vhdx.len();
     let (status, first, last) = match range(headers.get(header::RANGE), size) {
         Ok(Some((a, b))) => (StatusCode::PARTIAL_CONTENT, a, b),
         Ok(None) => (StatusCode::OK, 0, size.saturating_sub(1)),

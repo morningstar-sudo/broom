@@ -53,27 +53,6 @@ fn table(p: &Path) -> Result<Table, String> {
     crate::disk::read(&p.to_string_lossy())?
         .ok_or_else(|| format!("{}: no partition table", p.display()))
 }
-/// Copy [off, off+len) of `src` into a new sparse file `dst` (all-zero MB blocks stay holes).
-fn copy_region(src: &Path, off: u64, len: u64, dst: &Path) -> Result<(), String> {
-    use std::os::unix::fs::FileExt;
-    let f = std::fs::File::open(src).map_err(|e| format!("{}: {e}", src.display()))?;
-    let out = std::fs::File::create(dst).map_err(|e| format!("{}: {e}", dst.display()))?;
-    out.set_len(len).map_err(|e| e.to_string())?;
-    let mut buf = vec![0u8; 1 << 20];
-    let mut done = 0;
-    while done < len {
-        let n = (len - done).min(buf.len() as u64) as usize;
-        f.read_exact_at(&mut buf[..n], off + done)
-            .map_err(|e| format!("read {}: {e}", src.display()))?;
-        if buf[..n].iter().any(|&b| b != 0) {
-            out.write_all_at(&buf[..n], done)
-                .map_err(|e| format!("write {}: {e}", dst.display()))?;
-        }
-        done += n as u64;
-    }
-    Ok(())
-}
-
 /// Called by winstage::build_golden right BEFORE it trims image.img: keep the partition table + every partition
 /// but Windows (start, size). An already-trimmed image.img (published before) keeps the orig/ of its upload.
 pub(crate) fn keep_boot_regions(
@@ -89,13 +68,8 @@ pub(crate) fn keep_boot_regions(
     let _ = std::fs::remove_dir_all(&d);
     std::fs::create_dir_all(&d).map_err(|e| format!("{}: {e}", d.display()))?;
     let total = std::fs::metadata(raw).map_err(|e| e.to_string())?.len();
-    copy_region(raw, 0, start, &d.join("head.raw"))?;
-    copy_region(
-        raw,
-        start + size,
-        total.saturating_sub(start + size),
-        &d.join("tail.raw"),
-    )?;
+    crate::disk::copy_region(raw, 0, Some(start), &d.join("head.raw"))?;
+    crate::disk::copy_region(raw, start + size, None, &d.join("tail.raw"))?;
     // orig.json last: its presence = the set is complete.
     let o = Orig {
         start,
@@ -292,16 +266,8 @@ fn deploy_image(
         .map_err(|e| bad(500, e.to_string()))?
         .filter(|i| i.os == "windows")
         .ok_or_else(|| bad(404, format!("no Windows image {name:?}")))?;
-    if st
-        .jobs
-        .lock()
-        .get(name)
-        .is_some_and(|s| s.starts_with('⏳'))
-    {
-        return Err(bad(
-            409,
-            format!("image {name} has a running job — wait for it to finish"),
-        ));
+    if st.job_running(name) {
+        return Err(crate::api::busy(name));
     }
     let src = crate::images_dir().join(name).join("image.img");
     if !src.is_file() {

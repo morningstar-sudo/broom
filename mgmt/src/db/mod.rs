@@ -235,6 +235,11 @@ where
 
 /// Open the database named by `url`: a plain path or `sqlite://path` → SQLite.
 /// (Future drivers: `mysql://…`, `postgres://…`.) Creates/migrates the schema.
+/// A number setting: `default` when unset or not a number.
+pub fn num<T: std::str::FromStr>(db: &dyn Db, key: &str, default: T) -> T {
+    db.get_config(key, "").parse().unwrap_or(default)
+}
+
 pub fn open(url: &str) -> DbResult<Box<dyn Db>> {
     match url.split_once("://") {
         None => Ok(Box::new(sqlite::Sqlite::open(url)?)),

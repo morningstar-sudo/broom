@@ -18,13 +18,3 @@ fn reads_and_picks_largest() {
     std::fs::remove_dir_all(&dir).unwrap();
     assert!(largest_image(&dir).is_none());
 }
-
-#[test]
-fn mac_forms() {
-    assert_eq!(
-        norm_mac("AA-BB-CC-DD-EE-0F").as_deref(),
-        Some("aa:bb:cc:dd:ee:0f")
-    );
-    assert_eq!(norm_mac("aa:bb:cc:dd:ee:0g"), None);
-    assert_eq!(norm_mac("x\naa:bb:cc:dd:ee"), None);
-}

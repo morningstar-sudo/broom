@@ -150,7 +150,11 @@ fn client_ids_validated() {
         q("aa\nINFO client X started", "1.2.3.4\nfake"),
         (s(""), s("?"))
     );
-    assert_eq!(q("34:5a:60:7b:2b:1d\n", "999.1.1.1"), (s(""), s("?")));
+    // Surrounding whitespace is trimmed off: what is logged is the clean MAC.
+    assert_eq!(
+        q("34:5a:60:7b:2b:1d\n", "999.1.1.1"),
+        (s("34:5a:60:7b:2b:1d"), s("?"))
+    );
     assert_eq!(super::client_ids(&Default::default()), (s(""), s("?")));
 }
 

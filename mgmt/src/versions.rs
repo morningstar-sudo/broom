@@ -38,15 +38,11 @@ fn chunk() -> u64 {
 }
 
 /// `<home>/storage` by default (next to the binary); override with BOOTROM_STORAGE_DIR.
-fn storage() -> PathBuf {
+/// The versions' root (volumes.rs puts an image's `files/<name>` on its disk).
+pub(crate) fn storage_dir() -> PathBuf {
     std::env::var("BOOTROM_STORAGE_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|_| crate::home().join("storage"))
-}
-
-/// The versions' root (volumes.rs puts an image's `files/<name>` on its disk).
-pub(crate) fn storage_dir() -> PathBuf {
-    storage()
 }
 
 fn chunk_path(root: &Path, hash: &str) -> PathBuf {
@@ -90,7 +86,7 @@ fn manifests(root: &Path, name: &str) -> Vec<Manifest> {
 /// Versions of an image, newest first (without their chunk lists).
 pub fn list(name: &str) -> Vec<Manifest> {
     let _ = std::fs::remove_file(crate::images_dir().join(name).join("current.chunks")); // cache of older releases
-    list_at(&storage(), name)
+    list_at(&storage_dir(), name)
 }
 
 fn list_at(root: &Path, name: &str) -> Vec<Manifest> {
@@ -104,7 +100,7 @@ fn list_at(root: &Path, name: &str) -> Vec<Manifest> {
 /// Save image.img as a new version "v<N>": a hard link (instant, no copy). Refused when image.img already is a version
 /// (a rollback just restored it, or nothing changed since the last one).
 pub fn snapshot(name: &str, label: &str) -> Result<Manifest, String> {
-    snapshot_at(&storage(), &image_path(name), name, label)
+    snapshot_at(&storage_dir(), &image_path(name), name, label)
 }
 
 fn snapshot_at(root: &Path, img: &Path, name: &str, label: &str) -> Result<Manifest, String> {
@@ -132,16 +128,14 @@ fn snapshot_at(root: &Path, img: &Path, name: &str, label: &str) -> Result<Manif
         tracing::info!("image {name}: version as a hard link not possible ({err}) → copied");
         let used = std::os::unix::fs::MetadataExt::blocks(&meta) * 512;
         crate::publish::need_space(root, used, "snapshot")?;
-        copy_sparse(&img, &p).inspect_err(|_| {
+        crate::disk::copy_region(&img, 0, None, &p).inspect_err(|_| {
             let _ = std::fs::remove_file(&p);
         })?;
     }
     sync_fs(root)?; // the file on disk before the manifest that names it
     let dir = manifest_dir(root, name);
     std::fs::create_dir_all(&dir).map_err(e("mkdir manifests"))?;
-    let created = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs());
+    let created = crate::now_secs();
     let m = Manifest {
         version: format!("v{n}"),
         label: label.to_string(),
@@ -175,9 +169,11 @@ fn sync_fs(dir: &Path) -> Result<(), String> {
 }
 
 /// Write `data` as `p`: a temp file, flushed to disk, then renamed — after a power loss `p` is either whole or absent.
-fn write_durable(p: &Path, data: &[u8]) -> std::io::Result<()> {
+/// `data` → `p` through `<p>.tmp` + rename, flushed: after a crash `p` is the old file or the new one, never half.
+pub(crate) fn write_durable(p: &Path, data: &[u8]) -> std::io::Result<()> {
     use std::io::Write;
-    let tmp = p.with_extension("tmp");
+    let mut tmp = p.as_os_str().to_owned();
+    tmp.push(".tmp");
     let mut f = File::create(&tmp)?;
     f.write_all(data)?;
     f.sync_all()?;
@@ -199,7 +195,7 @@ fn load(root: &Path, name: &str, version: &str) -> Result<Manifest, String> {
 /// `version` of image `from` → v1 of the new image `to`: only the manifest is copied, the data is shared (gc keeps a
 /// file / chunk while any manifest of any image names it).
 pub fn clone_to(from: &str, version: &str, to: &str, label: &str) -> Result<(), String> {
-    clone_at(&storage(), from, version, to, label)
+    clone_at(&storage_dir(), from, version, to, label)
 }
 
 fn clone_at(root: &Path, from: &str, version: &str, to: &str, label: &str) -> Result<(), String> {
@@ -221,7 +217,7 @@ fn clone_at(root: &Path, from: &str, version: &str, to: &str, label: &str) -> Re
 /// Can `version` be restored? Its file (or every chunk) is there with the right length. → the bytes a restore must
 /// write (0 for a file version: a hard link). Checked BEFORE anything served is touched.
 pub fn check(name: &str, version: &str) -> Result<u64, String> {
-    check_at(&storage(), name, version)
+    check_at(&storage_dir(), name, version)
 }
 
 fn check_at(root: &Path, name: &str, version: &str) -> Result<u64, String> {
@@ -254,12 +250,12 @@ fn check_at(root: &Path, name: &str, version: &str) -> Result<u64, String> {
 
 /// Make image.img equal to `version` (a new image cloned from a version).
 pub fn rehydrate(name: &str, version: &str) -> Result<(), String> {
-    rehydrate_at(&storage(), &image_path(name), name, version)
+    rehydrate_at(&storage_dir(), &image_path(name), name, version)
 }
 
 /// `version` → `dst` (a new file: rollback renames it over image.img, export reads it).
 pub fn rehydrate_to(name: &str, version: &str, dst: &Path) -> Result<(), String> {
-    rehydrate_at(&storage(), dst, name, version)
+    rehydrate_at(&storage_dir(), dst, name, version)
 }
 
 fn rehydrate_at(root: &Path, dst: &Path, name: &str, version: &str) -> Result<(), String> {
@@ -269,7 +265,7 @@ fn rehydrate_at(root: &Path, dst: &Path, name: &str, version: &str) -> Result<()
         // The version's file itself again (hard link), or a copy of its data on another filesystem.
         let src = root.join(file);
         if std::fs::hard_link(&src, dst).is_err() {
-            copy_sparse(&src, dst)?;
+            crate::disk::copy_region(&src, 0, None, dst)?;
         }
         return Ok(());
     }
@@ -292,27 +288,9 @@ fn rehydrate_at(root: &Path, dst: &Path, name: &str, version: &str) -> Result<()
     f.sync_all().map_err(e("sync image"))
 }
 
-/// `src` → new file `dst`, data ranges only (holes stay holes), flushed.
-pub(crate) fn copy_sparse(src: &Path, dst: &Path) -> Result<(), String> {
-    let s = crate::disk::Source::file(src)?;
-    let out = File::create(dst).map_err(e(&dst.display().to_string()))?;
-    out.set_len(s.len).map_err(e("size copy"))?;
-    let mut buf = vec![0u8; 8 << 20];
-    for (a, b) in s.data_ranges() {
-        let mut at = a;
-        while at < b {
-            let n = ((b - at) as usize).min(buf.len());
-            s.read_at(at, &mut buf[..n])?;
-            out.write_all_at(&buf[..n], at).map_err(e("write copy"))?;
-            at += n as u64;
-        }
-    }
-    out.sync_all().map_err(e("sync copy"))
-}
-
 /// Delete a version, then free the files / chunks no manifest names anymore. Returns how many were freed.
 pub fn delete(name: &str, version: &str) -> Result<usize, String> {
-    delete_at(&storage(), name, version)
+    delete_at(&storage_dir(), name, version)
 }
 
 fn delete_at(root: &Path, name: &str, version: &str) -> Result<usize, String> {
@@ -328,7 +306,7 @@ fn delete_at(root: &Path, name: &str, version: &str) -> Result<usize, String> {
 
 /// Drop every version of an image (image deleted), then collect garbage.
 pub fn delete_all(name: &str) -> Result<usize, String> {
-    let root = storage();
+    let root = storage_dir();
     let _ = std::fs::remove_dir_all(manifest_dir(&root, name));
     gc(&root)
 }
@@ -349,7 +327,7 @@ fn gc(root: &Path) -> Result<usize, String> {
             .flatten()
             .flatten()
         {
-            // Only manifests (a leftover vN.tmp of an interrupted write is not one); an unreadable manifest still
+            // Only manifests (a leftover vN.json.tmp of an interrupted write is not one); an unreadable manifest still
             // stops gc — what it names may be in use.
             if mf.path().extension().is_none_or(|x| x != "json") {
                 continue;

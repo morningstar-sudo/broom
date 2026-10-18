@@ -138,14 +138,8 @@ impl Overlay {
         }
         v.sort_unstable();
         let bytes: Vec<u8> = v.iter().flat_map(|b| b.to_le_bytes()).collect();
-        let tmp = self.list.with_extension("tmp");
-        let w = || -> std::io::Result<()> {
-            let mut f = File::create(&tmp)?;
-            std::io::Write::write_all(&mut f, &bytes)?;
-            f.sync_all()?;
-            std::fs::rename(&tmp, &self.list)
-        };
-        w().map_err(|e| format!("{}: {e}", self.list.display()))?;
+        crate::versions::write_durable(&self.list, &bytes)
+            .map_err(|e| format!("{}: {e}", self.list.display()))?;
         *saved = v.len();
         Ok(())
     }

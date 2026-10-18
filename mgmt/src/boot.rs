@@ -31,17 +31,10 @@ pub(crate) fn sb_ipxe_efi() -> &'static [u8] {
 
 type Q = Query<HashMap<String, String>>;
 
-fn norm_mac(m: &str) -> String {
-    m.to_lowercase().replace('-', ":")
-}
-
 /// mac + ip from the query, validated: these endpoints are open to anyone and both values go into the log, so
 /// anything that is not a MAC / an IPv4 address (e.g. a URL-encoded newline forging a log line) is dropped.
 fn client_ids(q: &HashMap<String, String>) -> (String, String) {
-    let mac = q
-        .get("mac")
-        .map(|m| norm_mac(m))
-        .filter(|m| m.len() == 17 && m.chars().all(|c| c.is_ascii_hexdigit() || c == ':'));
+    let mac = q.get("mac").and_then(|m| crate::devices::norm_mac(m));
     let ip = q
         .get("ip")
         .and_then(|i| i.parse::<std::net::Ipv4Addr>().ok())
@@ -56,11 +49,7 @@ fn client(st: &SharedState, q: &HashMap<String, String>) -> (String, String, Opt
     let m = if mac.is_empty() {
         None
     } else {
-        st.db
-            .machines()
-            .unwrap_or_default()
-            .into_iter()
-            .find(|m| norm_mac(&m.mac) == mac)
+        crate::machines::by_mac(st, &mac).ok().flatten()
     };
     (mac, ip, m)
 }
@@ -84,12 +73,7 @@ pub async fn render(State(st): State<SharedState>, Query(q): Q) -> impl IntoResp
     );
 
     // Clamp: menu_script does timeout_s * 1000 (would overflow / panic on a huge stored value).
-    let timeout_s: u64 = st
-        .db
-        .get_config("boot_timeout", "3")
-        .parse()
-        .unwrap_or(10)
-        .min(3600);
+    let timeout_s = crate::db::num(&*st.db, "boot_timeout", 3u64).min(3600);
     let images = menu_images(st.db.images().unwrap_or_default(), m.as_ref());
     script(menu_script(
         &images,

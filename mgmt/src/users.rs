@@ -8,7 +8,7 @@ use axum::{
 use serde::Deserialize;
 
 use crate::SharedState;
-use crate::api::{ApiError, bad, ise, ok};
+use crate::api::{ApiError, bad, ok};
 use crate::auth::{Role, User, Who, name_ok, new_user, users, with_password};
 
 pub fn routes() -> Router<SharedState> {
@@ -57,13 +57,7 @@ async fn set(
     let phc = if b.password.is_empty() {
         None
     } else {
-        let pw = b.password.clone();
-        Some(
-            tokio::task::spawn_blocking(move || crate::auth::hash_password(&pw))
-                .await
-                .map_err(ise)?
-                .map_err(ise)?,
-        )
+        Some(crate::auth::hash_blocking(b.password.clone()).await?)
     };
     // As one step: the "an owner is left" rule holds even when two owners edit at once.
     let added = crate::auth::edit_users(&st, |all| {

@@ -55,18 +55,11 @@ pub(crate) fn hmac_sha256(key: &[u8], msg: &[u8]) -> [u8; 32] {
         .into()
 }
 
-pub(crate) fn hex(b: &[u8]) -> String {
-    b.iter().map(|x| format!("{x:02x}")).collect()
-}
+use crate::auth::hex;
 
+/// 64 hex digits → 32 bytes.
 fn unhex32(h: &str) -> Option<[u8; 32]> {
-    if h.len() != 64 {
-        return None;
-    }
-    let v: Vec<u8> = (0..32)
-        .map(|i| u8::from_str_radix(&h[i * 2..i * 2 + 2], 16).ok())
-        .collect::<Option<_>>()?;
-    v.try_into().ok()
+    blake3::Hash::from_hex(h).ok().map(|h| *h.as_bytes())
 }
 
 /// A machine's agent key (config `agentkey:<mac>`).
@@ -94,16 +87,8 @@ fn store(st: &SharedState, mac: &str, r: &KeyRec) -> Result<(), String> {
 }
 
 fn fresh() -> KeyRec {
-    let k = blake3::hash(
-        format!(
-            "{}{}",
-            crate::auth::random_token(),
-            crate::auth::random_token()
-        )
-        .as_bytes(),
-    );
     KeyRec {
-        key: hex(k.as_bytes()),
+        key: hex(&crate::auth::random32()),
         made: crate::now_secs(),
         delivered: None,
     }
@@ -139,13 +124,7 @@ async fn agent_key(
     let Some(mac) = crate::license::arp_mac(&ip) else {
         return refuse("no ARP entry: not on this LAN".into());
     };
-    let Some(m) = st
-        .db
-        .machines()
-        .map_err(ise)?
-        .into_iter()
-        .find(|m| m.mac.eq_ignore_ascii_case(&mac))
-    else {
+    let Some(m) = crate::machines::by_mac(&st, &mac)? else {
         return refuse(format!("{mac} is not a registered machine"));
     };
     let who = crate::machines::who(&m);

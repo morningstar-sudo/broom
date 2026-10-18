@@ -37,7 +37,7 @@ pub(crate) fn sha256_with(
             buf.resize(PIECE, 0);
             let _ = free_tx.send(buf);
         }
-        Ok(h.finalize().iter().map(|b| format!("{b:02x}")).collect())
+        Ok(crate::auth::hex(&h.finalize()))
     })
 }
 

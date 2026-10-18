@@ -13,7 +13,7 @@ use serde::Deserialize;
 use std::collections::HashMap;
 
 use crate::SharedState;
-use crate::api::{ApiError, ise};
+use crate::api::{ApiError, bad, busy, ise};
 use crate::db::NewImage as NewImageRow;
 
 pub fn routes() -> Router<SharedState> {
@@ -51,10 +51,14 @@ pub fn routes() -> Router<SharedState> {
 
 /// Image name by id, 404 if missing.
 fn name_of(st: &SharedState, id: i64) -> Result<String, ApiError> {
+    image_of(st, id).map(|i| i.name)
+}
+
+/// Image row by id, 404 if missing.
+fn image_of(st: &SharedState, id: i64) -> Result<crate::db::Image, ApiError> {
     st.db
         .image(id)
         .map_err(ise)?
-        .map(|i| i.name)
         .ok_or((StatusCode::NOT_FOUND, format!("image {id} not found")))
 }
 
@@ -101,22 +105,15 @@ async fn create(
     Json(b): Json<NewImage>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     if !valid_name(&b.name) {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            "name: 1-64 letters/digits/_/-".into(),
-        ));
+        return Err(bad("name: 1-64 letters/digits/_/-"));
     }
     if b.os != "linux" && b.os != "windows" {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            "os must be 'linux' or 'windows'".into(),
-        ));
+        return Err(bad("os must be 'linux' or 'windows'"));
     }
     // One folder per image under the binary's directory (on another broom disk: a link to its folder there). Never
     // into an existing image's folder: the row insert below refuses a taken name.
     if st.db.image_by_name(&b.name).map_err(ise)?.is_none() {
-        crate::volumes::create_on(&st, b.volume.as_deref(), "image", &b.name)
-            .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+        crate::volumes::create_on(&st, b.volume.as_deref(), "image", &b.name).map_err(bad)?;
     }
     std::fs::create_dir_all(crate::images_dir().join(&b.name))
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
@@ -132,7 +129,7 @@ async fn create(
             boot_script: b.boot_script.as_deref(),
             cache_mode,
         })
-        .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+        .map_err(bad)?;
     tracing::info!("image {} created ({}, cache {cache_mode})", b.name, b.os);
     Ok(Json(serde_json::json!({"ok": true, "id": id})))
 }
@@ -147,10 +144,7 @@ async fn delete(
         // Check + claim under one lock (as spawn_job): no publish can start while the files go away.
         let mut jobs = st.jobs.lock();
         if jobs.get(&name).is_some_and(|s| s.starts_with('⏳')) {
-            return Err((
-                StatusCode::CONFLICT,
-                format!("image '{name}' has a running job — wait for it to finish"),
-            ));
+            return Err(busy(&name));
         }
         jobs.insert(name.clone(), "⏳ deleting...".into());
     }
@@ -176,12 +170,12 @@ async fn delete(
         Ok(freed)
     })
     .await
-    .map_err(|e| ise(e.to_string()))
+    .map_err(ise)
     .and_then(|r| r);
     st.jobs.lock().remove(&name);
     let freed = res?;
     tracing::info!("image {name} deleted ({freed} version chunks freed)");
-    Ok(Json(serde_json::json!({"ok": true})))
+    Ok(crate::api::ok())
 }
 
 /// Publish an image again (runs publish::run_publish). Used after changing a Linux golden.
@@ -204,10 +198,8 @@ async fn set_boot_script(
     State(st): State<SharedState>,
     Json(b): Json<BootScriptBody>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    st.db
-        .set_boot_script(b.id, &b.boot_script)
-        .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
-    Ok(Json(serde_json::json!({"ok": true})))
+    st.db.set_boot_script(b.id, &b.boot_script).map_err(bad)?;
+    Ok(crate::api::ok())
 }
 
 #[derive(Deserialize)]
@@ -221,7 +213,7 @@ async fn set_default(
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     st.db.set_default_image(b.id).map_err(ise)?;
     tracing::info!("image {} is now the default", name_of(&st, b.id)?);
-    Ok(Json(serde_json::json!({"ok": true})))
+    Ok(crate::api::ok())
 }
 
 #[derive(Deserialize)]
@@ -265,15 +257,11 @@ async fn rollback(
     State(st): State<SharedState>,
     Json(b): Json<VersionBody>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let img = st
-        .db
-        .image(b.id)
-        .map_err(ise)?
-        .ok_or((StatusCode::NOT_FOUND, format!("image {} not found", b.id)))?;
+    let img = image_of(&st, b.id)?;
     let version = b.version;
     spawn_job(&st, img.name.clone(), "rollback", move |st, name, steps| {
         let disk_target = img.os == "linux" && img.cache_mode != "zram";
-        let busy = || {
+        let in_use = || {
             Err::<(), String>(
                 "clients are connected; rolling back replaces the shared disk golden they are reading. \
                  Reboot/close the clients (do it off-hours), or set this image to zram cache."
@@ -283,7 +271,7 @@ async fn rollback(
         // Everything is checked and the version rebuilt into image.img.new BEFORE the served golden or its target is
         // touched: a missing chunk, a full disk or a crash leaves the image exactly as it was.
         if disk_target && crate::publish::image_in_use(st, name) {
-            busy()?;
+            in_use()?;
         }
         let data = {
             let _g = st.versions_lock.lock();
@@ -306,7 +294,7 @@ async fn rollback(
         if disk_target {
             if crate::publish::image_in_use(st, name) {
                 let _ = std::fs::remove_file(&tmp);
-                busy()?;
+                in_use()?;
             }
             crate::publish::drop_all_targets(st, name);
         }
@@ -331,16 +319,9 @@ async fn from_version(
     State(st): State<SharedState>,
     Json(b): Json<FromVersionBody>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let src = st
-        .db
-        .image(b.id)
-        .map_err(ise)?
-        .ok_or((StatusCode::NOT_FOUND, format!("image {} not found", b.id)))?;
+    let src = image_of(&st, b.id)?;
     if !valid_name(&b.name) {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            "name: 1-64 letters/digits/_/-".into(),
-        ));
+        return Err(bad("name: 1-64 letters/digits/_/-"));
     }
     let id = st
         .db
@@ -350,8 +331,8 @@ async fn from_version(
             boot_script: None,
             cache_mode: &src.cache_mode,
         })
-        .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
-    std::fs::create_dir_all(crate::images_dir().join(&b.name)).map_err(|e| ise(e.to_string()))?;
+        .map_err(bad)?;
+    std::fs::create_dir_all(crate::images_dir().join(&b.name)).map_err(ise)?;
     tracing::info!("image {} created from {} {}", b.name, src.name, b.version);
     let version = b.version;
     spawn_job(&st, b.name, "from-version", move |st, name, steps| {
@@ -400,11 +381,7 @@ async fn export(
     State(st): State<SharedState>,
     Json(b): Json<ExportBody>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let img = st
-        .db
-        .image(b.id)
-        .map_err(ise)?
-        .ok_or((StatusCode::NOT_FOUND, format!("image {} not found", b.id)))?;
+    let img = image_of(&st, b.id)?;
     spawn_job(&st, img.name, "export", move |st, name, steps| {
         crate::export::run_export(st, name, &img.os, b.version.as_deref(), steps)
     })?;
@@ -420,12 +397,12 @@ async fn export_file(
     let id: i64 = q
         .get("id")
         .and_then(|s| s.parse().ok())
-        .ok_or((StatusCode::BAD_REQUEST, "missing ?id=".to_string()))?;
+        .ok_or(bad("missing ?id="))?;
     let f = q
         .get("f")
         .map(String::as_str)
         .filter(|f| matches!(*f, "vmx" | "vmdk"))
-        .ok_or((StatusCode::BAD_REQUEST, "f must be vmx or vmdk".to_string()))?;
+        .ok_or(bad("f must be vmx or vmdk"))?;
     let name = name_of(&st, id)?;
     let file = format!("{name}.{f}"); // name is [A-Za-z0-9_-] (valid_name) → safe in the path + header
     let p = crate::export::export_dir(&name).join(&file);
@@ -438,7 +415,7 @@ async fn export_file(
     let mut res = tower_http::services::ServeFile::new(p)
         .try_call(req)
         .await
-        .map_err(|e| ise(e.to_string()))?
+        .map_err(ise)?
         .map(Body::new);
     if let Ok(v) = header::HeaderValue::from_str(&format!("attachment; filename=\"{file}\"")) {
         res.headers_mut().insert(header::CONTENT_DISPOSITION, v);
@@ -454,16 +431,12 @@ async fn snapshots(
     let id: i64 = q
         .get("id")
         .and_then(|s| s.parse().ok())
-        .ok_or((StatusCode::BAD_REQUEST, "missing ?id=".to_string()))?;
-    let img = st
-        .db
-        .image(id)
-        .map_err(ise)?
-        .ok_or((StatusCode::NOT_FOUND, format!("image {id} not found")))?;
+        .ok_or(bad("missing ?id="))?;
+    let img = image_of(&st, id)?;
     let active = img.active_version.clone();
     let versions = tokio::task::spawn_blocking(move || crate::versions::list(&img.name))
         .await
-        .map_err(|e| ise(e.to_string()))?;
+        .map_err(ise)?;
     Ok(Json(
         serde_json::json!({"active": active, "versions": versions}),
     ))
@@ -474,24 +447,9 @@ async fn version_delete(
     State(st): State<SharedState>,
     Json(b): Json<VersionBody>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let img = st
-        .db
-        .image(b.id)
-        .map_err(ise)?
-        .ok_or((StatusCode::NOT_FOUND, format!("image {} not found", b.id)))?;
-    if st
-        .jobs
-        .lock()
-        .get(&img.name)
-        .is_some_and(|s| s.starts_with('⏳'))
-    {
-        return Err((
-            StatusCode::CONFLICT,
-            format!(
-                "image '{}' has a running job — wait for it to finish",
-                img.name
-            ),
-        ));
+    let img = image_of(&st, b.id)?;
+    if st.job_running(&img.name) {
+        return Err(busy(&img.name));
     }
     let (name, version, st2) = (img.name.clone(), b.version.clone(), st.clone());
     let freed = tokio::task::spawn_blocking(move || {
@@ -499,8 +457,8 @@ async fn version_delete(
         crate::versions::delete(&name, &version)
     })
     .await
-    .map_err(|e| ise(e.to_string()))?
-    .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+    .map_err(ise)?
+    .map_err(bad)?;
     if img.active_version.as_deref() == Some(b.version.as_str()) {
         let _ = st.db.set_active_version(img.id, None);
     }
@@ -534,27 +492,15 @@ struct UploadName {
 /// Check the image can take an upload now: exists (it has the os) + no job running on it.
 fn upload_ready(st: &SharedState, name: &str) -> Result<(), ApiError> {
     if !valid_name(name) {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            "name: 1-64 letters/digits/_/-".into(),
-        ));
+        return Err(bad("name: 1-64 letters/digits/_/-"));
     }
     if st.db.image_by_name(name).map_err(ise)?.is_none() {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            "create the image first (POST /api/images), then upload".into(),
+        return Err(bad(
+            "create the image first (POST /api/images), then upload",
         ));
     }
-    if st
-        .jobs
-        .lock()
-        .get(name)
-        .is_some_and(|s| s.starts_with('⏳'))
-    {
-        return Err((
-            StatusCode::CONFLICT,
-            format!("image '{name}' has a running job — wait for it to finish"),
-        ));
+    if st.job_running(name) {
+        return Err(busy(name));
     }
     Ok(())
 }
@@ -567,11 +513,9 @@ async fn upload_start(
     upload_ready(&st, &b.name)?;
     let dir = upload_dir(&b.name);
     let _ = tokio::fs::remove_dir_all(&dir).await;
-    tokio::fs::create_dir_all(&dir)
-        .await
-        .map_err(|e| ise(e.to_string()))?;
+    tokio::fs::create_dir_all(&dir).await.map_err(ise)?;
     tracing::info!("image {}: upload started", b.name);
-    Ok(Json(serde_json::json!({"ok": true})))
+    Ok(crate::api::ok())
 }
 
 #[derive(Deserialize)]
@@ -591,19 +535,11 @@ async fn upload_chunk(
 ) -> Result<Json<serde_json::Value>, ApiError> {
     // Don't accept new chunks for an image whose publish/rollback job is running: the staging upload it feeds
     // would be consumed by the wrong job. Cheap in-memory check (no DB hit per chunk).
-    if st
-        .jobs
-        .lock()
-        .get(&q.name)
-        .is_some_and(|s| s.starts_with('⏳'))
-    {
-        return Err((
-            StatusCode::CONFLICT,
-            "image has a running job — wait for it to finish".into(),
-        ));
+    if st.job_running(&q.name) {
+        return Err(busy(&q.name));
     }
     if !valid_name(&q.name) {
-        return Err((StatusCode::BAD_REQUEST, "bad image name".into()));
+        return Err(bad("bad image name"));
     }
     write_chunk(
         upload_dir(&q.name),
@@ -614,7 +550,7 @@ async fn upload_chunk(
         body,
     )
     .await?;
-    Ok(Json(serde_json::json!({"ok": true})))
+    Ok(crate::api::ok())
 }
 
 /// A single uploaded file (vmdk/img/zip) can't exceed this — matches the golden size cap.
@@ -631,13 +567,10 @@ pub(crate) async fn write_chunk(
     body: Body,
 ) -> Result<(), ApiError> {
     if !valid_file(file) {
-        return Err((StatusCode::BAD_REQUEST, "bad file name".into()));
+        return Err(bad("bad file name"));
     }
     if total > max {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            format!("file too large ({total} > {max} bytes)"),
-        ));
+        return Err(bad(format!("file too large ({total} > {max} bytes)")));
     }
     let data = axum::body::to_bytes(body, CHUNK_MAX)
         .await
@@ -646,16 +579,10 @@ pub(crate) async fn write_chunk(
         .checked_add(data.len() as u64)
         .is_none_or(|end| end > total)
     {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            "chunk goes past the end of the file".into(),
-        ));
+        return Err(bad("chunk goes past the end of the file"));
     }
     if !dir.is_dir() {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            "no upload in progress (upload-start first)".into(),
-        ));
+        return Err(bad("no upload in progress (upload-start first)"));
     }
     let path = dir.join(file);
     tokio::task::spawn_blocking(move || -> std::io::Result<()> {
@@ -678,8 +605,8 @@ pub(crate) async fn write_chunk(
         Ok(())
     })
     .await
-    .map_err(|e| ise(e.to_string()))?
-    .map_err(|e| ise(e.to_string()))
+    .map_err(ise)?
+    .map_err(ise)
 }
 
 /// POST /api/images/upload-done {name} — convert (→ raw) + publish in the BACKGROUND; the web polls /api/images/job.
@@ -692,13 +619,13 @@ async fn upload_done(
     let (mut n, mut size) = (0, 0u64);
     let mut rd = tokio::fs::read_dir(&dir)
         .await
-        .map_err(|_| (StatusCode::BAD_REQUEST, "no upload in progress".to_string()))?;
+        .map_err(|_| bad("no upload in progress"))?;
     while let Ok(Some(e)) = rd.next_entry().await {
         n += 1;
         size += e.metadata().await.map(|m| m.len()).unwrap_or(0);
     }
     if n == 0 {
-        return Err((StatusCode::BAD_REQUEST, "upload is empty".into()));
+        return Err(bad("upload is empty"));
     }
     tracing::info!(
         "image {}: upload done ({n} files, {:.1} GB) → converting + publishing",
@@ -781,10 +708,7 @@ where
     {
         let mut jobs = st.jobs.lock();
         if jobs.get(&name).is_some_and(|s| s.starts_with('⏳')) {
-            return Err((
-                StatusCode::CONFLICT,
-                format!("image '{name}' already has a running job — wait for it to finish"),
-            ));
+            return Err(busy(&name));
         }
         jobs.insert(name.clone(), "⏳ starting...".into()); // check + claim under one lock
     }
@@ -849,7 +773,7 @@ async fn set_cache_mode(
     Json(b): Json<CacheModeBody>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     if b.mode != "disk" && b.mode != "zram" {
-        return Err((StatusCode::BAD_REQUEST, "mode must be disk|zram".into()));
+        return Err(bad("mode must be disk|zram"));
     }
     let name = name_of(&st, b.id)?;
     // Changed INSIDE the job, then republished in the background so backing/target follow it (zram dd of the img can
@@ -880,7 +804,7 @@ async fn broom_prep(State(st): State<SharedState>) -> impl IntoResponse {
 }
 
 #[derive(Deserialize)]
-struct BaseModeBody {
+struct OnOff {
     id: i64,
     on: bool,
 }
@@ -889,7 +813,7 @@ struct BaseModeBody {
 /// apps, then restarts) instead of committing base at once. Read by /boot/start → no republish needed.
 async fn set_base_mode(
     State(st): State<SharedState>,
-    Json(b): Json<BaseModeBody>,
+    Json(b): Json<OnOff>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let name = name_of(&st, b.id)?;
     st.db.set_base_mode(b.id, b.on).map_err(ise)?;
@@ -901,7 +825,7 @@ async fn set_base_mode(
             "off"
         }
     );
-    Ok(Json(serde_json::json!({"ok": true})))
+    Ok(crate::api::ok())
 }
 
 /// GET /api/cache-list (public: Windows stage + Linux cache script, every boot) → "name hash" per image the machine at
@@ -944,8 +868,7 @@ async fn set_groups(
     Json(b): Json<GroupsBody>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let name = name_of(&st, b.id)?;
-    let groups =
-        crate::machines::clean_groups(&b.groups).map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+    let groups = crate::machines::clean_groups(&b.groups).map_err(bad)?;
     st.db.set_image_groups(b.id, &groups).map_err(ise)?;
     tracing::info!(
         "image {name}: for {}",
@@ -955,7 +878,7 @@ async fn set_groups(
             format!("groups {}", groups.join(", "))
         }
     );
-    Ok(Json(serde_json::json!({"ok": true})))
+    Ok(crate::api::ok())
 }
 
 /// POST /api/images/preload {id, on} — Windows: machines that may boot it fetch it onto their SSD ahead of use (the
@@ -963,29 +886,18 @@ async fn set_groups(
 /// network at once and copies itself onto the SSD in the background.
 async fn set_preload(
     State(st): State<SharedState>,
-    Json(b): Json<BaseModeBody>,
+    Json(b): Json<OnOff>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let img = st
-        .db
-        .image(b.id)
-        .map_err(ise)?
-        .ok_or((StatusCode::NOT_FOUND, format!("image {} not found", b.id)))?;
+    let img = image_of(&st, b.id)?;
     if img.os != "windows" {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            "preload is for Windows images (Linux boots over the network at once)".into(),
+        return Err(bad(
+            "preload is for Windows images (Linux boots over the network at once)",
         ));
     }
     let name = img.name;
     st.db.set_preload(b.id, b.on).map_err(ise)?;
     tracing::info!("image {name}: preload {}", if b.on { "on" } else { "off" });
-    Ok(Json(serde_json::json!({"ok": true})))
-}
-
-#[derive(Deserialize)]
-struct SsdBody {
-    id: i64,
-    on: bool,
+    Ok(crate::api::ok())
 }
 
 /// POST /api/images/ssd {id, on} — Linux: cache the golden + keep the session's writes on the machine's SSD (on), or
@@ -993,17 +905,12 @@ struct SsdBody {
 /// on. Read by /boot/start → no republish needed.
 async fn set_use_ssd(
     State(st): State<SharedState>,
-    Json(b): Json<SsdBody>,
+    Json(b): Json<OnOff>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let img = st
-        .db
-        .image(b.id)
-        .map_err(ise)?
-        .ok_or((StatusCode::NOT_FOUND, format!("image {} not found", b.id)))?;
+    let img = image_of(&st, b.id)?;
     if img.os == "windows" && !b.on {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            "Windows images always use the SSD (they boot from a VHDX on it)".into(),
+        return Err(bad(
+            "Windows images always use the SSD (they boot from a VHDX on it)",
         ));
     }
     // A boot script from before the switch existed doesn't pass it to the client, which would keep using the SSD.
@@ -1030,7 +937,7 @@ async fn set_use_ssd(
             "off (SSD untouched, RAM only)"
         }
     );
-    Ok(Json(serde_json::json!({"ok": true})))
+    Ok(crate::api::ok())
 }
 
 /// Script that prepares a Windows golden (tweaks + EFI + unattend + sysprep), run INSIDE the Windows VM.

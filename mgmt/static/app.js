@@ -625,8 +625,7 @@ async function loadGames(){const [g]=await Promise.all([j('/api/games'),loadVols
       <td data-owner><button class="btn btn-sm btn-outline-secondary" ${act('toggleGamesRam',d.name,!d.ram)} title="RAM: the disk is served from a copy in the server's RAM (loaded in the background; needs about as much free RAM as the data on it — games barely compress). Disk: read from its file (the page cache keeps what is read most).">${d.ram?(s&&s.ram?'Cache: RAM':(s&&s.ram_loading?'Cache: RAM (loading…)':'Cache: RAM (not loaded)')):'Cache: disk'}</button> <button class="btn btn-sm btn-outline-secondary" ${act('editGames',d.name)}>Edit</button> <button class="btn btn-sm btn-outline-danger" ${act('delGames',d.name)}>Delete</button></td></tr>`;}).join('')
     ||'<tr><td colspan="10" class="mono">no iSCSI disk yet</td></tr>';
   const m=document.getElementById('gm_msg');if(m&&g.error)say(m,' ✗ not served: '+g.error);}
-async function gamesCall(url,body,q){if(q&&!await sure(q))return;const m=document.getElementById('gm_msg');
-  try{const r=await j(url,mk(body));say(m,' ✓ '+(r.status||'saved'));}catch(e){say(m,' ✗ '+e.message);}loadGames();}
+async function gamesCall(url,body,q){if(q&&!await sure(q))return;await post(url,body,'gm_msg',r=>r.status||'saved',loadGames);}
 const saveGames=()=>gamesCall('/api/games/disk',{name:v('gm_name'),letter:v('gm_letter'),size_gb:+v('gm_size'),groups:[v('gm_groups')],volume:v('gm_vol')||null});
 const setGamesUpdate=(name,el)=>gamesCall('/api/games/update',{name,id:el.value?+el.value:null});
 const toggleGamesRam=(name,ram)=>gamesCall('/api/games/cache',{name,ram},ram?'Serve iSCSI disk '+name+' from RAM? It is loaded in the background (served from the disk meanwhile) and needs about as much free RAM as the data on it; not enough RAM → it stays on the disk (see the log).':null);
@@ -670,8 +669,7 @@ async function saveGroup(){const m=document.getElementById('gr_emsg');
       try{await j('/api/groups/set',mk({...body,allow_all:true}));say(m,' ✓ saved');}catch(e2){say(m,' ✗ '+e2.message);}}
     else say(m,' ✗ '+e.message);}
   loadGroups();}
-async function grCall(url,body,el){const m=document.getElementById(el||'gr_msg');
-  try{await j(url,mk(body));say(m,' ✓ done');}catch(e){say(m,' ✗ '+e.message);}loadGroups();}
+const grCall=(url,body,el)=>post(url,body,el||'gr_msg','done',loadGroups);
 const createGroup=()=>{const n=v('gr_new');if(n)grCall('/api/groups/create',{name:n}).then(()=>{document.getElementById('gr_new').value='';});};
 async function renameGroup(n){const to=await ask('Rename group '+n,'New name (an existing name merges the two):',n);
   if(to&&to!==n){if(grCur===n)grCur=to.trim();grCall('/api/groups/rename',{from:n,to});}}
@@ -710,8 +708,7 @@ async function loadUsers(){if(!me.role)await loadMe();
   tb.innerHTML=u.map(x=>`<tr><td class="mono">${esc(x.name)}${x.name===me.user?' <span class="badge text-bg-secondary">you</span>':''}</td>
     <td><select class="form-select form-select-sm w-auto" data-change="userRole" data-args="${esc(JSON.stringify([x.name]))}">${['owner','staff'].map(r=>`<option${r===x.role?' selected':''}>${r}</option>`).join('')}</select></td>
     <td><div class="d-flex gap-1"><button class="btn btn-sm btn-outline-secondary" ${act('userPw',x.name,x.role)}>New password</button>${x.name===me.user?'':` <button class="btn btn-sm btn-outline-danger" ${act('userDel',x.name)}>Delete</button>`}</div></td></tr>`).join('');}
-async function userCall(url,body,done){const m=document.getElementById('us_msg');
-  try{await j(url,mk(body));say(m,' ✓ '+done);}catch(e){say(m,' ✗ '+e.message);}loadUsers();}
+const userCall=(url,body,done)=>post(url,body,'us_msg',done,loadUsers);
 async function userAdd(){const name=v('us_name').toLowerCase(),p=document.getElementById('us_pw');
   await userCall('/api/users',{name,role:document.getElementById('us_role').value,password:p.value},name+' saved');p.value='';}
 const userRole=(name,el)=>userCall('/api/users',{name,role:el.value},name+' is now '+el.value);
@@ -1099,6 +1096,10 @@ function bSelAll(el){document.querySelectorAll('.b_sel').forEach(x=>x.checked=el
 // ---- helpers ----
 function v(id){return document.getElementById(id).value.trim()}
 function mk(body){return {method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body)}}
+// POST `body`, its outcome in message element `msg` (`ok`: text, or made from the answer), then `reload` the page's list.
+async function post(url,body,msg,ok,reload){const m=document.getElementById(msg);
+  try{const r=await j(url,mk(body));say(m,' ✓ '+(typeof ok==='function'?ok(r):ok));}catch(e){say(m,' ✗ '+e.message);}
+  if(reload)reload();}
 // Non-blocking notification (Bootstrap toast, bottom right); errors stay longer and in red.
 function toast(msg,err){const t=document.getElementById('toast');
   document.getElementById('toast_text').textContent=msg;

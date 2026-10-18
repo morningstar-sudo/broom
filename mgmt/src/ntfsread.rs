@@ -86,15 +86,7 @@ impl Vol {
 
     /// Whole content of a file; None when it doesn't exist (or is a directory).
     pub fn read(&mut self, path: &str) -> Result<Option<Vec<u8>>, String> {
-        let Vol { fs, ntfs } = self;
-        match find(ntfs, fs, path)? {
-            Some(f) if !f.is_directory() => {
-                let mut v = Vec::new();
-                copy_data(&f, fs, &mut v).map_err(|e| format!("{path}: {e}"))?;
-                Ok(Some(v))
-            }
-            _ => Ok(None),
-        }
+        self.head(path, u64::MAX)
     }
 
     /// The first `n` bytes of a file (less when it is shorter); None when it doesn't exist (or is a directory).

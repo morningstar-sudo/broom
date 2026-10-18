@@ -442,13 +442,7 @@ pub(crate) fn resolve(
                 return servfail();
             };
             if m.rcode() == NXDOMAIN {
-                let soa: Vec<Rr> = m.ns.into_iter().filter(|r| r.rtype == T_SOA).collect();
-                let a = Answer {
-                    rcode: NXDOMAIN,
-                    expires: Instant::now() + ttl_of(&soa, true),
-                    an: Vec::new(),
-                    ns: soa,
-                };
+                let a = negative(NXDOMAIN, m.ns);
                 remember(key, &a);
                 return a;
             }
@@ -506,13 +500,7 @@ pub(crate) fn resolve(
             if refs.is_empty() {
                 // Nothing for this type (NODATA), or a lame answer.
                 if m.flags & 0x0400 != 0 || m.ns.iter().any(|r| r.rtype == T_SOA) {
-                    let soa: Vec<Rr> = m.ns.into_iter().filter(|r| r.rtype == T_SOA).collect();
-                    let a = Answer {
-                        rcode: 0,
-                        expires: Instant::now() + ttl_of(&soa, true),
-                        an: Vec::new(),
-                        ns: soa,
-                    };
+                    let a = negative(0, m.ns);
                     remember(key, &a);
                     return a;
                 }
@@ -557,17 +545,22 @@ pub(crate) fn resolve(
     })
 }
 
+/// A negative answer (no such name / no data), with the zone's SOA from the reply's authority records.
+fn negative(rcode: u8, ns: Vec<Rr>) -> Answer {
+    let soa: Vec<Rr> = ns.into_iter().filter(|r| r.rtype == T_SOA).collect();
+    Answer {
+        rcode,
+        expires: Instant::now() + ttl_of(&soa, true),
+        an: Vec::new(),
+        ns: soa,
+    }
+}
+
 /// An answer from a server's reply: its records, the SOA of a negative one, cached for their TTL.
 fn to_answer(m: Msg) -> Answer {
     let rcode = m.rcode();
     if rcode == NXDOMAIN || m.an.is_empty() {
-        let soa: Vec<Rr> = m.ns.into_iter().filter(|r| r.rtype == T_SOA).collect();
-        return Answer {
-            rcode,
-            expires: Instant::now() + ttl_of(&soa, true),
-            an: Vec::new(),
-            ns: soa,
-        };
+        return negative(rcode, m.ns);
     }
     let an: Vec<Rr> = m.an.into_iter().filter(|r| r.rtype != T_OPT).collect();
     Answer {

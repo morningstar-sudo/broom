@@ -4,7 +4,7 @@ use axum::{Json, Router, extract::State, http::StatusCode, routing::post};
 use serde::Deserialize;
 
 use crate::SharedState;
-use crate::api::{ApiError, ise};
+use crate::api::{ApiError, bad, ise};
 use crate::db::Machine;
 
 pub fn routes() -> Router<SharedState> {
@@ -44,11 +44,13 @@ pub(crate) fn who(m: &Machine) -> String {
 /// faked): for choosing what to offer, not for handing out secrets (license.rs is stricter).
 pub(crate) fn machine_at(st: &SharedState, ip: &str) -> Option<Machine> {
     let mac = crate::license::mac_at(st, ip)?;
-    st.db
-        .machines()
-        .ok()?
-        .into_iter()
-        .find(|m| m.mac.eq_ignore_ascii_case(&mac))
+    by_mac(st, &mac).ok().flatten()
+}
+
+/// The registered machine with this MAC (any case).
+pub(crate) fn by_mac(st: &SharedState, mac: &str) -> Result<Option<Machine>, ApiError> {
+    let all = st.db.machines().map_err(ise)?;
+    Ok(all.into_iter().find(|m| m.mac.eq_ignore_ascii_case(mac)))
 }
 
 /// A resource limited to `groups` (empty = every machine, registered or not) is for a machine of group `grp`.
@@ -112,27 +114,19 @@ async fn add(
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     // Same checks as the Devices page: MAC normalized, hostname rule, MAC / hostname / IP unique.
     let mut m = Machine {
-        id: 0,
         mac: b.mac,
         ip: b.ip,
         hostname: b.hostname,
-        image_id: None,
-        license_key: None,
-        license_tail: None,
-        license_state: None,
-        license_gen: 0,
-        license_result: None,
-        grp: None,
-        notes: None,
+        ..Default::default()
     };
     let all = st.db.machines().map_err(ise)?;
-    crate::devices::validate(&mut m, &all).map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+    crate::devices::validate(&mut m, &all).map_err(bad)?;
     crate::devices::ip_free(&m, &st.db.leases().map_err(ise)?, crate::now_secs() as i64)
-        .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+        .map_err(bad)?;
     let id = st
         .db
         .add_machine(&m.mac, m.ip.as_deref(), m.hostname.as_deref())
-        .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+        .map_err(bad)?;
     tracing::info!(
         "machine registered - mac {} - ip {} - hostname {}",
         m.mac,

@@ -42,7 +42,7 @@ fn claims_only_what_data_can_need() {
     f.set_len(GB).unwrap();
     f.write_all_at(&[1u8; 8192], 0).unwrap();
     f.write_all_at(&[2u8; 100], 512 << 20).unwrap();
-    let blocks = data_blocks(&f, GB);
+    let blocks = data_blocks(p.to_str().unwrap());
     assert!(
         (2..=4).contains(&blocks),
         "{blocks} blocks (fs block size may round extents up)"
