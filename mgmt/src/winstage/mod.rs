@@ -22,6 +22,7 @@ use prep::{
     boot_storage_done, broom_bootorder, broom_done, broom_fw_cs, broom_games, broom_vnc_cs,
     broom_watch, has_stub,
 };
+pub(crate) use stage::STAGE_PIN; // `bootrom-mgmt pins`
 #[cfg(feature = "external-assets")]
 pub(crate) use stage::download;
 pub use stage::{build_bundle, ensure_stage}; // assets.rs: the release's broom-assets.zip

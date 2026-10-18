@@ -40,3 +40,24 @@ fn pack_and_unzip() {
     // Local build: none shipped.
     assert_eq!(optional("scripts/broom-fw.dll"), None);
 }
+
+/// CI's pins appended to the release binary: found at its very end, a malformed line or a binary without them = none.
+#[test]
+fn pins_appended_to_the_binary() {
+    let (a, s) = ("a".repeat(64), "b".repeat(64));
+    let mut bin = b"\x7fELF...code \n#broom-pins\n(a string in the code)".to_vec();
+    bin.extend_from_slice(
+        format!("\n#broom-pins\nstage {s} https://x/broom-stage.tar.gz\nassets {a} https://x/broom-assets.zip\nbad line\n")
+            .as_bytes(),
+    );
+    let p = parse_trailer(&bin);
+    assert_eq!(p.len(), 2, "only the last trailer, only well-formed lines");
+    assert_eq!(p["stage"], format!("{s}\nhttps://x/broom-stage.tar.gz"));
+    assert_eq!(
+        parse_pin(&p["assets"]),
+        Some((a.as_str(), Some("https://x/broom-assets.zip")))
+    );
+    assert!(parse_trailer(b"\x7fELF no pins").is_empty());
+    // The committed pin files are comments only (a local build) and no trailer in a test binary.
+    assert_eq!(parse_pin(pin("assets", PIN)), None);
+}

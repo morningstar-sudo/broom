@@ -478,13 +478,15 @@ into `mgmt/ipxe/ipxe-src/` and builds `snponly.efi`, which is embedded in the bi
 Neither is committed. To change iPXE: commit inside `ipxe-src/`, regenerate the patches (command at the top of
 `mgmt/ipxe/build.sh`), rebuild.
 
-CI (`.github/workflows/build.yml`) runs `./build.sh --ipxe` on every push / PR, compiles `broom-fw.dll` and the
+CI (`.github/workflows/build.yml`) runs side by side: the debug build + unit tests + clippy (`build.sh --dev`), the
+release binary (static musl, `--features external-assets`: the assets are not inside it), `broom-fw.dll` and the
 `broom-vnc.exe` agent on a Windows runner (.NET Framework `csc`; a local build ships their C# source and the clients
-compile it), builds the Windows stage bundle (`bootrom-mgmt build-stage` on Ubuntu's generic kernel + shim-signed) and
-the assets bundle (`bootrom-mgmt pack-assets`), rebuilds the binary pinned to both (sha256 + URL appended to `mgmt/stage.pin` / `mgmt/assets.pin`,
-embedded in the binary; with a pin, `build.sh` leaves the assets out of it) and publishes `bootrom-mgmt`,
-`broom-stage.tar.gz`, `broom-assets.zip`, `snponly.efi` and `SHA256SUMS`; pushes to `main` are tagged
-with their push time in UTC (e.g. `2026-09-19T17-05-25Z`, also the release title) and released.
+compile it), and — after the tests — the Windows stage bundle (`bootrom-mgmt build-stage` on Ubuntu's generic kernel +
+shim-signed, cached while its inputs stay the same). Last, it packs the assets bundle (`bootrom-mgmt pack-assets`),
+appends both bundles' sha256 + URL to the release binary (a `#broom-pins` trailer it reads from its own tail;
+`bootrom-mgmt pins` prints them) and publishes `bootrom-mgmt`, `broom-stage.tar.gz`, `broom-assets.zip`, `snponly.efi`
+and `SHA256SUMS`; pushes to `main` are tagged with their push time in UTC (e.g. `2026-09-19T17-05-25Z`, also the release
+title) and released.
 
 ## Repository layout
 

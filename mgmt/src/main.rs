@@ -400,6 +400,7 @@ async fn main() {
         Some("build-stage") => winstage::build_bundle(&args), // CI: the Windows stage bundle
         Some("iscsid") => iscsid::run(&args).await, // the iSCSI target daemon (started by iscsi.rs)
         Some("pack-assets") => assets::pack(&args), // CI: broom-assets.zip for the release binary
+        Some("pins") => assets::print_pins(),       // CI: the bundle pins this binary reads
         _ => {}
     }
 

@@ -180,7 +180,7 @@ fn sources_list(stage_img: &str, kv: &str, shim: &str) -> Result<String, String>
 /// The stage bundle this binary belongs to (mgmt/stage.pin, filled by CI from `build-stage`: sha256, then the Release
 /// URL): kernel + initrd + Ubuntu shim built on the CI runner, so the server needs none of the tools above and its
 /// own kernel does not matter. Comments only (local builds) → a broom-stage.tar.gz copied next to the binary is used.
-const STAGE_PIN: &str = include_str!("../../stage.pin");
+pub(crate) const STAGE_PIN: &str = include_str!("../../stage.pin");
 /// Largest bundle accepted for download (kernel + initrd + shim are ~100 MB).
 const STAGE_MAX: u64 = 1 << 30;
 
@@ -197,7 +197,7 @@ fn parse_pin(pin: &str) -> Option<(&str, Option<&str>)> {
 }
 
 pub fn stage_pinned() -> Option<&'static str> {
-    parse_pin(STAGE_PIN).map(|(sha, _)| sha)
+    parse_pin(crate::assets::pin("stage", STAGE_PIN)).map(|(sha, _)| sha)
 }
 
 /// Make sure stage_dir() holds the stage — always from a bundle, never built on the server (no packages there):
@@ -235,12 +235,14 @@ pub fn ensure_stage() -> Result<String, String> {
             "installed from broom-stage.tar.gz next to the binary".to_string()
         })
     } else {
-        let url = parse_pin(STAGE_PIN).and_then(|(_, u)| u).ok_or_else(|| {
-            format!(
-                "this binary has no stage URL — copy its broom-stage.tar.gz to {}",
-                local.display()
-            )
-        })?;
+        let url = parse_pin(crate::assets::pin("stage", STAGE_PIN))
+            .and_then(|(_, u)| u)
+            .ok_or_else(|| {
+                format!(
+                    "this binary has no stage URL — copy its broom-stage.tar.gz to {}",
+                    local.display()
+                )
+            })?;
         let dl = crate::work_dir().join(format!("broom-stage-{}.tar.gz", unique()));
         std::fs::create_dir_all(crate::work_dir()).map_err(|e| e.to_string())?;
         tracing::info!("downloading the Windows stage: {url}");

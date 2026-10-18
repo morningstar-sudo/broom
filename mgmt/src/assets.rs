@@ -66,9 +66,48 @@ pub fn optional(name: &str) -> Option<&'static [u8]> {
     LOADED.get().and_then(|m| m.get(name).copied())
 }
 
-/// broom-assets.zip of this release: sha256, then its URL (CI). Comments only = local build (embedded assets).
+/// broom-assets.zip of this release: sha256, then its URL. Comments only = local build (embedded assets). CI appends the
+/// release's pins to the built binary instead (pin()).
 #[cfg_attr(not(feature = "external-assets"), allow(dead_code))]
 const PIN: &str = include_str!("../assets.pin");
+
+const TRAILER: &[u8] = b"\n#broom-pins\n";
+
+/// Pins appended by CI to the release binary after it is built, so the binary compiles while the bundles are made: the
+/// file ends with "\n#broom-pins\n" and one "<name> <sha256> <url>" line per bundle → name → "sha256\nurl".
+pub(crate) fn parse_trailer(tail: &[u8]) -> HashMap<String, String> {
+    let Some(at) = tail.windows(TRAILER.len()).rposition(|w| w == TRAILER) else {
+        return HashMap::new();
+    };
+    String::from_utf8_lossy(&tail[at + TRAILER.len()..])
+        .lines()
+        .filter_map(|l| {
+            let mut f = l.split_whitespace();
+            let (name, sha, url) = (f.next()?, f.next()?, f.next()?);
+            (sha.len() == 64 && sha.chars().all(|c| c.is_ascii_hexdigit()))
+                .then(|| (name.to_string(), format!("{sha}\n{url}")))
+        })
+        .collect()
+}
+
+/// The pin of bundle `name` ("stage" | "assets") as pin-file text: the one appended to this binary, else `embedded`
+/// (its pin file, compiled in). The binary's tail is read once.
+pub fn pin(name: &str, embedded: &'static str) -> &'static str {
+    use std::io::{Read, Seek, SeekFrom};
+    static PINS: OnceLock<HashMap<String, String>> = OnceLock::new();
+    PINS.get_or_init(|| {
+        let mut tail = Vec::new();
+        if let Ok(mut f) = std::fs::File::open("/proc/self/exe") {
+            let _ = f
+                .seek(SeekFrom::End(-4096))
+                .or_else(|_| f.seek(SeekFrom::Start(0)));
+            let _ = f.read_to_end(&mut tail);
+        }
+        parse_trailer(&tail)
+    })
+    .get(name)
+    .map_or(embedded, String::as_str)
+}
 /// Largest download accepted (the assets are ~2 MB).
 #[cfg_attr(not(feature = "external-assets"), allow(dead_code))]
 const MAX: u64 = 64 << 20;
@@ -99,8 +138,8 @@ pub fn init() -> Result<String, String> {
     return Ok("assets embedded (local build)".into());
     #[cfg(feature = "external-assets")]
     {
-        let (want, url) = parse_pin(PIN)
-            .ok_or("release build without assets.pin — CI must write it before building")?;
+        let (want, url) = parse_pin(pin("assets", PIN))
+            .ok_or("release build without an assets pin — CI appends it to the binary")?;
         let local = crate::home().join("broom-assets.zip");
         let mut how = "kept";
         if crate::hash::file_hash(&local.to_string_lossy()).as_deref() != Some(want) {
@@ -168,6 +207,18 @@ fn unzip(data: &[u8]) -> Result<HashMap<String, &'static [u8]>, String> {
         map.insert(name.to_string(), &*Box::leak(v.into_boxed_slice()));
     }
     Ok(map)
+}
+
+/// `bootrom-mgmt pins` (CI, after appending them): the stage / assets sha256 this binary will accept, one per line
+/// ("-" = none). Exits 1 unless both are there.
+pub fn print_pins() -> ! {
+    let mut all = true;
+    for (name, embedded) in [("stage", crate::winstage::STAGE_PIN), ("assets", PIN)] {
+        let sha = parse_pin(pin(name, embedded)).map(|(s, _)| s);
+        all &= sha.is_some();
+        println!("{name} {}", sha.unwrap_or("-"));
+    }
+    std::process::exit(if all { 0 } else { 1 })
 }
 
 /// `bootrom-mgmt pack-assets <file.zip>` (CI, with the local build): every asset into the zip a release binary pins.

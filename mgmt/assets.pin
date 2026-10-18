@@ -1,4 +1,4 @@
-# broom-assets.zip (web UI, iPXE, scripts) this binary belongs to (assets.rs).
-# CI writes two lines here before its release build: the sha256 of broom-assets.zip, then its download URL; build.sh
-# then builds with the `external-assets` feature (those files are no longer inside the binary).
-# Comments only (as committed) = a local build: the assets are embedded.
+# broom-assets.zip (web UI, iPXE, scripts) this binary belongs to (assets.rs): its sha256, then its URL.
+# CI does not write it here: it builds the release binary with the `external-assets` feature (those files not inside)
+# and appends its pins to it ("#broom-pins" trailer, assets.rs pin()). Comments only (as committed) = a local build:
+# the assets are embedded.

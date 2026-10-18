@@ -1,11 +1,12 @@
 # Build iPXE (snponly.efi = upstream at mgmt/ipxe/IPXE_COMMIT + mgmt/ipxe/patches) + a debug mgmt binary (iPXE + web UI +
 # scripts embedded), run the unit tests, build the Windows stage bundle and the assets bundle (web UI, iPXE, scripts) with
-# it, then the release binary (static musl) pinned to both and without the assets inside; keep binary + bundles +
-# snponly.efi as artifacts. Every push to main also tags the commit with its push time (UTC, e.g. 2026-09-19T17-05-25Z) and
-# publishes a release with those files.
-# Jobs: audit, fw (Windows: broom-fw.dll) and build run side by side — build waits for the DLL only at the step that
-# packs it; snponly.efi and the stage bundle are cached while their inputs stay the same. release runs last: checks
-# every file is there and pinned, then publishes.
+# it, and the release binary (static musl, without the assets inside); keep binary + bundles + snponly.efi as artifacts.
+# Every push to main also tags the commit with its push time (UTC, e.g. 2026-09-19T17-05-25Z) and publishes a release
+# with those files.
+# Jobs, side by side: audit; fw (Windows: broom-fw.dll + broom-vnc.exe); test (debug binary, unit tests, clippy);
+# release-bin (the release binary — the longest, so it starts at once: the bundles' pins are appended to it at the
+# end, not compiled in); stage (after test: the Windows stage bundle, cached while its inputs stay the same). package
+# runs last: packs the assets, pins both bundles in the release binary, checks every file, publishes.
 name: build
 
 # Docs, Markdown and screenshots only → no build, no release.
@@ -20,6 +21,9 @@ on:
 concurrency:
   group: build-${{ github.ref }}
   cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
 
 jobs:
   # RustSec advisories for the locked dependencies. Its own job: a new advisory turns the run red without holding back
@@ -37,7 +41,7 @@ jobs:
 
   # broom-fw.cs (UEFI BootOrder access of the Windows clients' boot order task) → broom-fw.dll, with the .NET Framework 4
   # compiler PowerShell 5.1's Add-Type uses: the clients load it instead of compiling the C# themselves. Goes into
-  # broom-assets.zip (build job); a local build ships the source only.
+  # broom-assets.zip (package job); a local build ships the source only.
   fw:
     runs-on: windows-2022
     steps:
@@ -57,18 +61,45 @@ jobs:
             broom-vnc.exe
           if-no-files-found: error
 
-  build:
+  # The release binary: static musl, fat LTO, with the `external-assets` feature (web UI / iPXE / scripts come from the
+  # release's broom-assets.zip) — so it needs neither iPXE nor the bundles to build, and starts with the run. The
+  # bundles' pins are appended to it by the package job.
+  release-bin:
     runs-on: ubuntu-24.04
-    permissions:
-      contents: read
-      actions: read # wait for the fw job's artifact (Assets bundle)
-    outputs:
-      tag: ${{ steps.tag.outputs.name }}
-      title: ${{ steps.tag.outputs.title }}
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/mgmt/target
+    steps:
+      - uses: actions/checkout@v4
+      # musl-gcc for the bundled SQLite C code.
+      - name: musl-tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends musl-tools
+      # rustup reads mgmt/rust-toolchain.toml → latest stable + the musl target.
+      - name: Rust toolchain
+        working-directory: mgmt
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: mgmt -> target
+      - name: Build (release, musl)
+        working-directory: mgmt
+        run: |
+          cargo build --release --target x86_64-unknown-linux-musl --features external-assets
+          cp target/x86_64-unknown-linux-musl/release/bootrom-mgmt bootrom-mgmt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-bin
+          path: mgmt/bootrom-mgmt
+          if-no-files-found: error
+
+  # Debug binary (iPXE + web UI + scripts embedded) + unit tests + clippy. The debug binary makes the bundles (stage,
+  # package jobs).
+  test:
+    runs-on: ubuntu-24.04
     env:
       # build.sh defaults to ~/broom-target; keep it inside the workspace so rust-cache can restore it.
       CARGO_TARGET_DIR: ${{ github.workspace }}/mgmt/target
-      CARGO_TERM_COLOR: always
     steps:
       - uses: actions/checkout@v4
 
@@ -79,12 +110,11 @@ jobs:
       - name: Build dependencies
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq build-essential perl liblzma-dev musl-tools busybox-initramfs qemu-utils
+          sudo apt-get install -y -qq --no-install-recommends build-essential perl liblzma-dev musl-tools busybox-initramfs qemu-utils
           # Integration tests (mgmt/tests/) run the server as root in their own user + network namespaces, which
           # Ubuntu 24.04 blocks for unprivileged users by default.
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
 
-      # rustup reads mgmt/rust-toolchain.toml → latest stable + the musl target.
       - name: Rust toolchain
         working-directory: mgmt
         run: rustup show active-toolchain || rustup toolchain install
@@ -98,20 +128,6 @@ jobs:
         working-directory: mgmt
         run: cargo fmt --check
 
-      # Release tag = the push time, ISO 8601 in UTC with "-" for ":" (git refuses ":" in a tag), e.g. 2026-09-19T17-05-25Z:
-      # the same on a re-run of that push, so a re-run updates its release instead of making another. Manual runs / pull
-      # requests (no release): the build time. The release title is the same.
-      - name: Release tag
-        id: tag
-        env:
-          PUSHED_AT: ${{ github.event.repository.pushed_at }}
-        run: |
-          t=$(date +%s)
-          if [ "$GITHUB_EVENT_NAME" = push ] && [ -n "$PUSHED_AT" ]; then t=$PUSHED_AT; fi
-          name=$(date -u -d "@$t" +%Y-%m-%dT%H-%M-%SZ)
-          echo "name=$name" >> "$GITHUB_OUTPUT"
-          echo "title=$name" >> "$GITHUB_OUTPUT"
-
       # snponly.efi is upstream iPXE at IPXE_COMMIT + patches/, built by ipxe/build.sh: the same inputs give the same
       # file → kept between runs, built only when one of them changes.
       - uses: actions/cache@v4
@@ -123,10 +139,8 @@ jobs:
         if: steps.ipxe.outputs.cache-hit != 'true'
         run: bash mgmt/ipxe/build.sh
 
-      # --dev: this binary only makes the bundles below → a debug build sharing cargo test's dependencies. The release
-      # build (fat LTO, one codegen unit: one core for a minute) runs once, for the shipped binary. snponly.efi touched:
-      # a restored one is older than the checkout, build.sh would rebuild it.
-      # `bash`, not ./build.sh: committed from Windows the script has no exec bit (mode 100644).
+      # --dev: a debug build sharing cargo test's dependencies. snponly.efi touched: a restored one is older than the
+      # checkout, build.sh would rebuild it. `bash`, not ./build.sh: committed from Windows the script has no exec bit.
       - name: Build bootrom-mgmt (debug) + unit tests
         run: |
           touch mgmt/ipxe/snponly.efi
@@ -137,13 +151,27 @@ jobs:
         working-directory: mgmt
         run: cargo clippy --all-targets -- -D warnings
 
-      # The Windows stage (kernel + initrd + shim) is built HERE, on Ubuntu's Canonical-signed generic kernel + its
-      # Microsoft-signed shim: servers then install no packages for it and Secure Boot works whatever kernel they run.
-      # Kept between runs while nothing it is made of changes: the runner image, the versions apt would install, the
-      # stage scripts and the code that builds it. Same bundle = same sha256 → servers don't fetch it again either.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: debug-bin
+          path: |
+            mgmt/dist/bootrom-mgmt
+            mgmt/ipxe/snponly.efi
+          if-no-files-found: error
+
+  # The Windows stage (kernel + initrd + shim) is built HERE, on Ubuntu's Canonical-signed generic kernel + its
+  # Microsoft-signed shim: servers then install no packages for it and Secure Boot works whatever kernel they run.
+  # Kept between runs while nothing it is made of changes: the runner image, the versions apt would install, the stage
+  # scripts and the code that builds it. Same bundle = same sha256 → servers don't fetch it again either.
+  stage:
+    needs: test
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
       - name: Stage inputs
         id: stagekey
         run: |
+          sudo apt-get update -qq
           pkgs="linux-image-generic shim-signed initramfs-tools fdisk ntfs-3g dosfstools efibootmgr wget zstd mawk"
           echo "pkgs=$pkgs" >> "$GITHUB_OUTPUT"
           # + what goes into the initrd from packages already on the runner: busybox (BUSYBOX=y), the tools the hook
@@ -156,74 +184,103 @@ jobs:
         with:
           path: stage-out/broom-stage.tar.gz
           key: ${{ steps.stagekey.outputs.key }}
+      - uses: actions/download-artifact@v4
+        if: steps.stagecache.outputs.cache-hit != 'true'
+        with:
+          name: debug-bin
+          path: debug-bin
       - name: Stage bundle
         if: steps.stagecache.outputs.cache-hit != 'true'
         run: |
-          sudo apt-get install -y -qq ${{ steps.stagekey.outputs.pkgs }}
+          sudo apt-get install -y -qq busybox-initramfs ${{ steps.stagekey.outputs.pkgs }}
           # No CPU microcode in the stage's initrd (~14 MB less to download on every boot): the stage lives a few
           # seconds, and microcode loaded there is gone at its reboot anyway — Windows loads its own.
           echo 'IUCODE_TOOL_INITRAMFS=no' | sudo tee /etc/default/intel-microcode >/dev/null
           echo 'AMD64UCODE_INITRAMFS=no' | sudo tee /etc/default/amd64-microcode >/dev/null
           kv=$(ls /lib/modules | grep -- '-generic$' | sort -V | tail -1)
           mkdir -p "$PWD/stage-out"
-          sudo mgmt/dist/bootrom-mgmt build-stage "$PWD/stage-out" --kernel "$kv"
+          chmod +x debug-bin/dist/bootrom-mgmt
+          sudo debug-bin/dist/bootrom-mgmt build-stage "$PWD/stage-out" --kernel "$kv"
           sudo chown -R "$(id -u):$(id -g)" stage-out
           echo "kernel $kv"
       - name: Stage sha256
-        id: stage
         run: |
-          sha=$(sha256sum stage-out/broom-stage.tar.gz | cut -d' ' -f1)
-          echo "broom-stage.tar.gz sha256 $sha (cached: ${{ steps.stagecache.outputs.cache-hit == 'true' }})"
-          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "broom-stage.tar.gz sha256 $(sha256sum stage-out/broom-stage.tar.gz | cut -d' ' -f1) (cached: ${{ steps.stagecache.outputs.cache-hit == 'true' }})"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: stage
+          path: stage-out/broom-stage.tar.gz
+          if-no-files-found: error
 
-      # broom-fw.dll comes from the fw job running next to this one: waited for only here, where it is needed (an
-      # artifact can be fetched as soon as it is uploaded, before the run ends). That job failing ends this one.
-      - name: Wait for broom-fw.dll
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          api="repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
-          for i in $(seq 90); do
-            n=$(gh api "$api/artifacts" --jq '[.artifacts[] | select(.name == "broom-fw")] | length' || echo 0)
-            [ "$n" -gt 0 ] && exit 0
-            c=$(gh api "$api/attempts/$GITHUB_RUN_ATTEMPT/jobs" --jq '.jobs[] | select(.name == "fw") | .conclusion' || true)
-            case "$c" in failure|cancelled|skipped) echo "fw job: $c" >&2; exit 1;; esac
-            sleep 10
-          done
-          echo "no broom-fw.dll after 15 minutes" >&2; exit 1
+  # Last: the assets bundle, both bundles pinned in the release binary, every file checked — on pull requests too —
+  # then (pushes to main) the release itself. Nothing is published unless all of it holds.
+  package:
+    needs: [fw, release-bin, test, stage]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write # tag + release on pushes to main
+    steps:
       - uses: actions/download-artifact@v4
         with:
-          name: broom-fw
-          path: mgmt/scripts
-
-      # Web UI, iPXE, scripts → broom-assets.zip, packed by the binary that still embeds them (assets.rs keeps the list),
-      # + broom-fw.dll / broom-vnc.exe from the Windows job (assets.rs OPTIONAL: only a release has them). The sha256 is the final zip's.
-      - name: Assets bundle
-        id: assets
+          path: in
+      # Release tag = the push time, ISO 8601 in UTC with "-" for ":" (git refuses ":" in a tag), e.g. 2026-09-19T17-05-25Z:
+      # the same on a re-run of that push, so a re-run updates its release instead of making another. Manual runs / pull
+      # requests (no release): the build time. The release title is the same.
+      - name: Release tag
+        id: tag
+        env:
+          PUSHED_AT: ${{ github.event.repository.pushed_at }}
         run: |
-          mgmt/dist/bootrom-mgmt pack-assets "$PWD/stage-out/broom-assets.zip"
-          (cd mgmt && zip -q -X "$OLDPWD/stage-out/broom-assets.zip" scripts/broom-fw.dll scripts/broom-vnc.exe)
-          sha=$(sha256sum stage-out/broom-assets.zip | cut -d' ' -f1)
-          echo "broom-assets.zip sha256 $sha"
-          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          t=$(date +%s)
+          if [ "$GITHUB_EVENT_NAME" = push ] && [ -n "$PUSHED_AT" ]; then t=$PUSHED_AT; fi
+          echo "name=$(date -u -d "@$t" +%Y-%m-%dT%H-%M-%SZ)" >> "$GITHUB_OUTPUT"
 
-      # The release binary, pinned to both bundles (mgmt/stage.pin + mgmt/assets.pin, embedded at build time) and
-      # without the assets inside (build.sh sees the pin): it downloads them from this release — the assets on its
-      # first start, the stage on the first Windows publish — and accepts nothing else.
+      # Web UI, iPXE, scripts → broom-assets.zip, packed by the debug binary that still embeds them (assets.rs keeps the
+      # list), + broom-fw.dll / broom-vnc.exe from the fw job (assets.rs OPTIONAL: only a release has them).
+      - name: Assets bundle
+        run: |
+          mkdir -p mgmt/dist mgmt/ipxe mgmt/scripts
+          chmod +x in/debug-bin/dist/bootrom-mgmt
+          in/debug-bin/dist/bootrom-mgmt pack-assets "$PWD/mgmt/dist/broom-assets.zip"
+          cp in/broom-fw/broom-fw.dll in/broom-fw/broom-vnc.exe mgmt/scripts/
+          (cd mgmt && zip -q -X dist/broom-assets.zip scripts/broom-fw.dll scripts/broom-vnc.exe)
+          cp in/stage/broom-stage.tar.gz mgmt/dist/
+          cp in/debug-bin/ipxe/snponly.efi mgmt/ipxe/
+
+      # The release binary accepts only these two bundles: their sha256 + URL appended to it (assets.rs pin(): read from
+      # its own tail at start). It downloads them from this release — the assets on its first start, the stage on the
+      # first Windows publish.
       - name: Pin the bundles in the binary
         run: |
-          url="https://github.com/${{ github.repository }}/releases/download/${{ steps.tag.outputs.name }}"
-          printf '%s\n%s\n' "${{ steps.stage.outputs.sha }}" "$url/broom-stage.tar.gz" >> mgmt/stage.pin
-          printf '%s\n%s\n' "${{ steps.assets.outputs.sha }}" "$url/broom-assets.zip" >> mgmt/assets.pin
-          cat mgmt/stage.pin mgmt/assets.pin
-          bash build.sh --no-test
-
-      - name: Checksums
-        run: |
-          cp stage-out/broom-stage.tar.gz stage-out/broom-assets.zip mgmt/dist/
           cd mgmt
+          url="https://github.com/${{ github.repository }}/releases/download/${{ steps.tag.outputs.name }}"
+          cp ../in/release-bin/bootrom-mgmt dist/bootrom-mgmt
+          chmod +x dist/bootrom-mgmt
+          printf '\n#broom-pins\nstage %s %s\nassets %s %s\n' \
+            "$(sha256sum dist/broom-stage.tar.gz | cut -d' ' -f1)" "$url/broom-stage.tar.gz" \
+            "$(sha256sum dist/broom-assets.zip | cut -d' ' -f1)" "$url/broom-assets.zip" >> dist/bootrom-mgmt
+          tail -c 400 dist/bootrom-mgmt | sed -n '/#broom-pins/,$p'
+
+      - name: Check the files
+        working-directory: mgmt
+        run: |
+          set -e
           sha256sum dist/bootrom-mgmt ipxe/snponly.efi dist/broom-stage.tar.gz dist/broom-assets.zip | tee SHA256SUMS
           file dist/bootrom-mgmt
+          # The binary accepts only the bundles whose sha256 it reads from its tail: asked, not just grepped.
+          ./dist/bootrom-mgmt pins | tee pins.txt
+          for n in stage assets; do
+            [ $n = stage ] && f=dist/broom-stage.tar.gz || f=dist/broom-assets.zip
+            s=$(sha256sum "$f" | cut -d' ' -f1)
+            grep -qx "$n $s" pins.txt || { echo "$f: sha256 $s is not the one the binary reads" >&2; exit 1; }
+          done
+          # Release assets: everything a release binary loads (assets.rs), the clients' broom-fw.dll included.
+          for n in static/index.html ipxe/snponly.efi scripts/stage.sh scripts/broom-bootorder.ps1 scripts/broom-fw.cs scripts/broom-fw.dll scripts/broom-vnc.exe; do
+            unzip -l dist/broom-assets.zip "$n" >/dev/null || { echo "broom-assets.zip has no $n" >&2; exit 1; }
+          done
+          tar -tzf dist/broom-stage.tar.gz | grep -qx 'stage.img' || { echo "broom-stage.tar.gz has no stage.img" >&2; exit 1; }
+          ! readelf -l dist/bootrom-mgmt | grep -q INTERP || { echo "bootrom-mgmt is not static" >&2; exit 1; }
+          echo "all files there and pinned"
 
       - uses: actions/upload-artifact@v4
         with:
@@ -236,48 +293,15 @@ jobs:
             mgmt/SHA256SUMS
           if-no-files-found: error
 
-  # Last: every file of the release there and belonging together — checked on pull requests too — then (pushes to main)
-  # the release itself. Nothing is published unless all of it holds.
-  release:
-    needs: [build, fw]
-    runs-on: ubuntu-24.04
-    permissions:
-      contents: write # tag + release on pushes to main
-    steps:
-      - uses: actions/download-artifact@v4
-        with:
-          name: bootrom-mgmt-${{ github.sha }}
-          path: mgmt
-      - name: Check the files
-        working-directory: mgmt
-        run: |
-          set -e
-          for f in dist/bootrom-mgmt ipxe/snponly.efi dist/broom-stage.tar.gz dist/broom-assets.zip SHA256SUMS; do
-            [ -s "$f" ] || { echo "missing or empty: $f" >&2; exit 1; }
-          done
-          sha256sum -c SHA256SUMS
-          # The binary accepts only the bundles whose sha256 it was built with (stage.pin / assets.pin, embedded).
-          for f in dist/broom-stage.tar.gz dist/broom-assets.zip; do
-            s=$(sha256sum "$f" | cut -d' ' -f1)
-            grep -aqF "$s" dist/bootrom-mgmt || { echo "$f: sha256 $s not pinned in the binary" >&2; exit 1; }
-          done
-          # Release assets: everything a release binary loads (assets.rs), the clients' broom-fw.dll included.
-          for n in static/index.html ipxe/snponly.efi scripts/stage.sh scripts/broom-bootorder.ps1 scripts/broom-fw.cs scripts/broom-fw.dll; do
-            unzip -l dist/broom-assets.zip "$n" >/dev/null || { echo "broom-assets.zip has no $n" >&2; exit 1; }
-          done
-          tar -tzf dist/broom-stage.tar.gz | grep -qx 'stage.img' || { echo "broom-stage.tar.gz has no stage.img" >&2; exit 1; }
-          ! readelf -l dist/bootrom-mgmt | grep -q INTERP || { echo "bootrom-mgmt is not static" >&2; exit 1; }
-          echo "all files there and pinned"
-
       # Pushes to main only (not pull requests). The action creates the tag on this commit; a tag made with
       # GITHUB_TOKEN does not start another workflow run.
       - name: Release
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ needs.build.outputs.tag }}
+          tag_name: ${{ steps.tag.outputs.name }}
           target_commitish: ${{ github.sha }}
-          name: ${{ needs.build.outputs.title }}
+          name: ${{ steps.tag.outputs.name }}
           files: |
             mgmt/dist/bootrom-mgmt
             mgmt/ipxe/snponly.efi
