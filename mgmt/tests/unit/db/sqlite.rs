@@ -411,3 +411,83 @@ fn bench_rows_latest_prune() {
         vec![5, 4]
     );
 }
+
+/// A DB from before v3 with rows breaking the rules: fixed on open (the oldest row keeps the value), then the database
+/// itself refuses a second machine with the same MAC (any case) / fixed IP / hostname (any case), a second default
+/// image and a machine pointing at an image that does not exist.
+#[test]
+fn v3_rules_fixed_then_kept() {
+    let p = tmp("broom_test_v3.db");
+    Connection::open(&p)
+        .unwrap()
+        .execute_batch(
+            "PRAGMA foreign_keys=OFF; -- rows an older build could have left
+             CREATE TABLE images(id INTEGER PRIMARY KEY, name TEXT UNIQUE NOT NULL, os TEXT NOT NULL,
+                 is_default INTEGER NOT NULL DEFAULT 0);
+             CREATE TABLE machines(id INTEGER PRIMARY KEY, mac TEXT UNIQUE NOT NULL, ip TEXT, hostname TEXT,
+                 image_id INTEGER REFERENCES images(id));
+             INSERT INTO images(id,name,os,is_default) VALUES(1,'a','linux',1),(2,'b','linux',1);
+             INSERT INTO machines(id,mac,ip,hostname,image_id) VALUES
+                 (1,'aa:bb:cc:dd:ee:01','10.0.0.11','MAY01',1),
+                 (2,'AA:BB:CC:DD:EE:01',NULL,NULL,NULL),
+                 (3,'aa:bb:cc:dd:ee:03','10.0.0.11','may01',99);",
+        )
+        .unwrap();
+    let db = Sqlite::open(&p).unwrap();
+    let ms = db.machines().unwrap();
+    assert_eq!(ms.len(), 2, "the second spelling of a MAC removed");
+    let m3 = ms.iter().find(|m| m.id == 3).unwrap();
+    assert_eq!(
+        (m3.ip.as_deref(), m3.hostname.as_deref(), m3.image_id),
+        (None, None, None)
+    );
+    let m1 = ms.iter().find(|m| m.id == 1).unwrap();
+    assert_eq!(
+        (m1.ip.as_deref(), m1.hostname.as_deref(), m1.image_id),
+        (Some("10.0.0.11"), Some("MAY01"), Some(1))
+    );
+    assert_eq!(
+        db.images().unwrap().iter().filter(|i| i.is_default).count(),
+        1
+    );
+
+    // From now on the database refuses them itself.
+    assert!(
+        db.add_machine("AA:BB:CC:DD:EE:03", None, None).is_err(),
+        "same MAC, other case"
+    );
+    let mut m = m3.clone();
+    m.ip = Some("10.0.0.11".into());
+    assert!(db.update_machine(&m).is_err(), "same fixed IP");
+    m.ip = None;
+    m.hostname = Some("May01".into());
+    assert!(db.update_machine(&m).is_err(), "same hostname, other case");
+    m.hostname = None;
+    m.image_id = Some(99);
+    assert!(db.update_machine(&m).is_err(), "no such image");
+    assert!(db.set_machine_image(3, Some(42)).is_err(), "no such image");
+    m.image_id = Some(2);
+    db.update_machine(&m).unwrap();
+    db.set_default_image(2).unwrap();
+    assert_eq!(
+        db.images()
+            .unwrap()
+            .iter()
+            .filter(|i| i.is_default)
+            .map(|i| i.id)
+            .collect::<Vec<_>>(),
+        vec![2]
+    );
+    // A deleted machine's hardware IDs go with it.
+    db.put_machine_hw("aa:bb:cc:dd:ee:03", &["PCI_VEN_1".into()], 1)
+        .unwrap();
+    db.delete_machine(3).unwrap();
+    assert!(
+        db.machine_hw()
+            .unwrap()
+            .iter()
+            .all(|(mac, _)| mac != "aa:bb:cc:dd:ee:03")
+    );
+    drop(db);
+    tmp("broom_test_v3.db");
+}

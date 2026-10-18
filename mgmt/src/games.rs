@@ -57,6 +57,23 @@ pub(crate) fn put(st: &SharedState, d: &[Disk]) -> Result<(), ApiError> {
         .map_err(ise)
 }
 
+/// Machine `id` was deleted: no longer the update machine of any disk (machines.rs forget). Blocking.
+pub(crate) fn forget_update(st: &SharedState, id: i64, who: &str) {
+    let mut list = disks(st);
+    let mut changed = false;
+    for d in list.iter_mut().filter(|d| d.update == Some(id)) {
+        d.update = None;
+        changed = true;
+        tracing::info!(
+            "iSCSI disk {}: update machine {who} deleted — update mode off",
+            d.name
+        );
+    }
+    if changed && put(st, &list).is_ok() {
+        let _ = sync(st);
+    }
+}
+
 fn img(name: &str) -> PathBuf {
     crate::home().join("games").join(name).join("games.img")
 }

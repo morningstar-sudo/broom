@@ -14,6 +14,7 @@ mod dhcp;
 mod disk;
 mod disks;
 mod dns;
+mod dnsrec;
 mod drivers;
 mod export;
 mod games;

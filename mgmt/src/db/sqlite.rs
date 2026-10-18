@@ -24,6 +24,9 @@ const SCHEMA: &str = r#"
     -- Per connection, so it is part of every open. WAL + NORMAL: no fsync per commit (each DHCP lease write),
     -- still consistent; a power loss can only drop the last commits.
     PRAGMA synchronous = NORMAL;
+    -- machines.image_id must name an existing image. The bundled SQLite already defaults to this; said here so it
+    -- does not depend on how SQLite was built.
+    PRAGMA foreign_keys = ON;
 
     CREATE TABLE IF NOT EXISTS images(
         id          INTEGER PRIMARY KEY,
@@ -178,7 +181,7 @@ fn private_files(path: &str) -> std::io::Result<()> {
 
 /// Schema version in `PRAGMA user_version`. A change to SCHEMA's tables bumps it and adds an `if v < N` step to
 /// migrate() (SCHEMA itself always holds the latest layout, for new DBs).
-const SCHEMA_VERSION: i64 = 2;
+const SCHEMA_VERSION: i64 = 3;
 
 fn has_column(c: &Connection, table: &str, col: &str) -> rusqlite::Result<bool> {
     c.query_row(
@@ -233,8 +236,68 @@ fn migrate(c: &mut Connection) -> rusqlite::Result<()> {
             }
         }
     }
+    if v < 3 {
+        harden(&tx)?;
+    }
     tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
     tx.commit()
+}
+
+/// Rules the web pages always checked, now also kept by the database itself (two requests at once, an import, a
+/// bug can't break them): one machine per MAC (any case), per fixed IP and per hostname (any case); one default
+/// image; a machine's image exists. Rows from older versions that break one are fixed first — the oldest row keeps
+/// the value, a later one loses it (logged) — or the indexes could not be made.
+fn harden(tx: &Connection) -> rusqlite::Result<()> {
+    let fixed = |what: &str, n: usize| {
+        if n > 0 {
+            tracing::warn!("database: {n} {what}");
+        }
+    };
+    // MACs in one spelling (lower case); a second row of the same MAC in another case goes.
+    let n = tx.execute(
+        "DELETE FROM machines WHERE id NOT IN (SELECT MIN(id) FROM machines GROUP BY lower(mac))",
+        [],
+    )?;
+    fixed("duplicate machine row(s) (same MAC, other case) removed", n);
+    tx.execute(
+        "UPDATE machines SET mac=lower(mac) WHERE mac<>lower(mac)",
+        [],
+    )?;
+    let n = tx.execute(
+        "UPDATE machines SET image_id=NULL WHERE image_id IS NOT NULL AND image_id NOT IN (SELECT id FROM images)",
+        [],
+    )?;
+    fixed(
+        "machine(s) pointed at a deleted image — now the default image",
+        n,
+    );
+    let n = tx.execute(
+        "UPDATE machines SET ip=NULL WHERE ip IS NOT NULL AND id NOT IN (SELECT MIN(id) FROM machines WHERE ip IS NOT NULL GROUP BY ip)",
+        [],
+    )?;
+    fixed(
+        "machine(s) shared a fixed IP with an older one — their IP cleared",
+        n,
+    );
+    let n = tx.execute(
+        "UPDATE machines SET hostname=NULL WHERE hostname IS NOT NULL AND id NOT IN \
+         (SELECT MIN(id) FROM machines WHERE hostname IS NOT NULL GROUP BY lower(hostname))",
+        [],
+    )?;
+    fixed(
+        "machine(s) shared a hostname with an older one — their hostname cleared",
+        n,
+    );
+    tx.execute(
+        "UPDATE images SET is_default=0 WHERE is_default=1 AND id<>(SELECT MIN(id) FROM images WHERE is_default=1)",
+        [],
+    )?;
+    tx.execute_batch(
+        "CREATE UNIQUE INDEX IF NOT EXISTS machines_mac_any_case ON machines(lower(mac));
+         CREATE UNIQUE INDEX IF NOT EXISTS machines_one_ip ON machines(ip) WHERE ip IS NOT NULL;
+         CREATE UNIQUE INDEX IF NOT EXISTS machines_one_hostname ON machines(lower(hostname)) WHERE hostname IS NOT NULL;
+         CREATE UNIQUE INDEX IF NOT EXISTS images_one_default ON images(is_default) WHERE is_default=1;",
+    )
 }
 
 impl Sqlite {
@@ -289,6 +352,13 @@ impl Db for Sqlite {
             .prepare_cached("SELECT value FROM config WHERE key=?1")
             .and_then(|mut s| s.query_row([key], |r| r.get(0)))
             .unwrap_or_else(|_| default.to_string())
+    }
+
+    fn delete_config(&self, key: &str) -> DbResult<()> {
+        self.c()
+            .execute("DELETE FROM config WHERE key=?1", [key])
+            .map(|_| ())
+            .map_err(e)
     }
 
     fn set_config(&self, key: &str, value: &str) -> DbResult<()> {
@@ -485,10 +555,17 @@ impl Db for Sqlite {
     }
 
     fn delete_machine(&self, machine_id: i64) -> DbResult<()> {
-        self.c()
-            .execute("DELETE FROM machines WHERE id=?1", [machine_id])
-            .map(|_| ())
-            .map_err(e)
+        let mut c = self.c();
+        let t = c.transaction().map_err(e)?;
+        // Its reported hardware IDs go with it.
+        t.execute(
+            "DELETE FROM machine_hw WHERE lower(mac)=(SELECT lower(mac) FROM machines WHERE id=?1)",
+            [machine_id],
+        )
+        .map_err(e)?;
+        t.execute("DELETE FROM machines WHERE id=?1", [machine_id])
+            .map_err(e)?;
+        t.commit().map_err(e)
     }
 
     fn set_machine_image(&self, machine_id: i64, image_id: Option<i64>) -> DbResult<()> {

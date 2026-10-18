@@ -11,6 +11,31 @@ pub fn routes() -> Router<SharedState> {
     Router::new().route("/api/machines", post(add)) // Register (Machines + Devices pages)
 }
 
+/// A machine deleted: what is kept about it elsewhere goes too — its disks and Remote key (config, by MAC), and the
+/// iSCSI disks it was the update machine of (by its id: a machine registered later can get the same id, and with it
+/// the right to write those disks). Blocking (the iSCSI daemon is told).
+pub(crate) fn forget(st: &SharedState, m: &Machine) {
+    let mac = m.mac.to_lowercase();
+    for k in [format!("disks:{mac}"), format!("agentkey:{mac}")] {
+        let _ = st.db.delete_config(&k);
+    }
+    crate::games::forget_update(st, m.id, &who(m));
+}
+
+/// A machine's MAC changed: its disks and Remote key follow it.
+pub(crate) fn moved(st: &SharedState, old: &str, new: &str) {
+    let (old, new) = (old.to_lowercase(), new.to_lowercase());
+    if old == new {
+        return;
+    }
+    for p in ["disks:", "agentkey:"] {
+        let v = st.db.get_config(&format!("{p}{old}"), "");
+        if !v.is_empty() && st.db.set_config(&format!("{p}{new}"), &v).is_ok() {
+            let _ = st.db.delete_config(&format!("{p}{old}"));
+        }
+    }
+}
+
 pub(crate) fn who(m: &Machine) -> String {
     m.hostname.clone().unwrap_or_else(|| m.mac.clone())
 }

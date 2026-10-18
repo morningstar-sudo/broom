@@ -186,6 +186,7 @@ async fn update(
     }
     let before = crate::drivers::key_sets(&st);
     st.db.update_machine(&m).map_err(bad)?;
+    crate::machines::moved(&st, &old.mac, &m.mac);
     tracing::info!(
         "machine {} updated - mac {} - ip {} - group {}",
         who(&m),
@@ -213,6 +214,8 @@ async fn delete(
     for id in b.ids {
         let m = by_id(&all, id)?;
         st.db.delete_machine(id).map_err(ise)?;
+        let (st2, m2) = (st.clone(), m.clone());
+        let _ = tokio::task::spawn_blocking(move || crate::machines::forget(&st2, &m2)).await;
         tracing::info!("machine {} deleted - mac {}", who(&m), m.mac);
         n += 1;
     }
@@ -289,6 +292,9 @@ async fn bulk(
         "delete" => {
             for m in &targets {
                 st.db.delete_machine(m.id).map_err(ise)?;
+                let (st2, m2) = (st.clone(), m.clone());
+                let _ =
+                    tokio::task::spawn_blocking(move || crate::machines::forget(&st2, &m2)).await;
             }
         }
         a => return Err(bad(format!("unknown action {a:?}"))),
@@ -616,6 +622,9 @@ async fn import_csv(
             updated += 1;
         }
         st.db.update_machine(&m).map_err(ise)?;
+        if let Some(o) = &old {
+            crate::machines::moved(&st, &o.mac, &m.mac);
+        }
         rearm_on_rename(&st, old.as_ref(), &m);
     }
     crate::drivers::rearm_changed(&st, before);

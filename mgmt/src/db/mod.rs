@@ -108,6 +108,8 @@ pub trait Db: Send + Sync {
     // --- config (key/value) ---
     fn get_config(&self, key: &str, default: &str) -> String;
     fn set_config(&self, key: &str, value: &str) -> DbResult<()>;
+    /// Gone (a deleted machine's settings).
+    fn delete_config(&self, key: &str) -> DbResult<()>;
 
     // --- images ---
     /// All images, by id.

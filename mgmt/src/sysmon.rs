@@ -93,6 +93,7 @@ async fn services(
         })),
         "agents": crate::vnc::count(),
         "dns": {"on": crate::dns::on(&st), "running": crate::dns::active(), "allowed": crate::dns::allowed_count(),
+                "recursive": crate::dns::recursive(&st), "cached": crate::dnsrec::cached(),
                 "upstream": crate::dns::upstream(&st)},
         "golden": {"running": golden_running, "waiting": golden_waiting},
         "uptime": STARTED.elapsed().as_secs(), "host_uptime": host_up.map(|u| u as u64),

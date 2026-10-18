@@ -15,8 +15,9 @@
       <div><label class="form-label small mb-1" for="dhcp_range_start">Range start</label><input class="form-control form-control-sm" id="dhcp_range_start" size="12" placeholder="auto .100"></div>
       <div><label class="form-label small mb-1" for="dhcp_range_end">Range end</label><input class="form-control form-control-sm" id="dhcp_range_end" size="12" placeholder=".200"></div>
       <div><label class="form-label small mb-1" for="dhcp_gateway">Gateway</label><input class="form-control form-control-sm" id="dhcp_gateway" size="12"></div>
-      <div><label class="form-label small mb-1" title="One server per box, in order of preference (clients try the first one first), at most 8">DNS servers</label>
+      <div id="dhcp_dns_field"><label class="form-label small mb-1" title="One server per box, in order of preference (clients try the first one first), at most 8">DNS servers</label>
         <div id="dns_list" class="d-flex flex-wrap gap-2 align-items-center"></div></div>
+      <div id="dhcp_dns_self" hidden><label class="form-label small mb-1">DNS servers</label><div class="small text-body-secondary pt-1">this server (DNS card below)</div></div>
     </div>
     <div id="dhcp_pool" class="small mt-2"></div>
     </div>
@@ -37,10 +38,10 @@
   </div>
   <div class="card card-body mb-3" data-owner>
     <h2 class="h6 text-uppercase text-body-secondary mb-3">DNS — only for healthy machines</h2>
-    <p class="small text-body-secondary mb-2">This server becomes the clients' DNS (the DNS servers above are what it asks). A machine resolves names only while its Remote agent is connected, for a few minutes after a PXE boot, or when exempt; anything else — an agent killed, Windows started without the stage, a laptop on the LAN — gets no names, so no internet.
-      <br><b>A soft lock</b>: a guest can set another DNS server or DNS over HTTPS by hand — block DNS to the outside (ports 53 and 853) on the router for every IP but this server. This server down = no names for the clients.</p>
     <div class="d-flex flex-wrap gap-3 align-items-start">
       <div><label class="form-label small mb-1" for="dns_mode">DNS server</label><select class="form-select form-select-sm" id="dns_mode"><option value="off">off</option><option value="on">on</option></select></div>
+      <div><label class="form-label small mb-1" for="dns_resolve" title="Forward: pass the questions to other DNS servers (router, 1.1.1.1…). Recursive: ask the root servers down to each domain's own servers itself — no outside DNS service; answers cached for their TTL.">Resolve</label><select class="form-select form-select-sm" id="dns_resolve" data-change="dnsResolveShow"><option value="forward">forward (passthrough)</option><option value="recursive">recursive (from the root)</option></select></div>
+      <div id="dns_up_box"><label class="form-label small mb-1" for="dns_up">Forward to</label><input class="form-control form-control-sm mono" id="dns_up" size="22" placeholder="8.8.8.8, 1.1.1.1"></div>
       <div><label class="form-label small mb-1" for="dns_grace">After a PXE boot</label><div class="input-group input-group-sm"><input class="form-control" id="dns_grace" type="number" min="0" max="120" style="width:70px"><span class="input-group-text">min</span></div></div>
       <div><label class="form-label small mb-1">Exempt groups</label><div id="dns_groups" class="small"></div></div>
       <div><label class="form-label small mb-1" for="dns_ips">Exempt IPs / ranges</label><textarea class="form-control form-control-sm mono" id="dns_ips" rows="3" cols="22" placeholder="10.0.0.5&#10;10.0.0.240/28"></textarea></div>
