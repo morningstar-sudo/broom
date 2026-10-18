@@ -24,6 +24,7 @@ public static class BroomVnc {
   [DllImport("user32.dll", SetLastError=true)] static extern IntPtr OpenInputDesktop(uint flags, bool inherit, uint access);
   [DllImport("user32.dll", SetLastError=true)] static extern bool SetThreadDesktop(IntPtr desktop);
   [DllImport("user32.dll", SetLastError=true)] static extern bool CloseDesktop(IntPtr desktop);
+  [DllImport("user32.dll", SetLastError=true, CharSet=CharSet.Unicode)] static extern bool GetUserObjectInformationW(IntPtr obj, int index, System.Text.StringBuilder buf, int len, out int needed);
   [DllImport("user32.dll")] static extern bool SetProcessDPIAware();
   [DllImport("user32.dll")] static extern int GetSystemMetrics(int index);
   [DllImport("user32.dll")] static extern uint SendInput(uint n, INPUT[] inputs, int size);
@@ -357,30 +358,41 @@ public static class BroomVnc {
     return null;
   }
 
-  // GDI capture of the whole virtual desktop. The input desktop is grabbed each time so a UAC / lock screen follows.
+  // The calling thread onto the desktop that has the input now: a UAC prompt and the lock screen are on the Winlogon
+  // desktop, not Default - GDI only sees, and SendInput only reaches, the desktop its thread is on. Per thread (thread
+  // pool threads run both); the handle is kept while it stays the same desktop (one in use by a thread can't be closed).
+  [ThreadStatic] static IntPtr _desk;
+  [ThreadStatic] static string _deskName;
+  static void OnInputDesktop() {
+    IntPtr d = OpenInputDesktop(0, false, 0x10000000); // GENERIC_ALL
+    if (d == IntPtr.Zero) return;
+    var sb = new System.Text.StringBuilder(64); int n;
+    string name = GetUserObjectInformationW(d, 2, sb, sb.Capacity * 2, out n) ? sb.ToString() : ""; // UOI_NAME
+    if (_desk != IntPtr.Zero && name == _deskName) { CloseDesktop(d); return; }
+    if (!SetThreadDesktop(d)) { CloseDesktop(d); return; }
+    if (_desk != IntPtr.Zero) CloseDesktop(_desk);
+    _desk = d; _deskName = name;
+  }
+
+  // GDI capture of the whole virtual desktop, on the input desktop so a UAC / lock screen follows.
   static Bitmap GdiCapture() {
     VX = GetSystemMetrics(SM_XVIRTUAL); VY = GetSystemMetrics(SM_YVIRTUAL);
     VW = GetSystemMetrics(SM_CXVIRTUAL); VH = GetSystemMetrics(SM_CYVIRTUAL);
     if (VW <= 0 || VH <= 0) return null;
-    IntPtr desk = OpenInputDesktop(0, false, 0x0100 | 0x0001); // DESKTOP_SWITCHDESKTOP | DESKTOP_READOBJECTS
-    if (desk != IntPtr.Zero) SetThreadDesktop(desk);
-    try {
-      var bmp = new Bitmap(VW, VH, PixelFormat.Format32bppRgb);
-      using (var g = Graphics.FromImage(bmp)) {
-        IntPtr hdc = g.GetHdc();
-        bool ok;
-        using (var screen = Graphics.FromHwnd(IntPtr.Zero)) {
-          IntPtr src = screen.GetHdc();
-          ok = BitBlt(hdc, 0, 0, VW, VH, src, VX, VY, SRCCOPY | CAPTUREBLT);
-          screen.ReleaseHdc(src);
-        }
-        DrawCursor(hdc); g.ReleaseHdc(hdc);
-        if (!ok) { bmp.Dispose(); return null; }
+    OnInputDesktop();
+    var bmp = new Bitmap(VW, VH, PixelFormat.Format32bppRgb);
+    using (var g = Graphics.FromImage(bmp)) {
+      IntPtr hdc = g.GetHdc();
+      bool ok;
+      using (var screen = Graphics.FromHwnd(IntPtr.Zero)) {
+        IntPtr src = screen.GetHdc();
+        ok = BitBlt(hdc, 0, 0, VW, VH, src, VX, VY, SRCCOPY | CAPTUREBLT);
+        screen.ReleaseHdc(src);
       }
-      return bmp;
-    } finally {
-      if (desk != IntPtr.Zero) CloseDesktop(desk);
+      DrawCursor(hdc); g.ReleaseHdc(hdc);
+      if (!ok) { bmp.Dispose(); return null; }
     }
+    return bmp;
   }
 
   static async Task<bool> SendFrame(ClientWebSocket ws, SemaphoreSlim sendLock, FrameState fr) {
@@ -621,6 +633,7 @@ public static class BroomVnc {
   static void SendMouse(int ax, int ay, uint flags, uint data) {
     var inp = new INPUT[1]; inp[0].type = 0; // MOUSE
     inp[0].u.mi = new MOUSEINPUT { dx = ax, dy = ay, data = data, flags = flags };
+    OnInputDesktop();
     SendInput(1, inp, Marshal.SizeOf(typeof(INPUT)));
   }
   static void Key(string code, bool down) {
@@ -632,6 +645,7 @@ public static class BroomVnc {
     if (!down) flags |= 0x0002; // KEYUP
     var inp = new INPUT[1]; inp[0].type = 1; // KEYBOARD
     inp[0].u.ki = new KEYBDINPUT { vk = 0, scan = (ushort)(sc & 0xFF), flags = flags };
+    OnInputDesktop();
     SendInput(1, inp, Marshal.SizeOf(typeof(INPUT)));
   }
 

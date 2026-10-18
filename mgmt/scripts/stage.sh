@@ -42,13 +42,15 @@ for a in $(cat /proc/cmdline); do
     broom.reg=*) REG=${a#*=};; broom.base=*) BASE=${a#*=};; broom.strict=*) STRICT=${a#*=};; broom.lxgb=*) LX=${a#*=};; broom.wbgb=*) WB=${a#*=};; esac
 done
 # Capture (boot menu [C]): this PC's disk -> an image on the server. Nothing below runs (no disk is touched): only the
-# network, then the server's own binary, which reads the disk and asks on screen.
+# network, then the server's own binary, which reads the disk and asks on screen. Into /broom (the initramfs root,
+# RAM): /run is mounted noexec.
 if [ "$CAPTURE" = 1 ]; then
   [ -n "$SRV" ] || die "missing broom.srv on cmdline"
   udevadm settle 2>/dev/null
   configure_networking
-  if getfile -O /run/bootrom-mgmt "http://$SRV/broom-capture" && chmod +x /run/bootrom-mgmt; then
-    /run/bootrom-mgmt capture "$SRV" < /dev/console > /dev/console 2>&1
+  if getfile -O /broom/bootrom-mgmt "http://$SRV/broom-capture" && chmod +x /broom/bootrom-mgmt; then
+    echo 1 > /proc/sys/kernel/printk   # kernel messages off the console: they would cut into the questions
+    /broom/bootrom-mgmt capture "$SRV" < /dev/console > /dev/console 2>&1
   else
     echo "broom: could not download the capture tool from $SRV" > /dev/console
   fi
