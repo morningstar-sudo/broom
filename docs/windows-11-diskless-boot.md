@@ -2,7 +2,7 @@
 title: Diskless boot Windows 11 over PXE and iSCSI with Broom
 description: "Network-boot Windows 11 Pro on a room of PCs from one golden image with Broom: how it works, what clients need, and setup from an empty Linux server."
 date: 2026-10-11T23:07:00+07:00
-last_modified_at: 2026-10-17
+last_modified_at: 2026-10-18
 ---
 
 [← Broom](index.md)
@@ -73,12 +73,17 @@ DHCP and point its PXE options at Broom: next-server / option 66 = the Broom ser
 On the **Images** page, upload the VM folder (OS = Windows). Broom extracts the disk and publishes the image.
 
 **No VM? Capture a real PC.** Do step 3 on one of your own machines instead (it powers off after sysprep), then
-network-boot it and pick **[C] Capture** at the bottom of the boot menu. Choose the disk, type the image name and an
-owner account: Broom reads the disk (never writes it), sends only the space Windows uses and publishes the image.
+network-boot it and pick **[C] Capture / deploy** at the bottom of the boot menu, then **Capture**. Choose the disk,
+type the image name and an owner account: Broom reads the disk (never writes it), sends only the space Windows uses
+and publishes the image.
 Decrypt BitLocker first (`manage-bde -off C:`), and keep C: small: every client gets a C: that size.
 
 **Update a golden on a real PC.** The same menu, choice **Deploy**, writes an image onto a machine's disk (the disk
 is erased) so it boots that Windows natively: change the apps, run the prep command again, then Capture it back.
+
+![Broom iPXE boot menu with the Capture / deploy entry](images/boot-menu.webp){: width="700" height="220"}
+
+![Broom Capture on a client: owner sign-in, disk and partitions read, upload under way](images/capture.webp){: width="1043" height="362"}
 
 ### 5. Register the machines and boot
 

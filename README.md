@@ -40,6 +40,15 @@ services up/down:
 
 ![Broom web admin Server page with live load and charts](docs/images/server-monitoring.png)
 
+**Capture / deploy** — boot menu **[C]** on a client (here a new PC, no image yet):
+
+![Broom iPXE boot menu with the Capture / deploy entry](docs/images/boot-menu.png)
+
+Sign in with an owner account, then send this PC's disk to the server as an image (only what NTFS uses is sent), or
+write an image onto it:
+
+![Broom Capture on a client: owner sign-in, disk and partitions read, upload under way](docs/images/capture.png)
+
 **FACEIT Anti-Cheat on a Broom client** — Secure Boot, IOMMU, TPM 2.0, TPM attestation and HVCI all pass:
 
 ![FACEIT Anti-Cheat running on a Broom diskless client, all recommended security features green](docs/images/faceit-anticheat.png)
@@ -261,9 +270,9 @@ sent, in parallel 8 MB chunks with retry) — or a single `.vmdk` / `.img` / `.z
   The script carries the guest password and is readable by anyone on the boot LAN (like the golden itself). The VM
   syspreps and powers off by itself → upload (OS = Windows).
 - **Windows from a real PC (Capture)** — no VM: install Windows on one of the lab's own machines, run the same
-  prep script there (it syspreps and powers off), then PXE-boot that PC and pick **[C] Capture** at the bottom of
-  the boot menu. It boots the Windows stage, which runs this server's own binary: pick the disk, type the image name
-  and an **owner** account; the disk is read (never written) and sent through the normal upload — only the
+  prep script there (it syspreps and powers off), then PXE-boot that PC and pick **[C] Capture / deploy** at the
+  bottom of the boot menu. It boots the Windows stage, which runs this server's own binary: sign in with an **owner**
+  account, choose **Capture**, pick the disk and type the image name; the disk is read (never written) and sent through the normal upload — only the
   partition tables, the clusters NTFS has in use and the small partitions (EFI, recovery) whole, so a 1 TB disk
   with 40 GB of Windows sends about 40 GB. A new name creates the image; an existing Windows image gets this disk as
   its new golden (its saved versions stay). Then it converts + publishes like an upload. It refuses a BitLocker

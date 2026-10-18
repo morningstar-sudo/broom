@@ -3,7 +3,7 @@ title: Broom — open-source diskless boot server for Windows 11 and Linux
 description: Free, open-source diskless boot server. Network-boot a room of Windows 11 or Linux PCs from one golden image, clean on every boot. Secure Boot without MOK. One static binary.
 seo: { type: WebSite }
 date: 2026-10-11T23:07:00+07:00
-last_modified_at: 2026-10-17
+last_modified_at: 2026-10-18
 ---
 
 **Broom** network-boots a room of PCs from **one golden image** — every reboot comes up clean. One static binary
@@ -15,8 +15,7 @@ gaming centers and school labs — up to ~100 PCs per server with the right serv
 enroll, no MokManager screen on any client. With TPM 2.0 + HVCI, [FACEIT Anti-Cheat works](faceit-diskless.md).
 
 [Download the latest release](https://github.com/morningstar-sudo/broom/releases/latest) ·
-[Source code & full manual](https://github.com/morningstar-sudo/broom) ·
-[Hướng dẫn tiếng Việt](bootrom-quan-net.md)
+[Source code & full manual](https://github.com/morningstar-sudo/broom)
 
 ![Windows 11 client network-booted by Broom, with an iSCSI disk mounted as G:](images/client-games-disk.webp){: width="1280" height="720"}
 
@@ -28,7 +27,8 @@ enroll, no MokManager screen on any client. With TPM 2.0 + HVCI, [FACEIT Anti-Ch
   clients.
 - [Broom vs CCBoot](broom-vs-ccboot.md) — how Broom differs from commercial diskless software, and where it is still
   behind.
-- [Bootrom quán net với Broom](bootrom-quan-net.md) — hướng dẫn dựng phòng máy diskless bằng tiếng Việt.
+- [Diskless boot for internet cafés](internet-cafe-diskless.md) — a café room from scratch: images, games on iSCSI
+  disks, remote control, health monitoring, FAQ.
 
 ## What you get
 
