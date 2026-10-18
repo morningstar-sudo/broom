@@ -33,7 +33,7 @@ async function showPage(p){
   if(iscsiES&&p!=='server'){iscsiES.close();iscsiES=null;}
   if(p!=='remote'){if(rmWs){rmWs.onclose=null;rmWs.close();rmWs=null;rmCtx=null;}rmCloseDec();closeWall();}
   document.querySelectorAll('nav a').forEach(x=>x.classList.toggle('active',x.dataset.page===p));
-  const grp=document.querySelector(`nav a[data-page="${p}"]`)?.closest('details');if(grp)grp.open=true; // its group shows
+  const grp=document.querySelector(`nav a[data-page="${CSS.escape(p)}"]`)?.closest('details');if(grp)grp.open=true; // its group shows
   if(fragCache[p]===undefined){
     try{const r=await fetch('/ui/'+p);
       if(r.status===401){location.replace('/login');return;} // session expired: never cache the "login required" text
@@ -525,7 +525,7 @@ async function loadServerDisks(){const el=document.getElementById('b_disks');if(
   const drows=r.disks.map(d=>`<tr><td class="mono">${esc(d.name)}</td><td class="mono">${gbs(d.size)}</td><td>${esc(d.model||'—')}${d.rotational?' <span class="small text-body-secondary">HDD</span>':''}</td>
       <td class="mono small">${esc([d.mount||'',...d.parts.map(p=>p.name+(p.mount?' → '+p.mount:'')),...d.holders.map(h=>'held by '+h)].filter(Boolean).join(', '))||'—'}</td>
       <td class="small">${d.health?`<span class="${srvDiskBad(d.health)?'text-danger':''}">${esc(srvDiskHealth(d.health))}</span>`:'—'}</td>
-      <td><span class="badge ${badge[d.state]}">${d.state}</span></td>
+      <td><span class="badge ${badge[d.state]}">${esc(d.state)}</span></td>
       <td data-owner>${d.state==='free'?`<button class="btn btn-sm btn-outline-danger" ${act('volFormat',d.name,d.model,d.size,d.old_data)}>Format</button>`:''}</td></tr>`).join('');
   el.innerHTML=`<table class="table table-sm align-middle mb-3"><thead><tr><th>Broom disk</th><th>Path</th><th>Space</th><th>On it</th><th></th></tr></thead><tbody>${vrows}</tbody></table>
     <table class="table table-sm align-middle mb-2"><thead><tr><th>Disk</th><th>Size</th><th>Model</th><th>Partitions / mounts</th><th>Health</th><th>State</th><th></th></tr></thead><tbody>${drows}</tbody></table>
@@ -720,7 +720,7 @@ async function loadUsers(){if(!me.role)await loadMe();
   const tb=document.querySelector('#users tbody');if(!tb||me.role!=='owner')return;
   const u=await j('/api/users');
   tb.innerHTML=u.map(x=>`<tr><td class="mono">${esc(x.name)}${x.name===me.user?' <span class="badge text-bg-secondary">you</span>':''}</td>
-    <td><select class="form-select form-select-sm w-auto" data-change="userRole" data-args="${esc(JSON.stringify([x.name]))}">${['owner','staff'].map(r=>`<option${r===x.role?' selected':''}>${r}</option>`).join('')}</select></td>
+    <td><select class="form-select form-select-sm w-auto" data-change="userRole" data-args="${esc(JSON.stringify([x.name]))}">${['owner','staff'].map(r=>`<option${r===x.role?' selected':''}>${esc(r)}</option>`).join('')}</select></td>
     <td><div class="d-flex gap-1"><button class="btn btn-sm btn-outline-secondary" ${act('userPw',x.name,x.role)}>New password</button>${x.name===me.user?'':` <button class="btn btn-sm btn-outline-danger" ${act('userDel',x.name)}>Delete</button>`}</div></td></tr>`).join('');}
 const userCall=(url,body,done)=>post(url,body,'us_msg',done,loadUsers);
 async function userAdd(){const name=v('us_name').toLowerCase(),p=document.getElementById('us_pw');

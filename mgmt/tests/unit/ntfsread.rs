@@ -118,3 +118,36 @@ fn bitmap_runs_to_byte_ranges() {
     );
     assert!(bitmap_ranges(&[0xff; 4], 4096, 0).is_empty());
 }
+
+/// An NTFS volume from an upload, mangled (boot sector, MFT records, attributes, runs, the bitmap): read or refused,
+/// never a panic. The sample is made by mkntfs (package ntfs-3g; no root needed) — skipped without it.
+#[test]
+fn fuzz_ntfs() {
+    let p = std::env::temp_dir().join("broom_t_ntfs_fuzz.img");
+    let _ = std::fs::remove_file(&p);
+    File::create(&p).unwrap().set_len(4 << 20).unwrap();
+    let made = std::process::Command::new("mkntfs")
+        .args(["-F", "-f", "-q", "-L", "BROOMT"])
+        .arg(&p)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+    if !made.is_ok_and(|s| s.success()) {
+        eprintln!("mkntfs unavailable — skipped");
+        return;
+    }
+    let img = std::fs::read(&p).unwrap();
+    let path = p.to_str().unwrap();
+    crate::fuzz::run("ntfs", crate::fuzz::inputs(&[img], 400), |b| {
+        std::fs::write(&p, b).unwrap();
+        if let Ok(mut v) = Vol::open(path, (0, b.len() as u64)) {
+            let _ = v.is_dirty();
+            let _ = v.exists("Windows/System32");
+            let _ = v.read("$Volume");
+            let _ = v.head("broom/boot-storage.ok", 64);
+            let _ = v.used_ranges();
+            let _ = v.root_names(16);
+        }
+    });
+    let _ = std::fs::remove_file(&p);
+}

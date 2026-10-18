@@ -72,7 +72,48 @@ fn lvm_metadata_parse() {
 #[test]
 fn ext4_in_partition() {
     let d = std::env::temp_dir().join("broom_linuxfs_test");
+    let Some(disk) = ext4_disk(&d) else {
+        eprintln!("mkfs.ext4 unavailable — skipped");
+        return;
+    };
+    let out = d.join("out");
+    let b = extract_boot(disk.to_str().unwrap(), out.to_str().unwrap()).unwrap();
+    assert_eq!(b.kver, "6.8.0-45-generic");
+    assert_eq!(b.root_uuid, "11111111-2222-3333-4444-555555555555");
+    assert_eq!(std::fs::read(out.join("vmlinuz")).unwrap(), b"KERNEL");
+    assert_eq!(std::fs::read(out.join("initrd.img")).unwrap(), b"INITRD");
     let _ = std::fs::remove_dir_all(&d);
+}
+
+/// The ext4 filesystem of an upload, mangled (superblock, group descriptors, inodes, extents, directories in its
+/// first MiB): its kernel extracted or refused, never a panic.
+#[test]
+fn fuzz_ext4() {
+    let d = std::env::temp_dir().join("broom_linuxfs_fuzz");
+    let Some(disk) = ext4_disk(&d) else {
+        eprintln!("mkfs.ext4 unavailable — skipped");
+        return;
+    };
+    let f = File::options().write(true).open(&disk).unwrap();
+    let meta = std::fs::read(&disk).unwrap()[1 << 20..2 << 20].to_vec();
+    let out = d.join("out");
+    crate::fuzz::run(
+        "ext4",
+        crate::fuzz::inputs(std::slice::from_ref(&meta), 400),
+        |b| {
+            f.write_all_at(b, 1 << 20).unwrap();
+            let _ = extract_boot(disk.to_str().unwrap(), out.to_str().unwrap());
+            f.write_all_at(&meta, 1 << 20).unwrap();
+            f.set_len(20 << 20).unwrap();
+        },
+    );
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// GPT disk with one ext4 partition at 1 MiB (mkfs.ext4 -d, no root needed) holding two kernels and an fstab.
+/// None without mkfs.ext4.
+fn ext4_disk(d: &std::path::Path) -> Option<std::path::PathBuf> {
+    let _ = std::fs::remove_dir_all(d);
     let root = d.join("root");
     for (p, c) in [
         ("etc/fstab", "UUID=x / ext4 defaults 0 1\n"),
@@ -99,8 +140,7 @@ fn ext4_in_partition() {
         .stdout(std::process::Stdio::null())
         .status();
     if !ok.is_ok_and(|s| s.success()) {
-        eprintln!("mkfs.ext4 unavailable — skipped");
-        return;
+        return None;
     }
     // Disk: GPT with one partition at 1 MiB, ext4 copied in after partitioning
     // (partitioning over an existing ext4 makes sfdisk print a signature warning).
@@ -122,14 +162,7 @@ fn ext4_in_partition() {
     assert!(sf.wait().unwrap().success());
     f.write_all_at(&std::fs::read(&fsimg).unwrap(), 1 << 20)
         .unwrap();
-
-    let out = d.join("out");
-    let b = extract_boot(disk.to_str().unwrap(), out.to_str().unwrap()).unwrap();
-    assert_eq!(b.kver, "6.8.0-45-generic");
-    assert_eq!(b.root_uuid, "11111111-2222-3333-4444-555555555555");
-    assert_eq!(std::fs::read(out.join("vmlinuz")).unwrap(), b"KERNEL");
-    assert_eq!(std::fs::read(out.join("initrd.img")).unwrap(), b"INITRD");
-    let _ = std::fs::remove_dir_all(&d);
+    Some(disk)
 }
 
 /// Ubuntu Server layout with real LVM (root + lvm2): p1 = /boot ext4, p2 = PV → VG/LV root ext4.
@@ -186,4 +219,36 @@ fn lvm_live() {
     );
     assert_eq!(std::fs::read(out.join("initrd.img")).unwrap(), b"INITRD");
     let _ = std::fs::remove_dir_all(&d);
+}
+
+/// LVM metadata text and PV labels of an upload, mangled: parsed or refused, never a panic or a giant buffer.
+#[test]
+fn fuzz_lvm() {
+    let meta = br#"ubuntu-vg { id = "abc" extent_size = 8192 physical_volumes { pv0 { id = "Ab-Cd" pe_start = 2048 } }
+        logical_volumes { ubuntu-lv { segment1 { start_extent = 0 extent_count = 10 type = "striped" stripe_count = 1
+        stripes = [ "pv0", 5 ] } } } }"#
+        .to_vec();
+    crate::fuzz::run("lvm metadata", crate::fuzz::inputs(&[meta], 20_000), |b| {
+        let m = String::from_utf8_lossy(b);
+        let _ = parse_meta(&m);
+        let _ = lvm_volumes("/dev/null", &[("AbCd".into(), 1 << 20)], &m);
+    });
+    // A plausible label + metadata area (as in crafted_lvm_label_refused, with sane sizes).
+    let mut label = vec![0u8; 8192];
+    label[512..520].copy_from_slice(b"LABELONE");
+    label[536..544].copy_from_slice(b"LVM2 001");
+    label[532..536].copy_from_slice(&32u32.to_le_bytes());
+    let pvh = 512 + 32;
+    label[pvh..pvh + 32].copy_from_slice(b"AbCdAbCdAbCdAbCdAbCdAbCdAbCdAbCd");
+    label[pvh + 56..pvh + 64].copy_from_slice(&4096u64.to_le_bytes());
+    label[pvh + 64..pvh + 72].copy_from_slice(&4096u64.to_le_bytes());
+    label[4096 + 4..4096 + 20].copy_from_slice(b" LVM2 x[5A%r0N*>");
+    label[4096 + 40..4096 + 48].copy_from_slice(&512u64.to_le_bytes());
+    label[4096 + 48..4096 + 56].copy_from_slice(&200u64.to_le_bytes());
+    let p = std::env::temp_dir().join("broom_t_lvm_fuzz");
+    crate::fuzz::run("lvm label", crate::fuzz::inputs(&[label], 3_000), |b| {
+        std::fs::write(&p, b).unwrap();
+        let _ = lvm_pv(&File::open(&p).unwrap(), 0);
+    });
+    let _ = std::fs::remove_file(&p);
 }

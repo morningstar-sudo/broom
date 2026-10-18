@@ -2,10 +2,10 @@
 // shared LAN, so every admin route needs a session. Client/boot routes stay open (a PXE client can't log in).
 // Accounts (config `users`, argon2 hashes) with one of two roles: owner (everything) or staff (the day-to-day: look,
 // Remote, Wake, save a games update — staff_may()). The first owner is made with a one-time setup token printed to the
-// server log (so only someone with access to the server can claim the install). Sessions are STATELESS signed cookies `<expiry>.<user>.<blake3-keyed MAC>`
-// over (expiry, user, the user's password generation) with a per-install secret in config `session_secret`: no
-// server-side session map, so restarting the binary logs nobody out; a password change ends that user's sessions,
-// a deleted user's end too, a role change applies at the next request. Every change (not a GET) is logged with who
+// server log (so only someone with access to the server can claim the install). Sessions live in the database
+// (table `sessions`): the cookie holds a random token, the table only its blake3 hash, so a copied database opens no
+// session. Logout deletes the session; a password change or a deleted account ends all of that account's sessions; a
+// role change applies at the next request; a restart logs nobody out. Every change (not a GET) is logged with who
 // made it. Password checks are throttled per client IP and run off the async workers. Also a Host-header check
 // (anti DNS-rebinding).
 use argon2::Argon2;
@@ -46,9 +46,6 @@ pub struct User {
     pub role: Role,
     /// argon2id PHC string.
     pw: String,
-    /// Bumped on each password change: the user's older session cookies stop working.
-    #[serde(default)]
-    pw_gen: u64,
 }
 
 /// Who made a request (the guard puts it in the request's extensions).
@@ -58,7 +55,7 @@ pub struct Who {
     pub role: Role,
 }
 
-/// Account name: letters, digits, `_`, `-` (lower case), at most 32 — it sits in the cookie between dots.
+/// Account name: letters, digits, `_`, `-` (lower case), at most 32.
 pub(crate) fn name_ok(n: &str) -> bool {
     (1..=32).contains(&n.len())
         && n.chars()
@@ -79,10 +76,9 @@ pub(crate) fn edit_users<R>(
     crate::db::edit_json(&*st.db, "users", f).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?
 }
 
-/// A user with a new password hash (its sessions end).
+/// A user with a new password hash (the caller ends its sessions: end_sessions).
 pub(crate) fn with_password(mut u: User, phc: String) -> User {
     u.pw = phc;
-    u.pw_gen += 1;
     u
 }
 
@@ -91,7 +87,6 @@ pub(crate) fn new_user(name: &str, role: Role, phc: String) -> User {
         name: name.into(),
         role,
         pw: phc,
-        pw_gen: 0,
     }
 }
 
@@ -258,61 +253,32 @@ pub(crate) fn session_token(h: &axum::http::HeaderMap) -> Option<String> {
     })
 }
 
-/// New random session secret, stored → every cookie signed with the old one stops working.
-fn rotate_secret(st: &SharedState) -> Result<[u8; 32], String> {
-    let k = random32();
-    st.db.set_config("session_secret", &hex(&k))?;
-    Ok(k)
+/// The sessions table's key for a cookie token: its blake3 hash (a copied database holds no usable token).
+fn session_id(tok: &str) -> String {
+    blake3::hash(tok.as_bytes()).to_hex().to_string()
 }
 
-/// Per-install 32-byte secret that signs session cookies, stored hex in config `session_secret` (generated once).
-/// A first-request race can generate it twice; last write wins and only invalidates a cookie minted in the same
-/// instant — negligible for a single-admin tool.
-fn secret(st: &SharedState) -> [u8; 32] {
-    if let Ok(k) = blake3::Hash::from_hex(st.db.get_config("session_secret", "")) {
-        return *k.as_bytes();
-    }
-    rotate_secret(st).unwrap_or_else(|e| {
-        tracing::error!(
-            "session secret not saved ({e}) — logins won't stick until the database is writable"
-        );
-        random32()
-    })
-}
-
-/// Stateless session token: `<expiry-unix-secs>.<user>.<blake3 keyed MAC of "expiry.user.gen">`.
-fn sign(key: &[u8; 32], exp: u64, user: &str, pw_gen: u64) -> String {
-    format!(
-        "{exp}.{user}.{}",
-        blake3::keyed_hash(key, format!("{exp}.{user}.{pw_gen}").as_bytes()).to_hex()
-    )
-}
-
-/// The account `tok` belongs to, if it was signed with `key` for that account's current password generation and is
-/// not expired at `now` (signature compared in constant time: blake3::Hash eq).
-fn token_user<'a>(key: &[u8; 32], tok: &str, now: u64, users: &'a [User]) -> Option<&'a User> {
-    let mut f = tok.splitn(3, '.');
-    let (exp_s, name, sig) = (f.next()?, f.next()?, f.next()?);
-    let exp = exp_s.parse::<u64>().ok().filter(|e| *e > now)?;
-    let u = users.iter().find(|u| u.name == name)?;
-    let want = blake3::keyed_hash(key, format!("{exp}.{name}.{}", u.pw_gen).as_bytes());
-    blake3::Hash::from_hex(sig)
-        .is_ok_and(|h| h == want)
-        .then_some(u)
-}
-
-/// Who holds this session token (None = not a valid session).
+/// Who holds this session token (None = no such session, expired, or its account is gone).
 pub(crate) fn who(st: &SharedState, tok: &str) -> Option<Who> {
-    let all = users(st);
-    token_user(&secret(st), tok, now(), &all).map(|u| Who {
-        name: u.name.clone(),
+    let name = st
+        .db
+        .session_user(&session_id(tok), now() as i64)
+        .ok()
+        .flatten()?;
+    users(st).into_iter().find(|u| u.name == name).map(|u| Who {
+        name: u.name,
         role: u.role,
     })
 }
 
-/// Is this session token still good (its account there, its password unchanged, not expired). Long-lived streams
-/// (SSE, Remote WebSocket) ask again every so often — the guard only checked when they opened.
-/// How often an open stream re-checks its session.
+/// End every session of an account (password changed, account deleted).
+pub(crate) fn end_sessions(st: &SharedState, user: &str) {
+    if let Err(e) = st.db.delete_sessions(user) {
+        tracing::error!("sessions of {user} not ended: {e}");
+    }
+}
+
+/// How often an open stream (SSE, Remote WebSocket) re-checks its session — the guard only checked when it opened.
 pub(crate) const RECHECK: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// Resolves once the session `tok` is no longer valid (checked every RECHECK): ends an SSE stream / WebSocket.
@@ -505,8 +471,14 @@ fn session_cookie(token: &str, max_age: u64) -> [(header::HeaderName, String); 1
     )]
 }
 
-fn new_session(st: &SharedState, u: &User) -> String {
-    sign(&secret(st), now() + SESSION_SECS, &u.name, u.pw_gen)
+/// A new session for `u`: a random token for the cookie, its hash stored.
+fn new_session(st: &SharedState, u: &User) -> Result<String, ApiError> {
+    let tok = hex(&random32());
+    let t = now() as i64;
+    st.db
+        .put_session(&session_id(&tok), &u.name, t + SESSION_SECS as i64, t)
+        .map_err(ise)?;
+    Ok(tok)
 }
 
 /// A hash to check a password against when the account does not exist: as slow as a real one, so the answer time
@@ -553,7 +525,7 @@ async fn setup(
     })?;
     tracing::warn!("owner account {name} created from {}", peer.ip());
     Ok((
-        session_cookie(&new_session(&st, &u), SESSION_SECS),
+        session_cookie(&new_session(&st, &u)?, SESSION_SECS),
         crate::api::ok(),
     ))
 }
@@ -583,7 +555,7 @@ async fn login(
     let u = u.unwrap();
     tracing::info!("{} logged in from {}", u.name, peer.ip());
     Ok((
-        session_cookie(&new_session(&st, u), SESSION_SECS),
+        session_cookie(&new_session(&st, u)?, SESSION_SECS),
         crate::api::ok(),
     ))
 }
@@ -629,20 +601,26 @@ async fn change_pw(
         *u = with_password(u.clone(), phc);
         Ok(u.clone())
     })?;
+    end_sessions(&st, &u.name);
     tracing::warn!(
         "{}: password changed from {} — their other sessions logged out",
         w.name,
         peer.ip()
     );
     Ok((
-        session_cookie(&new_session(&st, &u), SESSION_SECS),
+        session_cookie(&new_session(&st, &u)?, SESSION_SECS),
         crate::api::ok(),
     ))
 }
 
-/// POST /api/auth/logout — clear the cookie. Stateless tokens can't be revoked one by one; changing the password ends
-/// every session of that account.
-async fn logout() -> impl IntoResponse {
+/// POST /api/auth/logout — end this session (deleted on the server, a copy of the cookie is dead too) + clear the
+/// cookie.
+async fn logout(State(st): State<SharedState>, req: Request<Body>) -> impl IntoResponse {
+    if let Some(t) = session_token(req.headers())
+        && let Err(e) = st.db.delete_session(&session_id(&t))
+    {
+        tracing::error!("logout: session not deleted: {e}");
+    }
     (session_cookie("", 0), crate::api::ok())
 }
 

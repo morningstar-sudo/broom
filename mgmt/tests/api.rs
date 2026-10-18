@@ -56,7 +56,7 @@ fn api_contract() {
         assert_eq!(
             forged.get("/api/status").status,
             401,
-            "unsigned cookie refused"
+            "unknown session refused"
         );
 
         // DNS rebinding: a foreign Host name is refused even with a session; IP literals and localhost pass.
@@ -146,6 +146,82 @@ fn api_contract() {
             csv.contains("52:54:00:aa:bb:cc") && csv.contains("pc-a"),
             "{csv}"
         );
+
+        // Accounts (users.rs) and sessions (auth.rs): staff rights, an owner always left, a session ends on logout (a
+        // copy of its cookie too), on a password reset and with its account; a role change applies at once.
+        let as_user = |u: &str, pw: &str| {
+            let mut c = Http::new();
+            let r = c.post("/api/auth/login", &json!({"user": u, "password": pw}));
+            assert_eq!(r.status, 200, "login {u}: {}", r.text());
+            c.take_cookie(&r);
+            c
+        };
+        let set = |v: serde_json::Value| h.post("/api/users", &v).status;
+        assert_eq!(
+            set(json!({"name": "staff1", "role": "staff"})),
+            400,
+            "a new account needs a password"
+        );
+        assert_eq!(
+            set(json!({"name": "staff1", "role": "staff", "password": "short"})),
+            400
+        );
+        assert_eq!(
+            set(json!({"name": "Bad Name", "role": "staff", "password": "long-enough"})),
+            400
+        );
+        assert_eq!(
+            set(json!({"name": "staff1", "role": "staff", "password": "staff-pass-1"})),
+            200
+        );
+        let s = as_user("staff1", "staff-pass-1");
+        assert_eq!(s.get("/api/status").status, 200, "staff can look");
+        assert_eq!(s.get("/api/users").status, 403, "not at the accounts");
+        assert_eq!(
+            s.post(
+                "/api/users",
+                &json!({"name": "x", "role": "owner", "password": "long-enough"})
+            )
+            .status,
+            403
+        );
+        assert_eq!(
+            s.post("/api/images", &json!({"name": "s", "os": "linux"}))
+                .status,
+            403
+        );
+        let copy = Http {
+            cookie: s.cookie.clone(),
+        };
+        assert_eq!(s.post("/api/auth/logout", &json!({})).status, 200);
+        assert_eq!(copy.get("/api/status").status, 401, "ended on the server");
+        let s = as_user("staff1", "staff-pass-1");
+        assert_eq!(
+            set(json!({"name": "staff1", "role": "staff", "password": "staff-pass-2"})),
+            200
+        );
+        assert_eq!(s.get("/api/status").status, 401, "password reset");
+        let s = as_user("staff1", "staff-pass-2");
+        assert_eq!(
+            set(json!({"name": "admin", "role": "staff"})),
+            400,
+            "an owner must be left"
+        );
+        assert_eq!(
+            h.post("/api/users/delete", &json!({"name": "admin"}))
+                .status,
+            400,
+            "not yourself"
+        );
+        assert_eq!(set(json!({"name": "staff1", "role": "owner"})), 200);
+        assert_eq!(s.get("/api/users").status, 200, "now an owner");
+        assert_eq!(
+            h.post("/api/users/delete", &json!({"name": "staff1"}))
+                .status,
+            200
+        );
+        assert_eq!(s.get("/api/status").status, 401, "account deleted");
+        assert_eq!(h.get("/api/status").status, 200);
 
         // Login throttle: 5 free wrong tries, then this IP is locked out (1 s, doubling) → 429.
         let wrong = || {

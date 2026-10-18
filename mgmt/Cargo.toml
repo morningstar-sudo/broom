@@ -1,6 +1,6 @@
 [package]
 name = "bootrom-mgmt"
-version = "0.6.2"
+version = "0.0.0"
 edition = "2024"
 description = "Diskless boot server: DHCP, TFTP, iPXE, iSCSI and a web admin in one binary"
 
@@ -19,6 +19,7 @@ futures-util = "0.3.34"   # SSE stream
 socket2 = { version = "0.6.5", features = ["all"] }   # DHCP/TFTP sockets (bind to interface, broadcast)
 libc = "0.2.189"   # fallocate punch-hole, geteuid
 sha2 = "0.11.0"   # golden sha256 (replaces sha256sum)
+hmac = "0.13"   # HMAC-SHA256 of the Remote agent handshake (agentauth.rs; the agent is .NET HMACSHA256)
 blake3 = "1.8.7"   # session MACs (auth.rs), agent keys (agentauth.rs), stable disk GUIDs (disk.rs)
 tracing = "0.1.44"   # logging (events → stdout, warnings/errors → stderr)
 tracing-subscriber = "0.3.23"   # log output (RUST_LOG=level)

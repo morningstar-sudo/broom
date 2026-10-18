@@ -456,3 +456,27 @@ fn json_edits_are_atomic() {
     drop(db);
     tmp("broom_test_edit.db");
 }
+
+/// Sessions: found until they expire; logout ends one, a password change / deleted account all of an account's;
+/// a new login drops the expired ones.
+#[test]
+fn sessions() {
+    let db = Sqlite::open(":memory:").unwrap();
+    db.put_session("a1", "admin", 100, 10).unwrap();
+    db.put_session("a2", "admin", 100, 10).unwrap();
+    db.put_session("s1", "staff", 50, 10).unwrap();
+    assert_eq!(db.session_user("a1", 20).unwrap().as_deref(), Some("admin"));
+    assert_eq!(db.session_user("s1", 50).unwrap(), None, "expired");
+    assert_eq!(db.session_user("nope", 20).unwrap(), None);
+    db.delete_session("a1").unwrap();
+    assert_eq!(db.session_user("a1", 20).unwrap(), None, "logged out");
+    assert_eq!(db.session_user("a2", 20).unwrap().as_deref(), Some("admin"));
+    db.delete_sessions("admin").unwrap();
+    assert_eq!(db.session_user("a2", 20).unwrap(), None, "all of admin's");
+    db.put_session("n1", "staff", 200, 60).unwrap();
+    let left: i64 = db
+        .c()
+        .query_row("SELECT COUNT(*) FROM sessions", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(left, 1, "the expired s1 dropped");
+}

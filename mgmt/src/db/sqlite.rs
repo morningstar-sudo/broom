@@ -90,6 +90,13 @@ const SCHEMA: &str = r#"
         expires  INTEGER NOT NULL
     );
 
+    -- Web admin sessions (auth.rs). id = blake3 of the cookie's token (the token itself is never stored).
+    CREATE TABLE IF NOT EXISTS sessions(
+        id      TEXT PRIMARY KEY,
+        user    TEXT NOT NULL,
+        expires INTEGER NOT NULL
+    );
+
     -- Benchmark results (bench.rs). mac NULL = the server.
     CREATE TABLE IF NOT EXISTS bench(
         id     INTEGER PRIMARY KEY,
@@ -621,6 +628,29 @@ impl Db for Sqlite {
         self.c()
             .execute("DELETE FROM leases WHERE expires < ?1", [cutoff])
             .map_err(e)
+    }
+
+    fn put_session(&self, id: &str, user: &str, expires: i64, now: i64) -> DbResult<()> {
+        self.run("DELETE FROM sessions WHERE expires <= ?1", [now])?;
+        self.run(
+            "INSERT INTO sessions(id,user,expires) VALUES(?1,?2,?3)",
+            params![id, user, expires],
+        )
+    }
+
+    fn session_user(&self, id: &str, now: i64) -> DbResult<Option<String>> {
+        self.c()
+            .prepare_cached("SELECT user FROM sessions WHERE id=?1 AND expires > ?2")
+            .and_then(|mut s| s.query_row(params![id, now], |r| r.get(0)).optional())
+            .map_err(e)
+    }
+
+    fn delete_session(&self, id: &str) -> DbResult<()> {
+        self.run("DELETE FROM sessions WHERE id=?1", [id])
+    }
+
+    fn delete_sessions(&self, user: &str) -> DbResult<()> {
+        self.run("DELETE FROM sessions WHERE user=?1", [user])
     }
 
     fn add_bench(&self, r: &BenchRow) -> DbResult<()> {

@@ -68,8 +68,21 @@ jobs:
     runs-on: ubuntu-24.04
     env:
       CARGO_TARGET_DIR: ${{ github.workspace }}/mgmt/target
+    outputs:
+      tag: ${{ steps.tag.outputs.name }}
     steps:
       - uses: actions/checkout@v4
+      # Release tag = the push time, ISO 8601 in UTC with "-" for ":" (git refuses ":" in a tag), e.g. 2026-09-19T17-05-25Z:
+      # the same on a re-run of that push, so a re-run updates its release instead of making another. Manual runs / pull
+      # requests (no release): the build time. The release title and the binary's version (BROOM_VERSION) are the same.
+      - name: Release tag
+        id: tag
+        env:
+          PUSHED_AT: ${{ github.event.repository.pushed_at }}
+        run: |
+          t=$(date +%s)
+          if [ "$GITHUB_EVENT_NAME" = push ] && [ -n "$PUSHED_AT" ]; then t=$PUSHED_AT; fi
+          echo "name=$(date -u -d "@$t" +%Y-%m-%dT%H-%M-%SZ)" >> "$GITHUB_OUTPUT"
       # musl-gcc for the bundled SQLite C code.
       - name: musl-tools
         run: |
@@ -84,6 +97,8 @@ jobs:
           workspaces: mgmt -> target
       - name: Build (release, musl)
         working-directory: mgmt
+        env:
+          BROOM_VERSION: ${{ steps.tag.outputs.name }}
         run: |
           cargo build --release --target x86_64-unknown-linux-musl --features external-assets
           cp target/x86_64-unknown-linux-musl/release/bootrom-mgmt bootrom-mgmt
@@ -223,17 +238,10 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           path: in
-      # Release tag = the push time, ISO 8601 in UTC with "-" for ":" (git refuses ":" in a tag), e.g. 2026-09-19T17-05-25Z:
-      # the same on a re-run of that push, so a re-run updates its release instead of making another. Manual runs / pull
-      # requests (no release): the build time. The release title is the same.
+      # The release tag, made by release-bin (it is also the binary's version).
       - name: Release tag
         id: tag
-        env:
-          PUSHED_AT: ${{ github.event.repository.pushed_at }}
-        run: |
-          t=$(date +%s)
-          if [ "$GITHUB_EVENT_NAME" = push ] && [ -n "$PUSHED_AT" ]; then t=$PUSHED_AT; fi
-          echo "name=$(date -u -d "@$t" +%Y-%m-%dT%H-%M-%SZ)" >> "$GITHUB_OUTPUT"
+        run: echo "name=${{ needs.release-bin.outputs.tag }}" >> "$GITHUB_OUTPUT"
 
       # Web UI, iPXE, scripts → broom-assets.zip, packed by the debug binary that still embeds them (assets.rs keeps the
       # list), + broom-fw.dll / broom-vnc.exe from the fw job (assets.rs OPTIONAL: only a release has them).

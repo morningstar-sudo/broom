@@ -241,3 +241,34 @@ fn backup_gpt_moves_to_the_end() {
     assert!(free * 512 >= 36 << 20, "{out}");
     let _ = std::fs::remove_file(&g);
 }
+
+/// Partition tables of an upload, mangled (header fields, entry counts / sizes, CRCs, an MBR's entries): read or
+/// refused, never a panic or a giant buffer.
+#[test]
+fn fuzz_partition_tables() {
+    let g = disk("fuzz_gpt", 4);
+    write_single_gpt(&g, 1 << 20, 2 << 20).unwrap();
+    let gpt = std::fs::read(&g).unwrap()[..64 << 10].to_vec();
+    let mut mbr = vec![0u8; 4096];
+    mbr[446 + 4] = 0x83; // Linux
+    mbr[446 + 8..446 + 12].copy_from_slice(&2048u32.to_le_bytes());
+    mbr[446 + 12..446 + 16].copy_from_slice(&4096u32.to_le_bytes());
+    mbr[510..512].copy_from_slice(&[0x55, 0xaa]);
+    let p = disk("fuzz_case", 0);
+    crate::fuzz::run(
+        "partition table",
+        crate::fuzz::inputs(&[gpt, mbr], 3_000),
+        |b| {
+            std::fs::write(&p, b).unwrap();
+            File::options()
+                .write(true)
+                .open(&p)
+                .unwrap()
+                .set_len(4 << 20)
+                .unwrap();
+            let _ = read(&p);
+        },
+    );
+    let _ = std::fs::remove_file(&g);
+    let _ = std::fs::remove_file(&p);
+}

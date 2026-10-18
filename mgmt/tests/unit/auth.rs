@@ -100,52 +100,6 @@ fn setup_token_compare() {
     assert!(same("abc", "abc") && !same("abc", "abd") && !same("abc", ""));
 }
 
-/// A session token names its account and is bound to that account's password generation: it stops working when it
-/// expires, the account's password changes, the account is deleted, the secret changes or it is tampered with.
-#[test]
-fn session_tokens() {
-    let key = [7u8; 32];
-    let users = vec![
-        new_user("admin", Role::Owner, "h".into()),
-        new_user("thu-ngan", Role::Staff, "h".into()),
-    ];
-    let tok = sign(&key, 2_000, "thu-ngan", 0);
-    assert_eq!(
-        token_user(&key, &tok, 1_000, &users).map(|u| u.role),
-        Some(Role::Staff)
-    );
-    assert!(token_user(&key, &tok, 2_000, &users).is_none(), "expired");
-    assert!(
-        token_user(&[8u8; 32], &tok, 1_000, &users).is_none(),
-        "other secret"
-    );
-    let changed: Vec<User> = users
-        .iter()
-        .map(|u| {
-            if u.name == "thu-ngan" {
-                with_password(u.clone(), "h2".into())
-            } else {
-                u.clone()
-            }
-        })
-        .collect();
-    assert!(
-        token_user(&key, &tok, 1_000, &changed).is_none(),
-        "password changed"
-    );
-    assert!(
-        token_user(&key, &tok, 1_000, &users[..1]).is_none(),
-        "account deleted"
-    );
-    let forged = tok.replacen("thu-ngan", "admin", 1);
-    assert!(
-        token_user(&key, &forged, 1_000, &users).is_none(),
-        "another name, same signature"
-    );
-    assert!(token_user(&key, "garbage", 1_000, &users).is_none());
-    assert!(token_user(&key, "2000.admin.nothex", 1_000, &users).is_none());
-}
-
 /// Staff: every page, but of the changes only Wake / games Save, Discard / their own password / logout.
 #[test]
 fn staff_rights() {

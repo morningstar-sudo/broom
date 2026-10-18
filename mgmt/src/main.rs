@@ -18,6 +18,9 @@ mod dns;
 mod dnsrec;
 mod drivers;
 mod export;
+#[cfg(test)]
+#[path = "../tests/unit/fuzz.rs"]
+mod fuzz;
 mod games;
 mod golden;
 mod goldenram;
@@ -150,8 +153,12 @@ fn clean_leftovers() {
     each(&work_dir().join("export"), &|n| !n.ends_with(".new"));
 }
 
-/// Version (Cargo.toml) — shown on the web + in logs to tell deployed builds apart.
-const VERSION: &str = env!("CARGO_PKG_VERSION");
+/// Version = the build time in UTC (BROOM_VERSION at compile time: the release tag in CI, the build time in build.sh),
+/// e.g. 2026-10-19T08-30-00Z — shown on the web + in logs to tell deployed builds apart.
+pub(crate) const VERSION: &str = match option_env!("BROOM_VERSION") {
+    Some(v) => v,
+    None => "dev",
+};
 // Web admin (assets.rs: embedded, or the release's broom-assets.zip) — deploy a single file, no static/ directory.
 // index.html loads /app.js?v=<version> + /app.css?v=<version>, so a new build is never served from cache. /login is the
 // standalone login/setup page (auth.rs); unauthenticated page requests are redirected there.
@@ -591,7 +598,7 @@ async fn main() {
         .layer(axum::middleware::from_fn(auth::security_headers)) // outermost: also on the guard's redirects / 401s
         .with_state(state);
 
-    info!("bootrom-mgmt v{VERSION} serving on http://{addr}");
+    info!("bootrom-mgmt {VERSION} serving on http://{addr}");
     // ConnectInfo: /api/license and /api/booted identify the machine by the peer IP (license.rs).
     if let Err(e) = axum::serve(
         listener,

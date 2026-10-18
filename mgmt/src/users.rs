@@ -84,6 +84,9 @@ async fn set(
         }
         Ok(added)
     })?;
+    if !added && !b.password.is_empty() {
+        crate::auth::end_sessions(&st, &name); // a new password ends its sessions
+    }
     if added {
         tracing::warn!("{}: account {name} added ({:?})", w.name, b.role);
     } else {
@@ -122,6 +125,7 @@ async fn delete(
         }
         Ok(())
     })?;
+    crate::auth::end_sessions(&st, &b.name);
     tracing::warn!("{}: account {} deleted", w.name, b.name);
     Ok(ok())
 }

@@ -209,9 +209,10 @@ pub(crate) fn in_zone(name: &str, zone: &str) -> bool {
 /// The client's question (`q`, raw: its name keeps its case) answered: ID and RD from it, RA set.
 pub(crate) fn response(q: &[u8], rcode: u8, a: &Answer, edns: bool) -> Option<Vec<u8>> {
     let qmsg = parse(q)?;
-    let end = {
+    // The question as the client sent it (a message that parses may still hold none: QDCOUNT 0).
+    let question = {
         let (_, p) = read_name(q, 12)?;
-        p + 4
+        q.get(12..p + 4)?
     };
     let mut out = Vec::with_capacity(512);
     out.extend_from_slice(&qmsg.id.to_be_bytes());
@@ -225,7 +226,7 @@ pub(crate) fn response(q: &[u8], rcode: u8, a: &Answer, edns: bool) -> Option<Ve
     for c in counts {
         out.extend_from_slice(&c.to_be_bytes());
     }
-    out.extend_from_slice(&q[12..end]);
+    out.extend_from_slice(question);
     for r in &a.an {
         write_rr(&mut out, r, r.ttl.min(left.max(1)));
     }

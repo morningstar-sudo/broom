@@ -139,3 +139,15 @@ async fn embedded_ipxe_and_refusals() {
             .is_err()
     );
 }
+
+/// Any read request (random, or a real one with options mangled) → parsed or refused, never a panic.
+#[test]
+fn fuzz_rrq() {
+    let seeds = vec![
+        rrq("snponly.efi", &[("blksize", "1468"), ("tsize", "0")]),
+        rrq("autoexec.ipxe", &[]),
+    ];
+    crate::fuzz::run("tftp", crate::fuzz::inputs(&seeds, 20_000), |b| {
+        let _ = parse_rrq(b);
+    });
+}

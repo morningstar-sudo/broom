@@ -265,7 +265,12 @@ fn lvm_volumes(
     let root = parse_meta(meta);
     let mut out = Vec::new();
     for (vg_name, vg) in root.sections() {
-        let ext = vg.num("extent_size").ok_or("LVM: no extent_size")? as u64 * 512;
+        // Numbers from the image: negative or overflowing = corrupt metadata, not a wrapped offset.
+        let bad = || format!("LVM: {vg_name}: a size or offset out of range (corrupt metadata)");
+        let bytes = |n: i64, unit: u64| u64::try_from(n).ok()?.checked_mul(unit);
+        let ext = bytes(vg.num("extent_size").ok_or("LVM: no extent_size")?, 512)
+            .filter(|&e| e > 0)
+            .ok_or_else(bad)?;
         // pv name in this VG ("pv0") → raw byte offset of its first extent.
         let mut pv_at = Vec::new();
         for (pv_name, pv) in vg
@@ -275,10 +280,10 @@ fn lvm_volumes(
         {
             let id = pv.str("id").unwrap_or("").replace('-', "");
             if let Some((_, start)) = pvs.iter().find(|(u, _)| *u == id) {
-                pv_at.push((
-                    pv_name,
-                    start + pv.num("pe_start").unwrap_or(0) as u64 * 512,
-                ));
+                let at = bytes(pv.num("pe_start").unwrap_or(0), 512)
+                    .and_then(|p| start.checked_add(p))
+                    .ok_or_else(bad)?;
+                pv_at.push((pv_name, at));
             }
         }
         for (lv_name, lv) in vg
@@ -315,7 +320,15 @@ fn lvm_volumes(
                     .ok_or(format!(
                         "LVM: {vg_name}/{lv_name} uses PV {pv} not found on this disk"
                     ))?;
-                segs.push((se as u64 * ext, base + *pe as u64 * ext, ec as u64 * ext));
+                let seg = (|| {
+                    Some((
+                        bytes(se, ext)?,
+                        base.checked_add(bytes(*pe, ext)?)?,
+                        bytes(ec, ext)?,
+                    ))
+                })()
+                .ok_or_else(bad)?;
+                segs.push(seg);
             }
             segs.sort();
             let f = File::open(raw).map_err(|e| e.to_string())?;

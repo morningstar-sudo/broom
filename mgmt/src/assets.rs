@@ -253,3 +253,7 @@ pub fn pack(args: &[String]) -> ! {
 #[cfg(test)]
 #[path = "../tests/unit/assets.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "../tests/unit/webui.rs"]
+mod webui_tests;

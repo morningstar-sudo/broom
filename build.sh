@@ -50,6 +50,8 @@ fi
 
 # 2. mgmt
 export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$HOME/broom-target}"
+# The binary's version: the build time in UTC (CI passes the release tag) → a new build is never served from cache.
+export BROOM_VERSION="${BROOM_VERSION:-$(date -u +%Y-%m-%dT%H-%M-%SZ)}"
 cd "$root/mgmt"
 # Static musl binary: no glibc dependency (a glibc build from a new distro fails on older servers with
 # "GLIBC_2.xx not found"). Needs musl-tools (musl-gcc) for the bundled SQLite C code.
@@ -87,5 +89,4 @@ if [ "$dev" = 0 ] && readelf -l "$bin" | grep -q INTERP; then
 fi
 mkdir -p dist
 cp "$bin" dist/bootrom-mgmt
-v=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
-echo "== [3/3] OK: mgmt/dist/bootrom-mgmt v$v ($(du -h dist/bootrom-mgmt | cut -f1))"
+echo "== [3/3] OK: mgmt/dist/bootrom-mgmt $BROOM_VERSION ($(du -h dist/bootrom-mgmt | cut -f1))"

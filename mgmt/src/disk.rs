@@ -122,19 +122,22 @@ fn read_gpt(f: &File, ss: u64) -> Result<Option<Table>, String> {
     if !(128..=4096).contains(&esize) || n > 1024 {
         return Err(format!("GPT: unexpected entry table ({n} × {esize} bytes)"));
     }
-    let ents = rd(f, lba * ss, n * esize)?;
+    // LBAs come from the image: one past any disk is a corrupt table, not an overflow.
+    let past = || "GPT: an LBA past any disk (corrupt partition table)".to_string();
+    let ents = rd(f, lba.checked_mul(ss).ok_or_else(past)?, n * esize)?;
     let parts = ents
         .chunks(esize)
         .filter(|e| e[..16].iter().any(|&b| b != 0))
         .map(|e| {
             let (first, last) = (u64le(e, 32), u64le(e, 40));
-            Part {
-                start: first * ss,
-                size: (last + 1).saturating_sub(first) * ss,
+            Some(Part {
+                start: first.checked_mul(ss)?,
+                size: last.checked_add(1)?.saturating_sub(first).checked_mul(ss)?,
                 kind: guid_str(&e[..16]),
-            }
+            })
         })
-        .collect();
+        .collect::<Option<Vec<_>>>()
+        .ok_or_else(past)?;
     Ok(Some(Table {
         gpt: true,
         sector: ss,

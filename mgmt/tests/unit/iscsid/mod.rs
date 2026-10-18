@@ -410,3 +410,63 @@ fn games_update_needs_ip_and_mac() {
         "no MAC named: IP only"
     );
 }
+
+/// Whole sessions from the LAN, mangled: a login + a READ, a WRITE, an INQUIRY, a Data-Out and a logout in one stream,
+/// random bytes changed / cut / repeated. Each connection must end once the client closes (no hang) and its task
+/// must never panic; the target keeps serving.
+#[tokio::test]
+async fn fuzz_sessions() {
+    let p = std::env::temp_dir().join("broom_test_iscsid_fuzz.img");
+    std::fs::write(&p, vec![7u8; 1 << 20]).unwrap();
+    let iqn = "iqn.test:fuzz.g1";
+    export(Entry {
+        iqn: iqn.into(),
+        path: p.to_string_lossy().into(),
+        ram: false,
+        reserve: 0,
+        stamp: String::new(),
+    })
+    .unwrap();
+    let keys = format!(
+        "InitiatorName=iqn.test:pc-fuzz\0TargetName={iqn}\0SessionType=Normal\0MaxRecvDataSegmentLength=4096\0MaxBurstLength=65536\0"
+    );
+    let mut stream = pdu(0x43, 0x80 | 1 << 2 | 3, 1, 0, keys.as_bytes());
+    let mut cmd = |itt: u32, sn: u32, flags: u8, cdb: &[u8], edtl: u32, data: &[u8]| {
+        let mut c = pdu(0x01, flags, itt, sn, data);
+        c[8..16].fill(0);
+        c[20..24].copy_from_slice(&edtl.to_be_bytes());
+        c[32..32 + cdb.len()].copy_from_slice(cdb);
+        stream.extend(c);
+    };
+    cmd(2, 1, 0xc0, &[0x28, 0, 0, 0, 0, 10, 0, 0, 8], 4096, &[]);
+    cmd(3, 2, 0xa0, &[0x2a, 0, 0, 0, 0, 20, 0, 0, 1], 512, &[]);
+    cmd(4, 3, 0xc0, &[0x12, 0, 0, 0, 96], 96, &[]);
+    let mut data_out = pdu(0x05, 0x80, 3, 0, &[1u8; 512]);
+    data_out[20..24].copy_from_slice(&1u32.to_be_bytes());
+    stream.extend(data_out);
+    stream.extend(pdu(0x06, 0x80, 5, 4, &[]));
+
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = l.local_addr().unwrap();
+    for (i, input) in crate::fuzz::inputs(&[stream], 400).enumerate() {
+        let mut c = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let (s, _) = l.accept().await.unwrap();
+        let task = tokio::spawn(conn::serve(s, "127.0.0.1".into()));
+        let _ = c.write_all(&input).await;
+        let _ = c.shutdown().await;
+        let mut sink = Vec::new();
+        let _ = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            tokio::io::AsyncReadExt::read_to_end(&mut c, &mut sink),
+        )
+        .await;
+        drop(c);
+        match tokio::time::timeout(std::time::Duration::from_secs(5), task).await {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => panic!("case {i}: the session task panicked: {e}"),
+            Err(_) => panic!("case {i}: the session did not end after the client closed"),
+        }
+    }
+    TARGETS.lock().remove(iqn);
+    let _ = std::fs::remove_file(p);
+}

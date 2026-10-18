@@ -186,3 +186,37 @@ fn inquiry_pages() {
         Cmd::Check(5, 0x24, 0)
     );
 }
+
+/// Any CDB (random, or real ones mangled: opcodes, LBAs, lengths at their edges) → an answer, never a panic; a read
+/// or write never reaches past the disk or beyond the size served at once.
+#[test]
+fn fuzz_cdbs() {
+    let seeds: Vec<Vec<u8>> = [
+        &[0x28, 0, 0, 0, 0, 10, 0, 0, 4][..],
+        &[0x88, 0, 0, 0, 0, 0, 0, 0, 3, 0xe6, 0, 0, 0, 2],
+        &[0x2a, 0, 0, 0, 0, 20, 0, 0, 1],
+        &[0x8a, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 1],
+        &[0x12, 1, 0xb0, 0, 64],
+        &[0x9e, 0x10, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 32],
+        &[0x1a, 0, 0x3f, 0, 64],
+        &[0xa0, 0, 0, 0, 0, 0, 0, 0, 0, 16],
+    ]
+    .iter()
+    .map(|c| cdb(c).to_vec())
+    .collect();
+    let nblocks = SIZE / BLOCK;
+    crate::fuzz::run("scsi", crate::fuzz::inputs(&seeds, 50_000), |b| {
+        let c = cdb(&b[..b.len().min(16)]);
+        for writable in [false, true] {
+            match handle(&c, SIZE, "t", writable) {
+                Cmd::Read { lba, blocks } | Cmd::Write { lba, blocks } => {
+                    assert!(
+                        lba + blocks as u64 <= nblocks && blocks as u64 <= 2048,
+                        "{lba}+{blocks}"
+                    );
+                }
+                _ => {}
+            }
+        }
+    });
+}

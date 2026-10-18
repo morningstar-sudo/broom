@@ -381,3 +381,29 @@ fn lease_parse() {
         (43200, 90, None, None)
     );
 }
+
+/// Any datagram (random, or a real DISCOVER / REQUEST mangled) → parsed or dropped and answered or not, never a panic.
+#[test]
+fn fuzz_packets() {
+    let seeds = vec![
+        build(&req(
+            DISCOVER,
+            &[
+                (12, b"pc01"),
+                (60, b"PXEClient:Arch:00007"),
+                (77, b"iPXE"),
+                (80, b""),
+            ],
+        )),
+        build(&req(
+            REQUEST,
+            &[(50, &[10, 0, 0, 100]), (54, &[10, 0, 0, 12])],
+        )),
+    ];
+    let (c, s) = (cfg(), store());
+    crate::fuzz::run("dhcp", crate::fuzz::inputs(&seeds, 20_000), |b| {
+        if let Some(p) = parse(b) {
+            let _ = handle(&p, &c, &s);
+        }
+    });
+}

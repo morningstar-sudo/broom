@@ -30,29 +30,12 @@ pub fn routes() -> Router<SharedState> {
         .route("/api/vnc/rekey", post(rekey))
 }
 
-/// HMAC-SHA256 (RFC 2104) over the sha2 crate already used for the goldens.
+/// HMAC-SHA256 (the agent side is .NET's HMACSHA256).
 pub(crate) fn hmac_sha256(key: &[u8], msg: &[u8]) -> [u8; 32] {
-    use sha2::{Digest, Sha256};
-    let mut k = [0u8; 64];
-    if key.len() > 64 {
-        k[..32].copy_from_slice(&Sha256::digest(key));
-    } else {
-        k[..key.len()].copy_from_slice(key);
-    }
-    let (mut ipad, mut opad) = ([0x36u8; 64], [0x5cu8; 64]);
-    for i in 0..64 {
-        ipad[i] ^= k[i];
-        opad[i] ^= k[i];
-    }
-    let inner = Sha256::new()
-        .chain_update(ipad)
-        .chain_update(msg)
-        .finalize();
-    Sha256::new()
-        .chain_update(opad)
-        .chain_update(inner)
-        .finalize()
-        .into()
+    use hmac::{KeyInit, Mac};
+    let mut m = hmac::Hmac::<sha2::Sha256>::new_from_slice(key).expect("HMAC takes any key length");
+    m.update(msg);
+    m.finalize().into_bytes().into()
 }
 
 use crate::auth::hex;

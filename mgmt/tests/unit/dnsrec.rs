@@ -197,3 +197,25 @@ async fn forwards_live() {
         "cached: no forwarder needed"
     );
 }
+
+/// Any message (random, or a real answer / query mangled: compression pointers, counts, lengths) → parsed or refused,
+/// and a query answered or not, never a panic or an endless pointer loop.
+#[test]
+fn fuzz_messages() {
+    let seeds = vec![sample(), query(7, "www.example.com", 1, true)];
+    let a = Answer {
+        rcode: 0,
+        an: parse(&sample()).unwrap().an,
+        ns: Vec::new(),
+        expires: Instant::now() + Duration::from_secs(30),
+    };
+    crate::fuzz::run("dns", crate::fuzz::inputs(&seeds, 20_000), |b| {
+        let _ = parse(b);
+        let _ = client_udp_size(b);
+        let _ = crate::dns::qname(b);
+        let _ = crate::dns::answer(b, 5);
+        if let Some(r) = response(b, 0, &a, true) {
+            let _ = truncated(&r, b);
+        }
+    });
+}

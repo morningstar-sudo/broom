@@ -233,3 +233,30 @@ fn writes_monolithic_sparse() {
     );
     let _ = std::fs::remove_dir_all(&d);
 }
+
+/// Uploaded VMDKs, mangled (sparse header, grain directory / tables, a descriptor's extent lines): converted or
+/// refused, never a panic, a giant buffer or a read outside the upload's folder.
+#[test]
+fn fuzz_extents() {
+    let d = dir("fuzz");
+    let raw = d.join("disk.raw");
+    let f = File::create(&raw).unwrap();
+    f.set_len(1 << 20).unwrap();
+    f.write_all_at(&[0x5a; 70_000], 100_000).unwrap();
+    f.write_all_at(b"end", (1 << 20) - 3).unwrap();
+    drop(f);
+    let sparse = d.join("s.vmdk");
+    write_sparse(&crate::disk::Source::file(&raw).unwrap(), &sparse).unwrap();
+    let flat = b"# Disk DescriptorFile\nversion=1\nCID=fffffffe\nparentCID=ffffffff\ncreateType=\"monolithicFlat\"\n\
+                 RW 2048 FLAT \"disk.raw\" 0\n"
+        .to_vec();
+    let (x, out) = (d.join("x.vmdk"), d.join("out.raw"));
+    let seeds = [std::fs::read(&sparse).unwrap(), flat];
+    crate::fuzz::run("vmdk", crate::fuzz::inputs(&seeds, 600), |b| {
+        std::fs::write(&x, b).unwrap();
+        let _ = virtual_size(&x);
+        let _ = to_raw(&x, &out);
+        let _ = std::fs::remove_file(&out);
+    });
+    let _ = std::fs::remove_dir_all(&d);
+}

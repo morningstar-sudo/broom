@@ -14,7 +14,7 @@ pub fn exe_id() -> String {
     static ID: OnceLock<String> = OnceLock::new();
     ID.get_or_init(|| {
         std::fs::read("/proc/self/exe").map_or_else(
-            |_| env!("CARGO_PKG_VERSION").to_string(),
+            |_| crate::VERSION.to_string(),
             |b| blake3::hash(&b).to_hex()[..16].to_string(),
         )
     })
