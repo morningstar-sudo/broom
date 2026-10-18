@@ -242,7 +242,7 @@ The menu is grouped (each group folds; the one holding the open page stays open)
 | | **Groups** | which images, iSCSI disks and drivers each group of machines gets; hide their other disks |
 | Content | **Images** | goldens: upload, publish, cache (disk / RAM), versions, export, boot menu |
 | | **iSCSI Disks** | shared disks (games, apps…) and their update machine |
-| | **Drivers** | driver packages installed into each Windows machine's base |
+| | **Drivers** | driver packages each Windows machine installs at every boot (plug and play: no new base) |
 | Config | **Network** | DHCP server, Secure Boot clients, strict reset, DNS only for healthy machines |
 | | **Windows** | guest user, SSD room, golden downloads at once |
 | | **Settings** | your password; users (owner / staff); boot menu countdown |
@@ -285,12 +285,15 @@ sent, in parallel 8 MB chunks with retry) — or a single `.vmdk` / `.img` / `.z
   you need the room). The stage adds a firmware boot entry and restarts into it: Windows sets itself up once (as a
   client would), then install / change apps, run the prep script again, PXE-boot and **Capture** it back. An image
   published before its boot partitions were kept needs its VM uploaded once more.
-- **Base build on each machine:** on its first boot (and after a new golden, a rename or a driver change) every
+- **Base build on each machine:** on its first boot (and after a new golden, a rename or a license key) every
   Windows machine specializes the golden once and saves that as its *base*; every later boot resets to it. By default
-  the base is saved automatically (the machine restarts by itself after the first logon). Tick **Base mode** on an
-  image when a technician must set something up on each machine first (e.g. an anti-cheat's first run): the first
-  logon then waits on the desktop, and the restart the technician does saves the base — so don't leave a machine in
-  base mode to guests.
+  the base is saved automatically (the machine restarts by itself after the first logon).
+- **Base mode** (Machines page, per machine + one Windows image): when that machine boots that image, Windows boots
+  its base itself, so everything done is kept over as many restarts as it takes — Windows Update, apps that restart
+  (an anti-cheat's first run). A base being built also waits on the desktop instead of restarting. Turn it
+  off when done: the next boot saves it as the base and every later boot resets to it (a power cut meanwhile: saved at
+  the next clean shutdown). A rename or license change made while it is on applies after it is off (that
+  rebuilds the base). Don't leave a machine in base mode to guests — the Machines page marks it **BASE**.
 - **Strict reset** (Network page): Windows can then only start through PXE — the SSD's Windows boot entries are kept
   out of the boot order and Windows deletes its boot loader from the SSD after each start (the stage puts it back on
   the next PXE boot). Without it, a machine whose PXE fails (cable out, server down) still boots Windows from the SSD,
@@ -593,7 +596,7 @@ games included). The Machines page also shows each PC's CPU, RAM, temperature an
 
 **Does it work with anti-cheat (FACEIT)?**
 Yes — FACEIT Anti-Cheat runs on Broom clients with Secure Boot, TPM 2.0 and HVCI on (Network page → Secure Boot
-clients), with no MOK enrollment on the clients. If an anti-cheat needs a first run on each machine, tick **Base mode** on the image (see *Adding a golden*).
+clients), with no MOK enrollment on the clients. If an anti-cheat needs a first run on each machine, turn on **Base mode** for that machine (Machines page; see *Adding a golden*).
 
 **Is it free?**
 Yes — Apache-2.0, free for commercial use (e.g. a paid internet café).

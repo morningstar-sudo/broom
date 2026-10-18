@@ -37,7 +37,6 @@ const SCHEMA: &str = r#"
         hash        TEXT,                    -- sha256 of the golden (version check for the SSD cache)
         cache_mode  TEXT NOT NULL DEFAULT 'disk', -- where the golden is kept: 'disk' | 'zram'
         active_version TEXT,                 -- versions.rs version image.img equals (NULL = none)
-        base_mode   INTEGER NOT NULL DEFAULT 0, -- Windows: 1 = first logon waits in BASE MODE (technician), 0 = auto-commit
         use_ssd     INTEGER NOT NULL DEFAULT 1, -- Linux: 1 = cache + writes on the machine's SSD, 0 = SSD untouched (RAM only)
         grps        TEXT NOT NULL DEFAULT '', -- machine groups that get it in their boot menu, comma-separated; '' = all
         preload     INTEGER NOT NULL DEFAULT 0  -- 1 = machines that may boot it keep it on their SSD ahead of use
@@ -54,7 +53,8 @@ const SCHEMA: &str = r#"
         license_gen    INTEGER NOT NULL DEFAULT 0,
         license_result TEXT,                 -- slmgr output reported by the client
         grp            TEXT,                 -- free-text group, driver packages can target it
-        notes          TEXT                  -- free text for the admin
+        notes          TEXT,                 -- free text for the admin
+        base_image     INTEGER REFERENCES images(id) -- base mode (Windows): this image boots its base itself, changes kept
     );
 
     -- Windows driver packages (drivers.rs). hwids / groups: newline-separated lists.
@@ -116,7 +116,8 @@ const SCHEMA: &str = r#"
     INSERT OR IGNORE INTO config(key,value) VALUES('ltsp_password','123456');
 "#;
 
-const IMAGE_COLS: &str = "id,name,os,is_default,boot_script,hash,cache_mode,active_version,base_mode,use_ssd,grps,preload";
+const IMAGE_COLS: &str =
+    "id,name,os,is_default,boot_script,hash,cache_mode,active_version,use_ssd,grps,preload";
 
 fn image_row(r: &Row) -> rusqlite::Result<Image> {
     Ok(Image {
@@ -128,15 +129,14 @@ fn image_row(r: &Row) -> rusqlite::Result<Image> {
         hash: r.get(5)?,
         cache_mode: r.get(6)?,
         active_version: r.get(7)?,
-        base_mode: r.get::<_, i64>(8)? == 1,
-        use_ssd: r.get::<_, i64>(9)? == 1,
+        use_ssd: r.get::<_, i64>(8)? == 1,
         groups: r
-            .get::<_, String>(10)?
+            .get::<_, String>(9)?
             .split(',')
             .filter(|g| !g.is_empty())
             .map(String::from)
             .collect(),
-        preload: r.get::<_, i64>(11)? == 1,
+        preload: r.get::<_, i64>(10)? == 1,
     })
 }
 
@@ -181,7 +181,7 @@ fn private_files(path: &str) -> std::io::Result<()> {
 
 /// Schema version in `PRAGMA user_version`. A change to SCHEMA's tables bumps it and adds an `if v < N` step to
 /// migrate() (SCHEMA itself always holds the latest layout, for new DBs).
-const SCHEMA_VERSION: i64 = 3;
+const SCHEMA_VERSION: i64 = 4;
 
 fn has_column(c: &Connection, table: &str, col: &str) -> rusqlite::Result<bool> {
     c.query_row(
@@ -200,14 +200,14 @@ fn migrate(c: &mut Connection) -> rusqlite::Result<()> {
         return Ok(());
     }
     let tx = c.transaction()?;
-    if v < 2 {
-        // Columns added over time (a new DB already has them all from SCHEMA); v2: images per machine group + preloading.
+    if v < 4 {
+        // Columns added over time (a new DB already has them all from SCHEMA); v2: images per machine group + preloading;
+        // v4: base mode per machine.
         const COLS: &[(&str, &str, &str)] = &[
             ("images", "boot_script", "TEXT"),
             ("images", "hash", "TEXT"),
             ("images", "cache_mode", "TEXT NOT NULL DEFAULT 'disk'"),
             ("images", "active_version", "TEXT"),
-            ("images", "base_mode", "INTEGER NOT NULL DEFAULT 0"),
             ("images", "use_ssd", "INTEGER NOT NULL DEFAULT 1"),
             ("machines", "license_key", "TEXT"),
             ("machines", "license_state", "TEXT"),
@@ -217,6 +217,7 @@ fn migrate(c: &mut Connection) -> rusqlite::Result<()> {
             ("machines", "notes", "TEXT"),
             ("images", "grps", "TEXT NOT NULL DEFAULT ''"),
             ("images", "preload", "INTEGER NOT NULL DEFAULT 0"),
+            ("machines", "base_image", "INTEGER REFERENCES images(id)"),
         ];
         for (table, col, ddl) in COLS {
             if !has_column(&tx, table, col)? {
@@ -439,6 +440,11 @@ impl Db for Sqlite {
             .ok();
         t.execute("UPDATE machines SET image_id=NULL WHERE image_id=?1", [id])
             .map_err(e)?;
+        t.execute(
+            "UPDATE machines SET base_image=NULL WHERE base_image=?1",
+            [id],
+        )
+        .map_err(e)?;
         t.execute("DELETE FROM images WHERE id=?1", [id])
             .map_err(e)?;
         if let Some((os, true)) = gone {
@@ -481,13 +487,6 @@ impl Db for Sqlite {
         )
     }
 
-    fn set_base_mode(&self, id: i64, on: bool) -> DbResult<()> {
-        self.run(
-            "UPDATE images SET base_mode=?1 WHERE id=?2",
-            params![on as i64, id],
-        )
-    }
-
     fn set_use_ssd(&self, id: i64, on: bool) -> DbResult<()> {
         self.run(
             "UPDATE images SET use_ssd=?1 WHERE id=?2",
@@ -518,7 +517,7 @@ impl Db for Sqlite {
 
     fn machines(&self) -> DbResult<Vec<Machine>> {
         self.all(
-            "SELECT id,mac,ip,hostname,image_id,license_key,license_state,license_gen,license_result,grp,notes
+            "SELECT id,mac,ip,hostname,image_id,license_key,license_state,license_gen,license_result,grp,notes,base_image
              FROM machines ORDER BY hostname",
             [],
             |r| {
@@ -538,6 +537,7 @@ impl Db for Sqlite {
                     license_result: r.get(8)?,
                     grp: r.get(9)?,
                     notes: r.get(10)?,
+                    base_image: r.get(11)?,
                 })
             },
         )
@@ -628,6 +628,13 @@ impl Db for Sqlite {
         self.run(
             "UPDATE machines SET grp=?1 WHERE id=?2",
             params![grp, machine_id],
+        )
+    }
+
+    fn set_machine_base(&self, machine_id: i64, image_id: Option<i64>) -> DbResult<()> {
+        self.run(
+            "UPDATE machines SET base_image=?1 WHERE id=?2",
+            params![image_id, machine_id],
         )
     }
 

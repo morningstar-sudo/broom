@@ -6,14 +6,7 @@ fn m(id: i64, mac: &str, host: Option<&str>, ip: Option<&str>) -> Machine {
         mac: mac.into(),
         ip: ip.map(Into::into),
         hostname: host.map(Into::into),
-        image_id: None,
-        license_key: None,
-        license_tail: None,
-        license_state: None,
-        license_gen: 0,
-        license_result: None,
-        grp: None,
-        notes: None,
+        ..Default::default()
     }
 }
 
@@ -134,7 +127,6 @@ fn csv_parse_and_import_plan() {
         boot_script: None,
         hash: None,
         cache_mode: "disk".into(),
-        base_mode: false,
         use_ssd: true,
         groups: Vec::new(),
         preload: false,

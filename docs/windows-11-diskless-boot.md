@@ -23,8 +23,9 @@ Because Windows runs from the local SSD, it runs at local-disk speed and the ser
 rolled out. With the image's cache set to RAM, the server keeps a compressed copy of the golden in memory, so a whole
 room fetching a new golden at once never hammers the server's disk.
 
-On its first boot (and after a new golden, a rename or a driver change) each PC specializes the golden once and saves
-that as its **base** — its own hardware drivers and machine name. Every later boot resets to that base.
+On its first boot (and after a new golden or a rename) each PC specializes the golden once and saves that as its
+**base** — its machine name and license. Driver packages (Drivers page) are installed at every boot, so a new or
+updated one needs no new base. Every later boot resets to that base.
 
 ## What you need
 
@@ -95,8 +96,8 @@ PC restarts once by itself, and from then on every boot is clean.
 
 - **iSCSI disks** — keep game libraries (and other big apps) out of the golden, on shared disks each PC mounts under a drive letter.
   Update them from one machine and save; every PC gets the new version at its next boot.
-- **Base mode** — when something must be set up on each PC once (e.g. an anti-cheat's first run), the first logon
-  waits for a technician and their restart saves the base.
+- **Base mode** — per PC and image (Machines page): the PC keeps everything done over as many restarts as it takes
+  (Windows Update, an anti-cheat's first run); turned off, its next boot saves that as the base.
 - **Strict reset** — Windows can only start through PXE, so a PC that misses the network boot cannot start Windows
   without the reset.
 - **Versions** — snapshot the golden before a change, roll back in a click.

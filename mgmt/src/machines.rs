@@ -8,7 +8,54 @@ use crate::api::{ApiError, bad, ise};
 use crate::db::Machine;
 
 pub fn routes() -> Router<SharedState> {
-    Router::new().route("/api/machines", post(add)) // Register (Machines + Devices pages)
+    Router::new()
+        .route("/api/machines", post(add)) // Register (Machines + Devices pages)
+        .route("/api/machines/base", post(set_base)) // base mode (Machines page)
+}
+
+#[derive(Deserialize)]
+struct BaseBody {
+    id: i64,
+    /// The Windows image whose base this machine boots itself; None = off.
+    image: Option<i64>,
+}
+
+/// POST /api/machines/base {id, image|null} — base mode: when the machine boots `image`, the stage boots that image's
+/// base itself, so every change is kept over as many restarts as needed (Windows Update, an app's own restarts); off
+/// again → its next boot saves the base and resets to it from then on. Read by /boot/start: no republish.
+async fn set_base(
+    State(st): State<SharedState>,
+    axum::Extension(w): axum::Extension<crate::auth::Who>,
+    Json(b): Json<BaseBody>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let m = machine_by_id(&st, b.id)?;
+    let img = match b.image {
+        Some(id) => Some(
+            st.db
+                .image(id)
+                .map_err(ise)?
+                .filter(|i| i.os == "windows")
+                .ok_or_else(|| bad("base mode needs a Windows image"))?,
+        ),
+        None => None,
+    };
+    st.db
+        .set_machine_base(m.id, img.as_ref().map(|i| i.id))
+        .map_err(ise)?;
+    match &img {
+        Some(i) => tracing::warn!(
+            "{}: base mode of {} ON for image {}",
+            w.name,
+            who(&m),
+            i.name
+        ),
+        None => tracing::info!(
+            "{}: base mode of {} off (its next boot saves the base)",
+            w.name,
+            who(&m)
+        ),
+    }
+    Ok(crate::api::ok())
 }
 
 /// A machine deleted: what is kept about it elsewhere goes too — its disks and Remote key (config, by MAC), and the

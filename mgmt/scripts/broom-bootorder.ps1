@@ -121,6 +121,28 @@ if ([IO.File]::Exists($wf) -and [IO.File]::Exists($srvf)) {
     }
   } catch { }
 }
+# Drivers (Drivers page), plug and play: the stage extracts this machine's packages (checked against the server's
+# sha256) into broom\drivers at every PXE boot -> installed at every boot, once (this task also runs every 5 minutes),
+# so a new or updated package needs no new base. Before the games disk: a network driver drops the link for a moment.
+# Copied to a local folder first (pnputil wants a normal path); only drivers matching real devices get installed, and
+# one already in use is skipped quickly; a new display driver blanks the screen for a moment.
+$dmark = "$env:SystemRoot\Temp\broom-drivers.txt"
+$dd = $v.Path + 'broom\drivers'
+if ([IO.Directory]::Exists($dd) -and (-not (Test-Path $dmark) -or (Get-Content $dmark -Raw).Trim() -ne $bootId)) {
+  try {
+    $tmp = "$env:SystemRoot\Temp\broom-drivers"
+    Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue
+    foreach ($f in [IO.Directory]::GetFiles($dd, '*', [IO.SearchOption]::AllDirectories)) {
+      if ($f.EndsWith('.sha256') -or $f.EndsWith('.tar.gz')) { continue }
+      $t = $tmp + $f.Substring($dd.Length)
+      [IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($t)) | Out-Null
+      [IO.File]::Copy($f, $t, $true)
+    }
+    if (Test-Path $tmp) { & pnputil /add-driver "$tmp\*.inf" /subdirs /install | Out-Null }
+    Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue
+    Set-Content -Encoding ascii $dmark $bootId
+  } catch { }
+}
 # Last: the games disk (if the server has one) as a drive letter: broom-games.ps1, copied out like the stub does
 # (volume path). Waits for the network at startup.
 $gf = $v.Path + 'broom\broom-games.ps1'

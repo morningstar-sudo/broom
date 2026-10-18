@@ -1,9 +1,10 @@
-// drivers.rs — custom Windows driver packages (VGA, LAN, audio…) installed into each machine's base.
+// drivers.rs — custom Windows driver packages (VGA, LAN, audio…) installed on each machine at every boot.
 // Upload: a .zip of an EXTRACTED driver folder (at least one .inf) → <home>/tftp/broom-drivers/<name>.tar.gz
 // (the stage has tar/gzip, no unzip) + the hardware IDs read from its .inf files.
 // Stage, every boot: POST /api/drivers/for?mac= (body = its PCI/USB IDs) → "name sha256" lines of the packages
 // for this machine: a hardware ID matches, the package targets its group, or it is ticked "all machines".
-// broom-done.ps1 (scripts/, handed to the client by the stage, see winstage::publish) pnputil-installs them while base is built.
+// broom-bootorder.ps1 (scripts/, handed to the client by the stage) pnputil-installs them at every boot: plug and play,
+// a new or updated package needs no new base.
 use axum::{
     Json, Router,
     body::Body,
@@ -248,11 +249,9 @@ async fn upload_done(
         .await
         .map_err(ise)?
         .map_err(bad)?;
-    let before = key_sets(&st);
     st.db
         .put_driver(&b.name, &sha, size, &ids, crate::now_secs() as i64)
         .map_err(ise)?;
-    rearm_changed(&st, before);
     tracing::info!(
         "driver package {}: {infs} .inf, {} hardware IDs, {:.1} MB",
         b.name,
@@ -294,11 +293,9 @@ async fn set_targets(
         .into_iter()
         .find(|d| d.id == b.id)
         .ok_or((StatusCode::NOT_FOUND, "no such package".to_string()))?;
-    let before = key_sets(&st);
     st.db
         .set_driver_targets(d.id, b.all_machines, &groups)
         .map_err(ise)?;
-    rearm_changed(&st, before);
     tracing::info!(
         "driver package {}: all machines {}, groups [{}]",
         d.name,
@@ -313,7 +310,7 @@ struct IdBody {
     id: i64,
 }
 
-/// POST /api/drivers/delete {id} — machines that had it drop it on their next boot (base rebuilt).
+/// POST /api/drivers/delete {id} — machines stop installing it from their next boot.
 async fn delete(
     State(st): State<SharedState>,
     Json(b): Json<IdBody>,
@@ -325,50 +322,10 @@ async fn delete(
         .into_iter()
         .find(|d| d.id == b.id)
         .ok_or((StatusCode::NOT_FOUND, "no such package".to_string()))?;
-    let before = key_sets(&st);
     st.db.delete_driver(d.id).map_err(ise)?;
-    rearm_changed(&st, before);
     let _ = std::fs::remove_file(tar_path(&d.name));
     tracing::info!("driver package {} deleted", d.name);
     Ok(crate::api::ok())
-}
-
-/// Machine id → the "name sha256" packages its stage gets, for every machine with a license key (from the hardware
-/// IDs its stage last reported). Taken before a driver / group change, compared after by rearm_changed.
-pub(crate) fn key_sets(st: &SharedState) -> std::collections::HashMap<i64, Vec<String>> {
-    let (Ok(machines), Ok(hw), Ok(drivers)) =
-        (st.db.machines(), st.db.machine_hw(), st.db.drivers())
-    else {
-        return Default::default();
-    };
-    machines
-        .into_iter()
-        .filter(|m| m.license_key.is_some())
-        .map(|m| {
-            let ids: BTreeSet<String> = hw
-                .iter()
-                .find(|(mac, _)| mac.eq_ignore_ascii_case(&m.mac))
-                .map(|(_, h)| h.iter().cloned().collect())
-                .unwrap_or_default();
-            let set = pick(&drivers, &ids, m.grp.as_deref())
-                .iter()
-                .map(|d| format!("{} {}", d.name, d.sha256))
-                .collect();
-            (m.id, set)
-        })
-        .collect()
-}
-
-/// Another package set than `before` → that machine's stage rebuilds base, which needs the license key once more.
-pub(crate) fn rearm_changed(st: &SharedState, before: std::collections::HashMap<i64, Vec<String>>) {
-    for (id, set) in key_sets(st) {
-        if before.get(&id).is_some_and(|old| *old != set) && st.db.rearm_quiet(id).unwrap_or(false)
-        {
-            tracing::info!(
-                "license of machine {id} armed again (driver set changed → base rebuilt)"
-            );
-        }
-    }
 }
 
 #[derive(Deserialize)]
@@ -413,8 +370,7 @@ async fn for_machine(
     let got = pick(&drivers, &hw, m.as_ref().and_then(|m| m.grp.as_deref()));
     // The stage asks this on every boot, near its end → the machine IS going through PXE (license window,
     // "not reset" check in license.rs). Refreshed here because a golden download can outlast the window opened at
-    // /boot/start; it grants nothing /boot/start doesn't (both are open to any client). It never re-arms a key:
-    // that is decided on the server (rearm_changed), never by what a client sends.
+    // /boot/start; it grants nothing /boot/start doesn't (both are open to any client). It never re-arms a key.
     st.saw_pxe(&mac, None);
     crate::bench::stage_reached(&mac);
     let who = m.and_then(|m| m.hostname).unwrap_or_else(|| mac.clone());

@@ -24,7 +24,6 @@ pub fn routes() -> Router<SharedState> {
         .route("/api/images/publish", post(publish_now))
         .route("/api/images/boot-script", post(set_boot_script))
         .route("/api/images/cache-mode", post(set_cache_mode))
-        .route("/api/images/base-mode", post(set_base_mode))
         .route("/api/images/ssd", post(set_use_ssd))
         .route("/api/images/groups", post(set_groups))
         .route("/api/images/preload", post(set_preload))
@@ -807,25 +806,6 @@ async fn broom_prep(State(st): State<SharedState>) -> impl IntoResponse {
 struct OnOff {
     id: i64,
     on: bool,
-}
-
-/// POST /api/images/base-mode {id, on} — Windows: BASE MODE on the first logon of each machine (a technician sets up
-/// apps, then restarts) instead of committing base at once. Read by /boot/start → no republish needed.
-async fn set_base_mode(
-    State(st): State<SharedState>,
-    Json(b): Json<OnOff>,
-) -> Result<Json<serde_json::Value>, ApiError> {
-    let name = name_of(&st, b.id)?;
-    st.db.set_base_mode(b.id, b.on).map_err(ise)?;
-    tracing::info!(
-        "image {name}: base mode {}",
-        if b.on {
-            "ON (first logon waits for a technician)"
-        } else {
-            "off"
-        }
-    );
-    Ok(crate::api::ok())
 }
 
 /// GET /api/cache-list (public: Windows stage + Linux cache script, every boot) → "name hash" per image the machine at

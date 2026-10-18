@@ -19,8 +19,6 @@ pub struct Image {
     pub hash: Option<String>,
     /// Where a Linux golden is served from: "disk" | "zram".
     pub cache_mode: String,
-    /// Windows: first logon waits in BASE MODE (a technician sets up apps, then restarts) instead of committing base.
-    pub base_mode: bool,
     /// Linux: cache the golden + keep the session's writes on the machine's SSD (false = SSD untouched, RAM only).
     /// Windows always uses the SSD (it boots from a VHDX on it).
     pub use_ssd: bool,
@@ -60,6 +58,9 @@ pub struct Machine {
     pub grp: Option<String>,
     /// Free text for the admin (seat, hardware notes…).
     pub notes: Option<String>,
+    /// Base mode (Machines page): when it boots this Windows image, the stage boots its base itself — every change is
+    /// kept, over as many restarts as needed (Windows Update, an app's own restarts); off again → saved as the base.
+    pub base_image: Option<i64>,
 }
 
 /// Windows driver package (drivers.rs): an extracted driver folder, served as a .tar.gz to the stage.
@@ -135,7 +136,6 @@ pub trait Db: Send + Sync {
     fn set_published(&self, id: i64, boot_script: &str, hash: &str) -> DbResult<()>;
     fn set_cache_mode(&self, id: i64, mode: &str) -> DbResult<()>;
     /// Windows: the first logon on each machine waits in BASE MODE for a technician (true) or commits base at once.
-    fn set_base_mode(&self, id: i64, on: bool) -> DbResult<()>;
     fn set_use_ssd(&self, id: i64, on: bool) -> DbResult<()>;
     fn set_image_groups(&self, id: i64, groups: &[String]) -> DbResult<()>;
     fn set_preload(&self, id: i64, on: bool) -> DbResult<()>;
@@ -162,6 +162,7 @@ pub trait Db: Send + Sync {
     fn take_license(&self, machine_id: i64) -> DbResult<Option<String>>;
     fn set_license_result(&self, machine_id: i64, result: &str) -> DbResult<()>;
     fn set_machine_group(&self, machine_id: i64, grp: Option<&str>) -> DbResult<()>;
+    fn set_machine_base(&self, machine_id: i64, image_id: Option<i64>) -> DbResult<()>;
     /// Hardware IDs a machine's stage reported (by MAC, registered or not) + when.
     fn put_machine_hw(&self, mac: &str, hwids: &[String], seen: i64) -> DbResult<()>;
     fn machine_hw(&self) -> DbResult<Vec<(String, Vec<String>)>>;

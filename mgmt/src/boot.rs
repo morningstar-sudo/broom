@@ -165,6 +165,7 @@ pub async fn start(
         st.saw_pxe(&mac, Some(&peer));
     }
     let grp = m.as_ref().and_then(|m| m.grp.clone());
+    let base_image = m.as_ref().and_then(|m| m.base_image);
     let host = m.and_then(|m| m.hostname);
     // Image names are [A-Za-z0-9_-]; keep only those (the value is logged and echoed into the iPXE script).
     let name: String = q
@@ -218,7 +219,8 @@ pub async fn start(
                 // The server's address at boot time — boot scripts use ${broom-srv}, so changing the Server IP needs
                 // no republish.
                 st.db.get_config("dhcp_server_ip", ""),
-                i.base_mode as u8,
+                // Base mode: this machine boots this image's base itself (Machines page).
+                (base_image == Some(i.id)) as u8,
                 strict as u8,
                 linux_share_gb(linux_sizes),
                 (i.use_ssd || i.os == "windows") as u8,

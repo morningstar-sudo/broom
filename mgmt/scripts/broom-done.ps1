@@ -17,22 +17,7 @@ $t2 = New-ScheduledTaskTrigger -Once -At (Get-Date) -RepetitionInterval (New-Tim
 try { Register-ScheduledTask -TaskName BroomBootOrder -Action $a -Trigger $t1,$t2 -User SYSTEM -RunLevel Highest -Force -ErrorAction Stop | Out-Null }
 catch { step "boot order task FAILED: $_ (PXE may not stay first, boots are not reported)" }
 & powershell -NoProfile -ExecutionPolicy Bypass -File $s
-# Drivers (Drivers page): the stage put this machine's packages in broom\drivers -> install them into base.
-# Copied to a local folder first (pnputil wants a normal path); only drivers matching real devices get installed.
-$dd = $v.Path + 'broom\drivers'
-if ([IO.Directory]::Exists($dd)) {
-  $tmp = "$env:SystemRoot\Temp\broom-drivers"
-  Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue
-  foreach ($f in [IO.Directory]::GetFiles($dd, '*', [IO.SearchOption]::AllDirectories)) {
-    if ($f.EndsWith('.sha256') -or $f.EndsWith('.tar.gz')) { continue }
-    $t = $tmp + $f.Substring($dd.Length)
-    [IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($t)) | Out-Null
-    [IO.File]::Copy($f, $t, $true)
-  }
-  step 'installing driver packages from the server'
-  if (Test-Path $tmp) { & pnputil /add-driver "$tmp\*.inf" /subdirs /install | Out-Null }
-  Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue
-}
+# (The Drivers page's packages: installed by broom-bootorder.ps1 just above, as at every boot.)
 # Network up sooner at every boot (games disk, boot report): Energy Efficient Ethernet off on the wired cards (its
 # link-up takes seconds longer, some cards drop the link right after) and no duplicate-address probe before using the
 # IPv4 address (the server hands each address out once). Here because the client's own cards only exist from now on
@@ -89,23 +74,22 @@ if ([IO.File]::Exists($hook)) {
 $f = $v.Path + 'broom\base.ok'
 try { [IO.File]::WriteAllText($f, 'ok') } catch { }
 if (-not [IO.File]::Exists($f)) { step 'could not write base.ok on BROOMWIN -> base is rebuilt next boot'; exit }
-# Default (base mode off for this image): restart NOW -> the stage commits base before anyone can use the machine, so
+# Default (base mode off for this machine): restart NOW -> the stage commits base before anyone can use the machine, so
 # a guest's session can never become the base.
 if (-not [IO.File]::Exists($v.Path + 'broom\basemode.txt')) {
   step 'base ready - restarting to save it'
   Restart-Computer -Force
   exit
 }
-# BASE MODE (ticked on the image): nothing restarts by itself. The technician sets up what must survive the reset on
-# THIS machine (e.g. FACEIT AC: open it, it wants one restart through its own RESTART button), then restarts -> that
-# restart commits base. Nobody there -> the next clean restart / shutdown commits it, whoever used the machine
-# meanwhile. A hard power-off does NOT (the VHDX is left dirty -> base is built again, the setup is lost).
-step 'BASE MODE: set up apps now), then RESTART - that restart saves base for every boot'
-$msg = "BASE MODE - this machine is building its base.`n`n" +
-  "Everything done now is KEPT on this machine after every reset.`n`n" +
-  "1. Open FACEIT AC (or other apps) and set them up.`n" +
-  "2. Restart (FACEIT's RESTART button, or Start > Restart).`n`n" +
-  "That restart saves the base. Afterwards every boot resets to it.`n`n" +
-  "Do NOT switch the power off or hold the power button: that loses the setup."
+# BASE MODE (Machines page: this machine + this image): nothing restarts by itself, and every later boot of this image
+# keeps what is done (the stage boots the base itself) until base mode is turned off on the server: set up apps,
+# Windows Update, restart as often as they need. Turned off -> the next boot saves it as the base.
+step 'BASE MODE: changes are kept over restarts until base mode is turned off on the server'
+$msg = "BASE MODE is on for this machine.`n`n" +
+  "Everything done now is KEPT, over as many restarts as needed`n" +
+  "(Windows Update, apps that restart, FACEIT AC...).`n`n" +
+  "When done, turn base mode off on the server (Machines page):`n" +
+  "the next boot saves it as the base, and every boot after resets to it.`n`n" +
+  "Shut down or restart from Windows - do NOT cut the power."
 # 0x40 information icon + 0x1000 system modal (stays on top of the desktop).
 try { (New-Object -ComObject WScript.Shell).Popup($msg, 0, 'Broom - BASE MODE', 0x1040) | Out-Null } catch { }

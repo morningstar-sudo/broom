@@ -522,13 +522,12 @@ fn stage_forged_first_pending_ignored() {
     let _ = std::fs::remove_dir_all(&d);
 }
 
-/// Base build: the driver folders are extracted again from the checked archives (a guest's planted or edited
-/// folder is gone), an archive that doesn't match its sha256 is left out.
+/// Every boot: the driver folders Windows installs from are extracted again from the checked archives (a guest's
+/// planted or edited folder is gone), an archive that doesn't match its sha256 is left out.
 #[test]
-fn stage_drivers_reextracted_for_base() {
+fn stage_drivers_reextracted_every_boot() {
     let s = super::stage_script();
-    let part = &s[s.find("  for x in drivers/*; do").unwrap()
-        ..s.find("  cp base-template.vhdx child.vhdx || die").unwrap()];
+    let part = &s[s.find("\nfor x in drivers/*; do").unwrap()..s.find("# Benchmark page").unwrap()];
     let d = std::env::temp_dir().join("broom_t_drvx");
     let _ = std::fs::remove_dir_all(&d);
     std::fs::create_dir_all(d.join("src")).unwrap();
@@ -608,15 +607,11 @@ fn stage_drivers_sync() {
         }
         std::fs::write(b.join("base.vhdx"), "x").unwrap_or(()); // a base exists before every boot
         assert!(stage_sh().args(["-c", &mock]).status().unwrap().success());
-        let rebuilt = !b.join("base.vhdx").exists();
-        // Commit what a finished base build would record (stage: cp drv.txt base.drv).
-        match std::fs::read(b.join("drv.txt")) {
-            Ok(v) => std::fs::write(b.join("base.drv"), v).unwrap(),
-            Err(_) => {
-                let _ = std::fs::remove_file(b.join("base.drv"));
-            }
-        }
-        (rebuilt, b.join("drivers/nv/nv.inf").exists())
+        // (base rebuilt?, package extracted for Windows to install?)
+        (
+            !b.join("base.vhdx").exists(),
+            b.join("drivers/nv/nv.inf").exists(),
+        )
     };
     let ans = format!("nv {nv}\n");
     assert_eq!(
@@ -626,19 +621,19 @@ fn stage_drivers_sync() {
     );
     assert_eq!(
         step(Some(&ans)),
-        (true, true),
-        "new package → downloaded + base rebuilt"
+        (false, true),
+        "new package → downloaded + extracted, Windows installs it; the base stays"
     );
     assert!(
         b.join("drivers/nv.tar.gz").exists(),
-        "archive kept: each base build extracts it again"
+        "archive kept: every boot extracts it again"
     );
     assert_eq!(step(Some(&ans)), (false, true), "unchanged → nothing to do");
     assert_eq!(step(None), (false, true), "server down → keep");
     assert_eq!(
         step(Some("")),
-        (true, false),
-        "package gone → removed + rebuilt"
+        (false, false),
+        "package gone → removed, the base stays"
     );
     assert_eq!(
         step(Some("bad s2\n")),
@@ -1142,5 +1137,57 @@ fn stage_bundle_install() {
     assert!(!super::stage_ok(&sd, Some(&sha)), "missing file");
     std::fs::write(format!("{sd}/files.sha256"), "").unwrap();
     assert!(!super::stage_ok(&sd, Some(&sha)), "empty list never passes");
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// Base mode (cut from stage_script()): on → the base is what Windows boots (base.open); kept over boots; off → saved
+/// back as the base, or kept open while Windows left it dirty; back from being parked → open again.
+#[test]
+fn stage_base_mode() {
+    let s = super::stage_script();
+    let block = &s[s.find("# Base mode (Machines page: this machine").unwrap()
+        ..s.find("# Machine name (Machines table").unwrap()];
+    let d = std::env::temp_dir().join("broom_t_basemode");
+    let _ = std::fs::remove_dir_all(&d);
+    std::fs::create_dir_all(&d).unwrap();
+    // vhdx_guid stub: a "dirty" file has no GUID.
+    let boot = |base: &str| {
+        let sh = format!(
+            "cd {}; log(){{ :; }}; vhdx_guid(){{ grep -q dirty \"$1\" || echo '{{g}}'; }}; BASE={base}\n{block}\nls",
+            d.display()
+        );
+        let o = stage_sh().args(["-c", &sh]).output().unwrap();
+        assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+        let mut v: Vec<String> = String::from_utf8_lossy(&o.stdout)
+            .lines()
+            .map(String::from)
+            .collect();
+        v.sort();
+        v.join(" ")
+    };
+    std::fs::write(d.join("base.vhdx"), "base").unwrap();
+    assert_eq!(boot("0"), "base.vhdx", "off: nothing changes");
+    assert_eq!(
+        boot("1"),
+        "base.open child.vhdx",
+        "on: the base is booted itself"
+    );
+    std::fs::write(d.join("child.vhdx"), "base + updates").unwrap();
+    assert_eq!(boot("1"), "base.open child.vhdx", "kept over boots");
+    std::fs::write(d.join("child.vhdx"), "dirty").unwrap();
+    assert_eq!(
+        boot("0"),
+        "base.open child.vhdx",
+        "off but dirty: stays open"
+    );
+    std::fs::write(d.join("child.vhdx"), "base + updates").unwrap();
+    assert_eq!(boot("0"), "base.vhdx", "off: saved as the base");
+    assert_eq!(
+        std::fs::read_to_string(d.join("base.vhdx")).unwrap(),
+        "base + updates"
+    );
+    // Parked while open (base.open + base.vhdx, no child) → open again.
+    std::fs::write(d.join("base.open"), "").unwrap();
+    assert_eq!(boot("1"), "base.open child.vhdx");
     let _ = std::fs::remove_dir_all(&d);
 }

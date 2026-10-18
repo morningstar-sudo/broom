@@ -241,13 +241,15 @@ rm -f /run/broom-agent.key
 #    names have no dot). Parking is a rename on the same volume (instant) and the VHDX parent links are relative, so a
 #    set works in either place. active.txt = the image at the top; every step can simply run again after a power cut.
 #    img.<image>/.parked = when it was parked = its last use (the oldest goes first when space runs out).
-IMGSET="golden.vhdx golden.sha256 base.vhdx base.host base.lic base.drv base-template.vhdx child-template.vhdx child-template.off efi.tar.gz"
+IMGSET="golden.vhdx golden.sha256 base.vhdx base.open base.host base.lic base.drv base-template.vhdx child-template.vhdx child-template.off efi.tar.gz"
 cd $B
 act=$(cat active.txt 2>/dev/null)
 case "$act" in ''|*[!A-Za-z0-9_-]*) act=$NAME;; esac   # a disk from before image folders: the top set is this image's
 if [ "$act" != "$NAME" ]; then
   log "image $act parked, $NAME to the top"
-  rm -f child.vhdx first.pending base.ok   # the last session / an unfinished base build of the parked image
+  # The last session / an unfinished base build of the parked image go; a base open in base mode is parked as the base.
+  if [ -f base.open ] && [ -f child.vhdx ]; then mv child.vhdx base.vhdx; else rm -f child.vhdx; fi
+  rm -f first.pending base.ok
   mkdir -p "img.$act"
   for f in $IMGSET dl-*; do [ -e "$f" ] && mv "$f" "img.$act/"; done
   date +%s > "img.$act/.parked"
@@ -331,7 +333,7 @@ if [ "$(cat $B/golden.sha256 2>/dev/null)" != "$HASH" ]; then
   for x in $B/dl-*; do [ "$x" = "$D" ] || rm -rf "$x"; done
   # (golden.chunks / .patching / .spare: leftovers of the delta update of older versions.)
   rm -f $B/golden.sha256 $B/golden.vhdx $B/golden.chunks $B/golden.vhdx.patching $B/base.vhdx $B/base.ok $B/first.pending \
-    $B/child.vhdx $B/child-local.vhdx
+    $B/child.vhdx $B/child-local.vhdx $B/base.open
   rm -rf $B/golden.vhdx.spare
   mkdir -p $D
   # Golden size from the server. NO $((...)) on external data (an ash arithmetic error exits the whole script) → awk.
@@ -487,7 +489,7 @@ cd $B
 # first.pending + base.ok while a base already exists = not written by a base build (the guest is a local admin and
 # can write BROOMWIN): committing would make the reset child (parent .\base.vhdx) the base → base points at itself
 # and Windows never boots again. Ignore them.
-if [ -f first.pending ] && [ -f base.vhdx ]; then
+if [ -f first.pending ] && { [ -f base.vhdx ] || [ -f base.open ]; }; then
   log "first.pending found next to an existing base -> ignored (not a base build)"; rm -f first.pending base.ok
 fi
 if [ -f first.pending ]; then
@@ -498,7 +500,6 @@ if [ -f first.pending ]; then
       # Name that broom-done set inside base = host.txt of the boot that created base.
       cp host.txt base.host 2>/dev/null
       cp lic.txt base.lic 2>/dev/null
-      cp drv.txt base.drv 2>/dev/null
       rm -f first.pending base.ok
       log "base done (specialized once on this machine) -> reset mode"
     else
@@ -507,6 +508,23 @@ if [ -f first.pending ]; then
   else
     log "first boot not finished -> redo (repeating every boot = Windows cannot write base.ok: old golden/broom-done error -> Publish again)"
   fi
+fi
+# Base mode (Machines page: this machine + this image, broom.base=1): Windows boots the base itself — renamed to
+# child.vhdx, the file the boot loader opens (its parent is still .\golden.vhdx) — so everything done is kept, over as
+# many restarts as it takes (Windows Update, an app's own restarts). base.open marks it. Turned off → renamed back:
+# that is the new base, every later boot resets to it. Left dirty (power cut) → open until Windows has shut it down
+# cleanly once (Windows replays the VHDX log when it boots it). While open, the rebuild triggers below (name, license,
+# drivers) wait: they look for base.vhdx.
+[ -f base.open ] && [ -f base.vhdx ] && [ ! -f child.vhdx ] && mv base.vhdx child.vhdx   # back from being parked
+[ -f base.open ] && [ ! -f child.vhdx ] && rm -f base.open
+if [ -f base.open ] && [ "$BASE" != 1 ]; then
+  if [ -n "$(vhdx_guid child.vhdx)" ]; then
+    mv child.vhdx base.vhdx && rm -f base.open && log "base mode off -> the base is saved with its changes"
+  else
+    log "base mode off, but Windows did not shut the base down cleanly -> kept open: start Windows, shut it down once"
+  fi
+elif [ "$BASE" = 1 ] && [ ! -f base.open ] && [ -f base.vhdx ]; then
+  mv base.vhdx child.vhdx && touch base.open && log "base mode on -> Windows boots the base itself, every change is kept"
 fi
 # Machine name (Machines table on the web, by MAC) → host.txt; broom-done sets it when creating base. Every boot
 # resets to base → renaming = rebuild base (specialize once more). Unregistered machine: keep the Windows name.
@@ -522,7 +540,7 @@ fi
 # License key (Machines page): LIC = generation from the server (a counter, never the key). Set / re-armed →
 # rebuild base so broom-done fetches the key (once) while base is built. srv.txt = where broom-done asks.
 echo "$SRV" > srv.txt
-# Base mode (per image, Images page): broom-done waits for a technician instead of committing base right away.
+# Base mode (Machines page): a base being built waits for a technician instead of being committed right away.
 if [ "$BASE" = 1 ]; then echo 1 > basemode.txt; else rm -f basemode.txt; fi
 if [ -n "$LIC" ]; then
   echo "$LIC" > lic.txt
@@ -534,8 +552,8 @@ else
   rm -f lic.txt
 fi
 # Drivers (Drivers page): send this machine's PCI/USB IDs, the server answers "name sha256" for its packages
-# (hardware match / group / all machines) → kept in broom\drivers\<name>\; broom-done pnputil-installs them
-# while base is built. The set present differs from base's → rebuild base. No answer → keep what is here.
+# (hardware match / group / all machines) → kept in broom\drivers\<name>\; broom-bootorder.ps1 pnputil-installs them
+# at every boot (plug and play: a new or updated package needs no new base). No answer → keep what is here.
 # printf, NOT echo: dash/ash echo mangles backslashes (PCI\VEN_...).
 hwids(){
   for d in /sys/bus/pci/devices/*; do
@@ -554,7 +572,7 @@ if [ -n "$MAC" ] && wget -q -T 10 -O /run/broom-drv.txt --post-file=/run/broom-h
     if [ "$(cat drivers/$n.sha256 2>/dev/null)" != "$h" ] || [ ! -f drivers/$n.tar.gz ]; then
       log "driver $n: downloading"
       rm -rf drivers/$n drivers/$n.sha256 drivers/$n.tmp drivers/$n.tar.gz; mkdir -p drivers/$n.tmp
-      # Checked against the server's sha256 BEFORE extracting: broom-done pnputil-installs these into base.
+      # Checked against the server's sha256 BEFORE extracting: Windows installs these as SYSTEM.
       if wget -q -O drivers/$n.tar.gz "http://$SRV/tftp/broom-drivers/$n.tar.gz" \
          && [ "$(sha256sum drivers/$n.tar.gz | cut -c1-64)" = "$h" ] && tar -xzf drivers/$n.tar.gz -C drivers/$n.tmp; then
         mv drivers/$n.tmp drivers/$n && echo "$h" > drivers/$n.sha256
@@ -569,16 +587,19 @@ if [ -n "$MAC" ] && wget -q -T 10 -O /run/broom-drv.txt --post-file=/run/broom-h
     grep -q "^$n " /run/broom-drv.txt || { rm -rf drivers/$n "$f" drivers/$n.tar.gz; log "driver $n: removed"; }
   done
   log "drivers: $(grep -c . /run/broom-drv.txt) package(s) for this machine, $(grep -c . /run/broom-drv-have.txt) ready"
-  # Signature of the packages actually here; none → empty (a base built without drivers stays valid).
-  DRV=""; [ -s /run/broom-drv-have.txt ] && DRV=$(sha256sum /run/broom-drv-have.txt | cut -c1-16)
-  if [ -n "$DRV" ]; then echo "$DRV" > drv.txt; else rm -f drv.txt; fi
-  if [ -f base.vhdx ] && [ "$(cat base.drv 2>/dev/null)" != "$DRV" ]; then
-    log "drivers changed: rebuilding base"
-    rm -f base.vhdx child-local.vhdx base.host base.lic base.drv
-  fi
 else
   log "drivers: server did not answer -> keeping the current ones"
 fi
+# The extracted folders Windows installs from are on BROOMWIN, writable by the guest → extracted again at every boot
+# from the checked archives (server's list when it answered, else the stored sha256).
+for x in drivers/*; do [ -d "$x" ] && rm -rf "$x"; done
+for t in drivers/*.tar.gz; do
+  [ -f "$t" ] || continue; n=${t##*/}; n=${n%.tar.gz}
+  h=$(sed -n "s/^$n //p" /run/broom-drv.txt 2>/dev/null); [ -n "$h" ] || h=$(cat drivers/$n.sha256 2>/dev/null)
+  mkdir -p drivers/$n
+  if [ -n "$h" ] && [ "$(sha256sum $t | cut -c1-64)" = "$h" ] && tar -xzf $t -C drivers/$n; then :
+  else rm -rf drivers/$n drivers/$n.sha256 $t; log "driver $n: archive does not match -> left out"; fi
+done
 # Benchmark page: the admin asked to measure this machine → 1 GB of the golden read straight from the SSD (iflag=direct:
 # the disk, not the page cache) + zeros downloaded from the server, both timed; the results go back to the server.
 # GNU dd by path (busybox runs its own applet first). NO $((...)) on these numbers → awk. A function with local
@@ -607,26 +628,20 @@ bench
 # The pagefile goes with them (what was paged out of the last session's RAM); broom-bootorder.ps1 makes a fresh one of
 # PF GB once Windows is up (pagefile.txt) and says how that went (pagefile.result).
 [ -f pagefile.result ] && log "pagefile of the last session: $(cat pagefile.result)"
-rm -f child.vhdx child-local.vhdx games-*-child.vhdx pagefile.sys pagefile.result
+# (In base mode child.vhdx IS the base, open: kept.)
+if [ -f base.open ]; then rm -f child-local.vhdx games-*-child.vhdx pagefile.sys pagefile.result
+else rm -f child.vhdx child-local.vhdx games-*-child.vhdx pagefile.sys pagefile.result; fi
 if [ "$PF" -gt 0 ]; then echo "$PF" > pagefile.txt; else rm -f pagefile.txt; fi
 g=""; [ -f base.vhdx ] && g=$(vhdx_guid base.vhdx)
 if [ -f base.vhdx ] && [ -z "$g" ]; then
   log "base.vhdx header unreadable -> rebuilding base"; rm -f base.vhdx base.host base.lic base.drv
 fi
-if [ -n "$g" ]; then
+if [ -f base.open ]; then
+  MODE="base mode (every change is kept)"
+elif [ -n "$g" ]; then
   cp child-template.vhdx child.vhdx && patch16 child.vhdx "$g" "$(cat child-template.off)" || die "build child.vhdx"
   MODE=reset
 else
-  # The extracted driver folders broom-done installs into base are on BROOMWIN, writable by the guest → extract them
-  # again from the checked archives (server's list when it answered, else the stored sha256) before base is built.
-  for x in drivers/*; do [ -d "$x" ] && rm -rf "$x"; done
-  for t in drivers/*.tar.gz; do
-    [ -f "$t" ] || continue; n=${t##*/}; n=${n%.tar.gz}
-    h=$(sed -n "s/^$n //p" /run/broom-drv.txt 2>/dev/null); [ -n "$h" ] || h=$(cat drivers/$n.sha256 2>/dev/null)
-    rm -rf drivers/$n; mkdir -p drivers/$n
-    if [ -n "$h" ] && [ "$(sha256sum $t | cut -c1-64)" = "$h" ] && tar -xzf $t -C drivers/$n; then :
-    else rm -rf drivers/$n drivers/$n.sha256 $t; log "driver $n: archive does not match -> left out of this base"; fi
-  done
   cp base-template.vhdx child.vhdx || die "build child.vhdx"
   touch first.pending; MODE="first boot (specialize, a few minutes)"
 fi

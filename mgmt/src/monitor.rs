@@ -33,6 +33,8 @@ struct MachineStatus {
     license_result: Option<String>,
     grp: Option<String>,
     image_id: Option<i64>,
+    /// Base mode: the Windows image whose base it boots itself (changes kept); None = off.
+    base_image: Option<i64>,
     notes: Option<String>,
     /// Started Windows without a PXE boot just before (session not reset) — unix time, until the next PXE boot.
     not_reset: Option<u64>,
@@ -156,6 +158,7 @@ async fn status(State(st): State<SharedState>) -> Json<Vec<MachineStatus>> {
                 license_result: m.as_ref().and_then(|m| m.license_result.clone()),
                 grp: m.as_ref().and_then(|m| m.grp.clone()),
                 image_id: m.as_ref().and_then(|m| m.image_id),
+                base_image: m.as_ref().and_then(|m| m.base_image),
                 notes: m.and_then(|m| m.notes),
                 not_reset: not_reset.get(&mac).copied(),
                 ssd_low: ssd_low.get(&mac).copied(),

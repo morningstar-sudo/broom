@@ -2,7 +2,7 @@
 title: FACEIT Anti-Cheat on diskless PCs with Broom
 description: Run FACEIT Anti-Cheat on network-booted Windows 11 PCs — Secure Boot, TPM 2.0, IOMMU and HVCI on Broom diskless clients.
 date: 2026-10-11T23:07:00+07:00
-last_modified_at: 2026-10-13
+last_modified_at: 2026-10-18
 ---
 
 [← Broom](index.md)
@@ -32,8 +32,9 @@ clients pass them:
    - keep network boot (PXE) first.
 3. **Golden:** use drivers that are HVCI-compatible — an incompatible driver is blocked and memory integrity can't
    stay on. In a VMware VM, use the `e1000e` network adapter, not `e1000`.
-4. **Anti-cheat first run:** if the anti-cheat needs to be set up on each PC once, tick **Base mode** on the image:
-   the first logon on each PC waits for a technician, and their restart saves that state as the PC's base.
+4. **Anti-cheat first run:** if the anti-cheat needs to be set up on each PC once, turn on **Base mode** for that PC
+   (Machines page, with the image): everything done is kept over its restarts; turn it off and the next boot saves
+   that state as the PC's base.
 
 Untick **Secure Boot clients** to go back to Broom's own iPXE build on PCs that boot without Secure Boot — both modes
 are supported.

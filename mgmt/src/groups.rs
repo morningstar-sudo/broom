@@ -219,7 +219,6 @@ fn apply(
         }
         Ok(())
     })?;
-    let before = crate::drivers::key_sets(st);
     for i in &images {
         let g = f(&format!("i{}", i.id), &i.groups);
         if g != i.groups {
@@ -240,7 +239,6 @@ fn apply(
             st.db.set_machine_group(m.id, g.as_deref()).map_err(ise)?;
         }
     }
-    crate::drivers::rearm_changed(st, before);
     Ok(())
 }
 

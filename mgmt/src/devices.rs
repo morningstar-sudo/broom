@@ -180,7 +180,6 @@ async fn update(
             .map_err(ise)?
             .ok_or_else(|| bad(format!("image {i} does not exist")))?;
     }
-    let before = crate::drivers::key_sets(&st);
     st.db.update_machine(&m).map_err(bad)?;
     crate::machines::moved(&st, &old.mac, &m.mac);
     tracing::info!(
@@ -191,7 +190,6 @@ async fn update(
         m.grp.as_deref().unwrap_or("-")
     );
     rearm_on_rename(&st, Some(&old), &m);
-    crate::drivers::rearm_changed(&st, before); // another group → maybe other driver packages
     Ok(crate::api::ok())
 }
 
@@ -244,13 +242,11 @@ async fn bulk(
             if !v.is_empty() && !crate::drivers::group_ok(v) {
                 return Err(bad("group: letters/digits/_/-, max 32"));
             }
-            let before = crate::drivers::key_sets(&st);
             for m in &targets {
                 st.db
                     .set_machine_group(m.id, (!v.is_empty()).then_some(v))
                     .map_err(ise)?;
             }
-            crate::drivers::rearm_changed(&st, before);
         }
         "image" => {
             let img = if v.is_empty() {
@@ -597,7 +593,6 @@ async fn import_csv(
         return Err(bad(held.join("\n")));
     }
     let (mut added, mut updated) = (0, 0);
-    let before = crate::drivers::key_sets(&st);
     for mut m in writes {
         let old = existing.iter().find(|x| x.id == m.id).cloned();
         if m.id < 0 {
@@ -612,7 +607,6 @@ async fn import_csv(
         }
         rearm_on_rename(&st, old.as_ref(), &m);
     }
-    crate::drivers::rearm_changed(&st, before);
     for (mac, key) in &keys {
         if let Some(m) = st
             .db

@@ -9,7 +9,6 @@ fn cache_list_lines() {
         boot_script: None,
         hash: hash.map(Into::into),
         cache_mode: "disk".into(),
-        base_mode: false,
         use_ssd,
         groups: Vec::new(),
         preload: false,

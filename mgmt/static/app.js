@@ -70,7 +70,10 @@ let M_PAGE=15;
 try{const s=localStorage.getItem('m_psize');if(s!==null)M_PAGE=+s||Infinity;}catch(e){}
 function mPageSize(){const n=+document.getElementById('m_psize').value;M_PAGE=n||Infinity;
   try{localStorage.setItem('m_psize',String(n));}catch(e){}mPage=1;renderMachines();}
+// Windows images for the base mode picker (Machines page): read once per page load.
+let winImages=null;
 async function loadStatus(){
+  if(!winImages)winImages=(await j('/api/images').catch(()=>[])).filter(i=>i.os==='windows');
   allMachines=await j('/api/status');
   const online=allMachines.filter(m=>m.online).length;
   document.getElementById('onlinecount').textContent=online+'/'+allMachines.length+' online';
@@ -98,11 +101,12 @@ function renderMachines(){
        <td>${m.hostname?esc(m.hostname):'<span class="mono">—</span>'} ${m.registered?'':'<span class="badge rounded-pill text-bg-warning">new</span>'}</td>
        <td class="mono">${m.grp?esc(m.grp):'—'}</td>
        <td class="mono">${esc(m.ip)}</td><td class="mono">${esc(m.mac)}</td>
-       <td>${led(m.online)}${m.not_reset?' <span class="badge text-bg-danger" title="Windows started from the SSD without a PXE boot at '+new Date(m.not_reset*1000).toLocaleString()+' — this session was NOT reset (cable out, server down, boot order changed?). Cleared by the next PXE boot.">not reset</span>':''}${m.ssd_low?' <span class="badge text-bg-danger" title="SSD almost full during the session: '+gbs(m.ssd_low[0])+' free at '+new Date(m.ssd_low[1]*1000).toLocaleString()+' (the guest wrote a lot; Windows → SSD room). Cleared by the next PXE boot.">SSD full</span>':''}${mxBadge(m.metrics)}${upBadge(m)}</td>
+       <td>${led(m.online)}${m.not_reset?' <span class="badge text-bg-danger" title="Windows started from the SSD without a PXE boot at '+new Date(m.not_reset*1000).toLocaleString()+' — this session was NOT reset (cable out, server down, boot order changed?). Cleared by the next PXE boot.">not reset</span>':''}${m.ssd_low?' <span class="badge text-bg-danger" title="SSD almost full during the session: '+gbs(m.ssd_low[0])+' free at '+new Date(m.ssd_low[1]*1000).toLocaleString()+' (the guest wrote a lot; Windows → SSD room). Cleared by the next PXE boot.">SSD full</span>':''}${mxBadge(m.metrics)}${upBadge(m)}${baseBadge(m)}</td>
        <td class="mono" title="${esc(m.license_result||'')}">${licCell(m)}</td>
        <td><div class="d-flex gap-1">${m.registered
           ? `<button class="btn btn-sm btn-outline-secondary" ${act('wake',m.mac)}>Wake</button>
              <button class="btn btn-sm btn-outline-secondary" ${act('manage',m.id)} data-owner>Manage</button>
+             ${basePick(m)}
              ${m.remote?`<button class="btn btn-sm btn-outline-primary" ${act('remoteTo',m.hostname)} title="See and control this machine">Remote</button>`:''}`
           : `<button class="btn btn-sm btn-outline-primary" ${act('regMachine',m.mac,m.ip,m.hostname)} data-owner>Register</button>`}</div></td>
      </tr>`).join('') || '<tr><td colspan=7 class="mono">no matching machines</td></tr>';
@@ -110,6 +114,20 @@ function renderMachines(){
   document.getElementById('m_page').textContent='Page '+mPage+'/'+pages;
   const ps=document.getElementById('m_psize');if(ps)ps.value=M_PAGE===Infinity?'0':String(M_PAGE);
 }
+// Base mode (per machine + one Windows image): that image boots its base itself, every change kept over its restarts;
+// off → the next boot saves it as the base and resets to it from then on.
+const BASE_TIP='Base mode: when this machine boots the chosen Windows image, everything done is KEPT, over as many restarts as needed (Windows Update, apps that restart). Turn it off when done: the next boot saves it as the base, and every boot after resets to that base.';
+const baseName=m=>{const i=(winImages||[]).find(i=>i.id===m.base_image);return i?i.name:'#'+m.base_image;};
+const baseBadge=m=>m.base_image?` <span class="badge text-bg-warning" title="${esc(BASE_TIP)}">BASE ${esc(baseName(m))}</span>`:'';
+function basePick(m){
+  if(!winImages||!winImages.length)return'';
+  const opts=['<option value="">Base: off</option>'].concat(winImages.map(i=>`<option value="${i.id}"${i.id===m.base_image?' selected':''}>Base: ${esc(i.name)}</option>`));
+  return `<select class="form-select form-select-sm w-auto" data-owner title="${esc(BASE_TIP)}" data-change="setBase" data-args="${esc(JSON.stringify([m.id]))}">${opts.join('')}</select>`;}
+async function setBase(id,el){
+  const image=el.value?+el.value:null;
+  if(image&&!await sure('Base mode ON: every change on this machine (in that image) is kept until you turn it off. Go on?')){el.value='';return;}
+  try{await j('/api/machines/base',mk({id,image}));toast(image?'Base mode on: boot the machine into that image':'Base mode off: its next boot saves the base');}
+  catch(e){toast(e.message,true);}loadStatus();}
 function mPrev(){if(mPage>1){mPage--;renderMachines();}}
 function mNext(){const pages=Math.max(1,Math.ceil(filteredMachines().length/M_PAGE));if(mPage<pages){mPage++;renderMachines();}}
 // Windows computer name (NetBIOS). Keep in sync with hostname_ok() in machines.rs.
@@ -350,7 +368,7 @@ async function loadImages(){
        <td><div class="d-flex flex-wrap gap-1" style="min-width:320px">
          <button class="btn btn-sm btn-outline-secondary" ${act('setDefault',i.id)}>Default</button>
          <button class="btn btn-sm btn-outline-secondary" ${act('toggleCache',i.id,i.cache_mode||'disk',i.name)}>${(i.cache_mode==='zram')?'→disk':'→RAM'}</button>
-         ${i.os==='windows'?`<button class="btn btn-sm btn-outline-secondary" ${act('toggleBase',i.id,!i.base_mode)} title="BASE MODE: the first logon on each machine waits for a technician to set up apps, then restart (saved for every boot). Off: base is saved by itself.">${i.base_mode?'Base mode: ON':'Base mode: off'}</button>`:`<button class="btn btn-sm btn-outline-secondary" ${act('toggleSsd',i.id,!i.use_ssd)} title="On: the golden is cached and the session's writes go to the machine's SSD (reset every boot). Off (one-time): nothing touches the SSD — golden over the network, writes in RAM, gone at power-off.">${i.use_ssd?'SSD: on':'SSD: off (one-time)'}</button>`}
+         ${i.os==='windows'?'':`<button class="btn btn-sm btn-outline-secondary" ${act('toggleSsd',i.id,!i.use_ssd)} title="On: the golden is cached and the session's writes go to the machine's SSD (reset every boot). Off (one-time): nothing touches the SSD — golden over the network, writes in RAM, gone at power-off.">${i.use_ssd?'SSD: on':'SSD: off (one-time)'}</button>`}
          ${i.os==='windows'?`<button class="btn btn-sm btn-outline-secondary" ${act('togglePreload',i.id,!i.preload)} title="On: every machine that may boot it keeps it on its SSD ahead of use (fetched while another image boots: that boot takes longer once), so choosing it needs no download (its base is still built on its first boot). Off: fetched the first time it is chosen.">${i.preload?'Preload: on':'Preload: off'}</button>`:''}
          <button class="btn btn-sm btn-outline-secondary" ${act('republish',i.id,i.name)}>Republish</button>
          <button class="btn btn-sm btn-outline-secondary" ${act('showVersions',i.id,i.name,i.os)}>Versions</button>
@@ -367,10 +385,6 @@ async function toggleCache(id,cur,name){const mode=cur==='zram'?'disk':'zram';
   if(!await sure('Switch image cache to "'+(mode==='zram'?'RAM':'disk')+'"? (republish; RAM keeps a compressed copy of the golden in memory and serves clients from it)'))return;
   const el=document.getElementById('img_status');
   try{await j('/api/images/cache-mode',mk({id,mode}));watchJob(name,el);}catch(e){say(el,' ✗ '+e.message);}}
-async function toggleBase(id,on){
-  if(on&&!await sure('BASE MODE: every machine that builds its base (first boot, new golden, rename, drivers) will wait on the desktop until someone restarts it — whatever is done before that restart is kept for good. Turn on?'))return;
-  const el=document.getElementById('img_status');
-  try{await j('/api/images/base-mode',mk({id,on}));loadImages();}catch(e){say(el,' ✗ '+e.message);}}
 async function toggleSsd(id,on){
   const el=document.getElementById('img_status');
   try{await j('/api/images/ssd',mk({id,on}));loadImages();}catch(e){say(el,' ✗ '+e.message);}}
@@ -1135,11 +1149,11 @@ const ACTIONS={
   href(url){location.href=url;},
   mFilter(){mPage=1;renderMachines();},
   dvToggle:(k,el)=>dvToggle(k,el.checked), dvSelectAll:el=>dvSelectAll(el.checked),
-  wake,manage,regMachine,loadStatus,clearMFilters,mPrev,mNext,mPageSize,setKey,rearmKey,
+  wake,manage,regMachine,loadStatus,setBase,clearMFilters,mPrev,mNext,mPageSize,setKey,rearmKey,
   loadDevices,dvOpen,dvSave,dvDelete,dvClose,dvBulk,dvRegister,dvImport,dvAdd,dvRender,dvHide,dvBroomDisk,
   volMove,volFormat,volFolder,volRemove,loadServerDisks,
   userAdd,userRole,userPw,userDel,rekey,saveDnsGate,dnsResolveShow,
-  loadImages,addImage,setDefault,toggleCache,toggleBase,toggleSsd,togglePreload,editImgGroups,republish,showVersions,exportImage,editBoot,delImage,
+  loadImages,addImage,setDefault,toggleCache,toggleSsd,togglePreload,editImgGroups,republish,showVersions,exportImage,editBoot,delImage,
   snapshotImage,rollbackImage,versionToImage,deleteVersion,
   loadGames,saveGames,setGamesUpdate,toggleGamesRam,saveGamesUpdate,discardGamesUpdate,editGames,delGames,
   loadDrivers,uploadDriver,saveDrvTargets,delDriver,

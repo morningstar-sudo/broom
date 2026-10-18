@@ -53,10 +53,18 @@ fn delete_image_unlinks_machines_and_moves_default() {
     db.set_default_image(b).unwrap();
     let m = db.add_machine("aa:bb:cc:dd:ee:01", None, None).unwrap();
     db.set_machine_image(m, Some(b)).unwrap();
-    db.delete_image(b).unwrap();
     assert_eq!(
-        db.machines().unwrap()[0].image_id,
+        db.machines().unwrap()[0].base_image,
         None,
+        "base mode off by default"
+    );
+    db.set_machine_base(m, Some(b)).unwrap();
+    assert_eq!(db.machines().unwrap()[0].base_image, Some(b));
+    db.delete_image(b).unwrap();
+    let after = &db.machines().unwrap()[0];
+    assert_eq!(
+        (after.image_id, after.base_image),
+        (None, None),
         "no link to a deleted (reusable) id"
     );
     assert!(
@@ -107,6 +115,7 @@ fn old_db_migrates_to_user_version() {
     assert!(
         !has_column(&c, "images", "dataset").unwrap()
             && has_column(&c, "machines", "notes").unwrap()
+            && has_column(&c, "machines", "base_image").unwrap()
     );
     // A new DB starts at the latest version.
     let p2 = tmp("broom_test_migrate_new.db");
@@ -191,12 +200,6 @@ fn images_machines_leases() {
         (Some("boot"), Some("h1"), "zram")
     );
     assert_eq!(ia.active_version.as_deref(), Some("v2"));
-    assert!(
-        !ia.base_mode,
-        "base mode off by default (first logon commits base by itself)"
-    );
-    db.set_base_mode(a, true).unwrap();
-    assert!(db.image(a).unwrap().unwrap().base_mode);
     assert!(
         ia.use_ssd,
         "SSD on by default (cache + writes on the machine's SSD)"
@@ -528,4 +531,22 @@ fn json_edits_are_atomic() {
     assert_eq!(v.len(), 200, "a refused edit writes nothing");
     drop(db);
     tmp("broom_test_edit.db");
+}
+
+/// A v3 database (before base mode per machine) gets machines.base_image on open.
+#[test]
+fn v3_gets_base_image() {
+    let p = tmp("broom_test_v4.db");
+    drop(Sqlite::open(&p).unwrap());
+    {
+        let c = Connection::open(&p).unwrap();
+        c.execute_batch("ALTER TABLE machines DROP COLUMN base_image; PRAGMA user_version=3;")
+            .unwrap();
+        assert!(!has_column(&c, "machines", "base_image").unwrap());
+    }
+    let db = Sqlite::open(&p).unwrap();
+    let m = db.add_machine("aa:bb:cc:dd:ee:09", None, None).unwrap();
+    db.set_machine_base(m, None).unwrap();
+    assert!(has_column(&db.c(), "machines", "base_image").unwrap());
+    tmp("broom_test_v4.db");
 }

@@ -17,14 +17,7 @@ fn license_key_and_lookup() {
         mac: mac.into(),
         ip: ip.map(Into::into),
         hostname: Some(format!("PC{id}")),
-        image_id: None,
-        license_key: None,
-        license_tail: None,
-        license_state: None,
-        license_gen: 0,
-        license_result: None,
-        grp: None,
-        notes: None,
+        ..Default::default()
     };
     let ms = [
         m(1, "aa:00:00:00:00:01", Some("10.0.0.51")),

@@ -75,7 +75,6 @@ fn menu_by_group_and_default() {
         boot_script: None,
         hash: None,
         cache_mode: "disk".into(),
-        base_mode: false,
         use_ssd: true,
         groups: groups.iter().map(|g| g.to_string()).collect(),
         preload: false,
