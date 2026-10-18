@@ -121,14 +121,17 @@ if ([IO.File]::Exists($wf) -and [IO.File]::Exists($srvf)) {
     }
   } catch { }
 }
-# Drivers (Drivers page), plug and play: the stage extracts this machine's packages (checked against the server's
-# sha256) into broom\drivers at every PXE boot -> installed at every boot, once (this task also runs every 5 minutes),
-# so a new or updated package needs no new base. Before the games disk: a network driver drops the link for a moment.
-# Copied to a local folder first (pnputil wants a normal path); only drivers matching real devices get installed, and
-# one already in use is skipped quickly; a new display driver blanks the screen for a moment.
+# Drivers (Drivers page): the stage says when to install this machine's packages (checked against the server's sha256,
+# extracted into broom\drivers) in broom\drvinstall.txt: "keep" = into the base being built / the open base (base
+# mode); "once" = a driver session: into a fresh driver layer over the base (drvs.vhdx), then drvs.ok + a restart, and
+# the stage keeps that layer under every later boot - a new or updated package is installed once, not at every boot.
+# Once per boot (this task also runs every 5 minutes). Before the games disk: a network driver drops the link for a
+# moment. Copied to a local folder first (pnputil wants a normal path); only drivers matching real devices get
+# installed; a new display driver blanks the screen for a moment.
 $dmark = "$env:SystemRoot\Temp\broom-drivers.txt"
 $dd = $v.Path + 'broom\drivers'
-if ([IO.Directory]::Exists($dd) -and (-not (Test-Path $dmark) -or (Get-Content $dmark -Raw).Trim() -ne $bootId)) {
+$di = $v.Path + 'broom\drvinstall.txt'
+if ([IO.Directory]::Exists($dd) -and [IO.File]::Exists($di) -and (-not (Test-Path $dmark) -or (Get-Content $dmark -Raw).Trim() -ne $bootId)) {
   try {
     $tmp = "$env:SystemRoot\Temp\broom-drivers"
     Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue
@@ -141,6 +144,11 @@ if ([IO.Directory]::Exists($dd) -and (-not (Test-Path $dmark) -or (Get-Content $
     if (Test-Path $tmp) { & pnputil /add-driver "$tmp\*.inf" /subdirs /install | Out-Null }
     Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue
     Set-Content -Encoding ascii $dmark $bootId
+    if ([IO.File]::ReadAllText($di).Trim() -eq 'once') {
+      [IO.File]::WriteAllText($v.Path + 'broom\drvs.ok', 'ok')
+      Restart-Computer -Force
+      exit
+    }
   } catch { }
 }
 # Last: the games disk (if the server has one) as a drive letter: broom-games.ps1, copied out like the stub does

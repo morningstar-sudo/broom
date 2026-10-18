@@ -241,7 +241,7 @@ rm -f /run/broom-agent.key
 #    names have no dot). Parking is a rename on the same volume (instant) and the VHDX parent links are relative, so a
 #    set works in either place. active.txt = the image at the top; every step can simply run again after a power cut.
 #    img.<image>/.parked = when it was parked = its last use (the oldest goes first when space runs out).
-IMGSET="golden.vhdx golden.sha256 base.vhdx base.open base.host base.lic base.drv base-template.vhdx child-template.vhdx child-template.off efi.tar.gz"
+IMGSET="golden.vhdx golden.sha256 base.vhdx base.open drvs.vhdx drvs.sig base.host base.lic base-template.vhdx child-template.vhdx child-template.off efi.tar.gz"
 cd $B
 act=$(cat active.txt 2>/dev/null)
 case "$act" in ''|*[!A-Za-z0-9_-]*) act=$NAME;; esac   # a disk from before image folders: the top set is this image's
@@ -249,7 +249,7 @@ if [ "$act" != "$NAME" ]; then
   log "image $act parked, $NAME to the top"
   # The last session / an unfinished base build of the parked image go; a base open in base mode is parked as the base.
   if [ -f base.open ] && [ -f child.vhdx ]; then mv child.vhdx base.vhdx; else rm -f child.vhdx; fi
-  rm -f first.pending base.ok
+  rm -f first.pending base.ok drvs.pending drvs.ok
   mkdir -p "img.$act"
   for f in $IMGSET dl-*; do [ -e "$f" ] && mv "$f" "img.$act/"; done
   date +%s > "img.$act/.parked"
@@ -333,7 +333,7 @@ if [ "$(cat $B/golden.sha256 2>/dev/null)" != "$HASH" ]; then
   for x in $B/dl-*; do [ "$x" = "$D" ] || rm -rf "$x"; done
   # (golden.chunks / .patching / .spare: leftovers of the delta update of older versions.)
   rm -f $B/golden.sha256 $B/golden.vhdx $B/golden.chunks $B/golden.vhdx.patching $B/base.vhdx $B/base.ok $B/first.pending \
-    $B/child.vhdx $B/child-local.vhdx $B/base.open
+    $B/child.vhdx $B/child-local.vhdx $B/base.open $B/drvs.vhdx $B/drvs.sig $B/drvs.pending
   rm -rf $B/golden.vhdx.spare
   mkdir -p $D
   # Golden size from the server. NO $((...)) on external data (an ash arithmetic error exits the whole script) → awk.
@@ -480,7 +480,11 @@ vhdx_guid(){
 # Write ASCII string $2 as UTF-16LE into file $1 at offset $3.
 patch16(){
   s=$2; fmt=""
-  while [ -n "$s" ]; do c=${s%"${s#?}"}; s=${s#?}; fmt="$fmt$c\\000"; done
+  while [ -n "$s" ]; do
+    c=${s%"${s#?}"}; s=${s#?}
+    case "$c" in '\') c='\\';; '%') c='%%';; esac   # printf format: a backslash / percent as itself
+    fmt="$fmt$c\\000"
+  done
   printf "$fmt" | dd of=$1 bs=1 seek=$3 conv=notrunc 2>/dev/null
 }
 
@@ -526,6 +530,18 @@ if [ -f base.open ] && [ "$BASE" != 1 ]; then
 elif [ "$BASE" = 1 ] && [ ! -f base.open ] && [ -f base.vhdx ]; then
   mv base.vhdx child.vhdx && touch base.open && log "base mode on -> Windows boots the base itself, every change is kept"
 fi
+# Driver layer (drvs.vhdx, built below): the driver session just finished (Windows wrote drvs.ok) → its child is the
+# layer; drvs.pending holds what it is for ("<packages> <base GUID>"). Next to an existing layer it was not written by
+# a driver session (the guest can write BROOMWIN) → ignored.
+if [ -f drvs.pending ] && [ -f drvs.vhdx ]; then rm -f drvs.pending drvs.ok
+elif [ -f drvs.pending ]; then
+  if [ -f drvs.ok ] && [ -f child.vhdx ] && [ -n "$(vhdx_guid child.vhdx)" ]; then
+    mv child.vhdx drvs.vhdx && mv drvs.pending drvs.sig && log "drivers installed -> kept in the driver layer"
+  else
+    rm -f drvs.pending; log "driver install did not finish -> again"
+  fi
+  rm -f drvs.ok
+fi
 # Machine name (Machines table on the web, by MAC) → host.txt; broom-done sets it when creating base. Every boot
 # resets to base → renaming = rebuild base (specialize once more). Unregistered machine: keep the Windows name.
 if [ -n "$HOST" ]; then
@@ -552,8 +568,8 @@ else
   rm -f lic.txt
 fi
 # Drivers (Drivers page): send this machine's PCI/USB IDs, the server answers "name sha256" for its packages
-# (hardware match / group / all machines) → kept in broom\drivers\<name>\; broom-bootorder.ps1 pnputil-installs them
-# at every boot (plug and play: a new or updated package needs no new base). No answer → keep what is here.
+# (hardware match / group / all machines) → kept in broom\drivers\<name>\; Windows installs them once into a driver
+# layer over the base (drvs.vhdx, below): a new or updated package needs no new base. No answer → keep what is here.
 # printf, NOT echo: dash/ash echo mangles backslashes (PCI\VEN_...).
 hwids(){
   for d in /sys/bus/pci/devices/*; do
@@ -587,19 +603,23 @@ if [ -n "$MAC" ] && wget -q -T 10 -O /run/broom-drv.txt --post-file=/run/broom-h
     grep -q "^$n " /run/broom-drv.txt || { rm -rf drivers/$n "$f" drivers/$n.tar.gz; log "driver $n: removed"; }
   done
   log "drivers: $(grep -c . /run/broom-drv.txt) package(s) for this machine, $(grep -c . /run/broom-drv-have.txt) ready"
+  # Signature of the packages here (the driver layer is made for one); none → empty.
+  DRV=""; [ -s /run/broom-drv-have.txt ] && DRV=$(sha256sum /run/broom-drv-have.txt | cut -c1-16)
 else
-  log "drivers: server did not answer -> keeping the current ones"
+  log "drivers: server did not answer -> keeping the current ones"; DRV=keep
 fi
-# The extracted folders Windows installs from are on BROOMWIN, writable by the guest → extracted again at every boot
-# from the checked archives (server's list when it answered, else the stored sha256).
-for x in drivers/*; do [ -d "$x" ] && rm -rf "$x"; done
-for t in drivers/*.tar.gz; do
-  [ -f "$t" ] || continue; n=${t##*/}; n=${n%.tar.gz}
-  h=$(sed -n "s/^$n //p" /run/broom-drv.txt 2>/dev/null); [ -n "$h" ] || h=$(cat drivers/$n.sha256 2>/dev/null)
-  mkdir -p drivers/$n
-  if [ -n "$h" ] && [ "$(sha256sum $t | cut -c1-64)" = "$h" ] && tar -xzf $t -C drivers/$n; then :
-  else rm -rf drivers/$n drivers/$n.sha256 $t; log "driver $n: archive does not match -> left out"; fi
-done
+# The extracted folders Windows installs from are on BROOMWIN, writable by the guest → extracted again from the checked
+# archives (server's list when it answered, else the stored sha256) each time Windows is to install them.
+extract_drivers(){
+  for x in drivers/*; do [ -d "$x" ] && rm -rf "$x"; done
+  for t in drivers/*.tar.gz; do
+    [ -f "$t" ] || continue; n=${t##*/}; n=${n%.tar.gz}
+    h=$(sed -n "s/^$n //p" /run/broom-drv.txt 2>/dev/null); [ -n "$h" ] || h=$(cat drivers/$n.sha256 2>/dev/null)
+    mkdir -p drivers/$n
+    if [ -n "$h" ] && [ "$(sha256sum $t | cut -c1-64)" = "$h" ] && tar -xzf $t -C drivers/$n; then :
+    else rm -rf drivers/$n drivers/$n.sha256 $t; log "driver $n: archive does not match -> left out"; fi
+  done
+}
 # Benchmark page: the admin asked to measure this machine → 1 GB of the golden read straight from the SSD (iflag=direct:
 # the disk, not the page cache) + zeros downloaded from the server, both timed; the results go back to the server.
 # GNU dd by path (busybox runs its own applet first). NO $((...)) on these numbers → awk. A function with local
@@ -636,13 +656,37 @@ g=""; [ -f base.vhdx ] && g=$(vhdx_guid base.vhdx)
 if [ -f base.vhdx ] && [ -z "$g" ]; then
   log "base.vhdx header unreadable -> rebuilding base"; rm -f base.vhdx base.host base.lic base.drv
 fi
+# Drivers (drvinstall.txt, read by broom-bootorder.ps1): installed into the base being built or the open base ("keep");
+# a driver session installs them into a fresh layer over the base, then restarts ("once"); else they are in the layer.
+rm -f drvinstall.txt
+# child.vhdx over a parent whose DataWriteGuid is $1, from the template (parent .\base.vhdx); $2 = another parent file
+# name of the same length (.\drvs.vhdx): the relative path sits right after the GUID and its key (+102 bytes).
+child_on(){
+  off=$(cat child-template.off)
+  cp child-template.vhdx child.vhdx && patch16 child.vhdx "$1" "$off" \
+    && { [ -z "$2" ] || patch16 child.vhdx "$2" $((off + 102)); } || die "build child.vhdx"
+}
 if [ -f base.open ]; then
+  extract_drivers; echo keep > drvinstall.txt
   MODE="base mode (every change is kept)"
 elif [ -n "$g" ]; then
-  cp child-template.vhdx child.vhdx && patch16 child.vhdx "$g" "$(cat child-template.off)" || die "build child.vhdx"
-  MODE=reset
+  # The driver layer: base ← drvs.vhdx ← child, made once for this set of packages over this base (a base changed
+  # since has another GUID → made again). No packages → no layer. Server silent → the layer of this base as it is.
+  ds=$(cat drvs.sig 2>/dev/null); dg=""
+  case "$DRV" in keep) [ "${ds#* }" = "$g" ] || ds="";; *) [ "$ds" = "$DRV $g" ] || ds="";; esac
+  [ -n "$ds" ] && [ -f drvs.vhdx ] && dg=$(vhdx_guid drvs.vhdx)
+  if [ -n "$dg" ]; then
+    child_on "$dg" '.\drvs.vhdx'; MODE=reset
+  elif [ -z "$DRV" ] || [ "$DRV" = keep ]; then
+    rm -f drvs.vhdx drvs.sig; child_on "$g"; MODE=reset
+  else
+    rm -f drvs.vhdx drvs.sig; child_on "$g"
+    echo "$DRV $g" > drvs.pending; extract_drivers; echo once > drvinstall.txt
+    MODE="drivers (installed once into the driver layer, then a restart)"
+  fi
 else
   cp base-template.vhdx child.vhdx || die "build child.vhdx"
+  extract_drivers; echo keep > drvinstall.txt
   touch first.pending; MODE="first boot (specialize, a few minutes)"
 fi
 cd /

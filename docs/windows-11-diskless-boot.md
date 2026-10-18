@@ -24,8 +24,8 @@ rolled out. With the image's cache set to RAM, the server keeps a compressed cop
 room fetching a new golden at once never hammers the server's disk.
 
 On its first boot (and after a new golden or a rename) each PC specializes the golden once and saves that as its
-**base** — its machine name and license. Driver packages (Drivers page) are installed at every boot, so a new or
-updated one needs no new base. Every later boot resets to that base.
+**base** — its machine name and license. Driver packages (Drivers page) go into a separate driver layer over the
+base: a new or updated one is installed once (one extra restart) and needs no new base. Every later boot resets to that base.
 
 ## What you need
 

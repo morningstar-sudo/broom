@@ -242,7 +242,7 @@ The menu is grouped (each group folds; the one holding the open page stays open)
 | | **Groups** | which images, iSCSI disks and drivers each group of machines gets; hide their other disks |
 | Content | **Images** | goldens: upload, publish, cache (disk / RAM), versions, export, boot menu |
 | | **iSCSI Disks** | shared disks (games, apps…) and their update machine |
-| | **Drivers** | driver packages each Windows machine installs at every boot (plug and play: no new base) |
+| | **Drivers** | driver packages each Windows machine installs once into its driver layer (no new base) |
 | Config | **Network** | DHCP server, Secure Boot clients, strict reset, DNS only for healthy machines |
 | | **Windows** | guest user, SSD room, golden downloads at once |
 | | **Settings** | your password; users (owner / staff); boot menu countdown |
@@ -288,6 +288,10 @@ sent, in parallel 8 MB chunks with retry) — or a single `.vmdk` / `.img` / `.z
 - **Base build on each machine:** on its first boot (and after a new golden, a rename or a license key) every
   Windows machine specializes the golden once and saves that as its *base*; every later boot resets to it. By default
   the base is saved automatically (the machine restarts by itself after the first logon).
+- **Driver layer:** the Drivers page's packages sit in their own VHDX over the base (`base ← drvs.vhdx ← child`).
+  When a machine's set of packages changes (added, updated, removed), its next boot installs them once into a fresh
+  layer and restarts by itself; every boot after starts with them already there — no install, no screen flash. A new
+  base (new golden, rename, license, base mode) gets a new layer the same way.
 - **Base mode** (Machines page, per machine + one Windows image): when that machine boots that image, Windows boots
   its base itself, so everything done is kept over as many restarts as it takes — Windows Update, apps that restart
   (an anti-cheat's first run). A base being built also waits on the desktop instead of restarting. Turn it

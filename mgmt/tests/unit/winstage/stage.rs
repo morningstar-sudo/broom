@@ -522,12 +522,13 @@ fn stage_forged_first_pending_ignored() {
     let _ = std::fs::remove_dir_all(&d);
 }
 
-/// Every boot: the driver folders Windows installs from are extracted again from the checked archives (a guest's
-/// planted or edited folder is gone), an archive that doesn't match its sha256 is left out.
+/// Before Windows installs drivers: the folders it installs from are extracted again from the checked archives (a
+/// guest's planted or edited folder is gone), an archive that doesn't match its sha256 is left out.
 #[test]
-fn stage_drivers_reextracted_every_boot() {
+fn stage_drivers_reextracted_before_install() {
     let s = super::stage_script();
-    let part = &s[s.find("\nfor x in drivers/*; do").unwrap()..s.find("# Benchmark page").unwrap()];
+    let f = &s[s.find("extract_drivers(){").unwrap()..];
+    let part = format!("{}\nextract_drivers", &f[..f.find("\n}\n").unwrap() + 2]);
     let d = std::env::temp_dir().join("broom_t_drvx");
     let _ = std::fs::remove_dir_all(&d);
     std::fs::create_dir_all(d.join("src")).unwrap();
@@ -1190,4 +1191,87 @@ fn stage_base_mode() {
     std::fs::write(d.join("base.open"), "").unwrap();
     assert_eq!(boot("1"), "base.open child.vhdx");
     let _ = std::fs::remove_dir_all(&d);
+}
+
+/// The driver layer (cut from stage_script(), VHDX helpers stubbed): no packages → child over the base; packages →
+/// a driver session (installs once, restarts), its child kept as drvs.vhdx; later boots → child over the layer; another
+/// package set or another base → made again; a guest's drvs.ok next to a layer → ignored.
+#[test]
+fn stage_driver_layer() {
+    let s = super::stage_script();
+    let commit = &s[s.find("# Driver layer (drvs.vhdx").unwrap()
+        ..s.find("# Machine name (Machines table").unwrap()];
+    let build = &s[s.find("# Drivers (drvinstall.txt").unwrap()..];
+    let build = &build[..build.find("\ncd /\n").unwrap()];
+    let d = std::env::temp_dir().join("broom_t_drvlayer");
+    let _ = std::fs::remove_dir_all(&d);
+    std::fs::create_dir_all(&d).unwrap();
+    std::fs::write(d.join("child-template.vhdx"), "T").unwrap();
+    std::fs::write(d.join("child-template.off"), "100").unwrap();
+    // vhdx_guid = "{<file content>}" (dirty → none); patch16 appends what it writes (+ where).
+    let boot = |drv: &str, base: &str| {
+        std::fs::write(d.join("base.vhdx"), base).unwrap();
+        let sh = format!(
+            "cd {}; log(){{ :; }}; die(){{ echo \"DIE $*\"; exit 1; }}; extract_drivers(){{ :; }}\n\
+             vhdx_guid(){{ case \"$(cat $1)\" in *dirty*) ;; *) echo \"{{$(cat $1)}}\";; esac; }}\n\
+             patch16(){{ printf ' %s@%s' \"$2\" \"$3\" >> $1; }}\n\
+             DRV='{drv}'; g=$(vhdx_guid base.vhdx)\n{commit}\n{build}\necho \"$MODE\"",
+            d.display()
+        );
+        let o = stage_sh().args(["-c", &sh]).output().unwrap();
+        assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stdout));
+        let rd = |f: &str| std::fs::read_to_string(d.join(f)).unwrap_or_default();
+        (rd("child.vhdx"), rd("drvinstall.txt").trim().to_string())
+    };
+    // No packages: over the base.
+    assert_eq!(boot("", "B1"), ("T {B1}@100".into(), String::new()));
+    // Packages: a driver session over the base, installs once.
+    assert_eq!(boot("abc", "B1"), ("T {B1}@100".into(), "once".into()));
+    assert_eq!(
+        std::fs::read_to_string(d.join("drvs.pending"))
+            .unwrap()
+            .trim(),
+        "abc {B1}"
+    );
+    // Windows installed them (drvs.ok) → the session's child is the layer; the child goes over it.
+    std::fs::write(d.join("child.vhdx"), "L1").unwrap();
+    std::fs::write(d.join("drvs.ok"), "ok").unwrap();
+    let (child, inst) = boot("abc", "B1");
+    assert_eq!(child, r"T {L1}@100 .\drvs.vhdx@202");
+    assert_eq!(inst, "", "nothing to install: the layer has them");
+    assert_eq!(
+        std::fs::read_to_string(d.join("drvs.sig")).unwrap().trim(),
+        "abc {B1}"
+    );
+    // Same set, server silent → the layer stays.
+    assert_eq!(boot("keep", "B1").0, r"T {L1}@100 .\drvs.vhdx@202");
+    // A guest's drvs.pending + drvs.ok next to the layer → ignored, layer kept.
+    std::fs::write(d.join("drvs.pending"), "x").unwrap();
+    std::fs::write(d.join("drvs.ok"), "ok").unwrap();
+    assert_eq!(boot("abc", "B1").0, r"T {L1}@100 .\drvs.vhdx@202");
+    assert!(!d.join("drvs.pending").exists() && !d.join("drvs.ok").exists());
+    // Another package set → a new session; another base (base mode wrote it) → a new session too.
+    assert_eq!(boot("xyz", "B1").1, "once");
+    assert!(!d.join("drvs.vhdx").exists());
+    assert_eq!(boot("abc", "B2").1, "once");
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// patch16 writes a backslash as itself (the driver layer's parent path .\drvs.vhdx).
+#[test]
+fn stage_patch16_backslash() {
+    let s = super::stage_script();
+    let f = &s[s.find("patch16(){").unwrap()..];
+    let f = &f[..f.find("\n}\n").unwrap() + 2];
+    let p = std::env::temp_dir().join("broom_t_patch16");
+    std::fs::write(&p, vec![0u8; 30]).unwrap();
+    let sh = format!("{f}\npatch16 {} '{}' 2", p.display(), r".\drvs.vhdx");
+    assert!(stage_sh().args(["-c", &sh]).status().unwrap().success());
+    let b = std::fs::read(&p).unwrap();
+    let u: Vec<u16> = b[2..24]
+        .chunks(2)
+        .map(|c| u16::from_le_bytes([c[0], c[1]]))
+        .collect();
+    assert_eq!(String::from_utf16(&u).unwrap(), r".\drvs.vhdx");
+    let _ = std::fs::remove_file(p);
 }

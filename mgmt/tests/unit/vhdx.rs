@@ -209,6 +209,14 @@ fn diff_roundtrip() {
         String::from_utf16(&s).unwrap(),
         "{11223344-5566-7788-99aa-bbccddeeff00}"
     );
+    // The relative path right after it (+76 GUID + 26 key "relative_path"): the stage patches it there for the
+    // driver layer (.\base.vhdx → .\drvs.vhdx, same length).
+    let raw = read_at(&mut f, off + 102, 26).unwrap();
+    let s: Vec<u16> = raw
+        .chunks(2)
+        .map(|c| u16::from_le_bytes([c[0], c[1]]))
+        .collect();
+    assert_eq!(String::from_utf16(&s).unwrap(), ".\\golden.vhdx");
     // 80GB / 2MB = 40960 block, chunk 2048 → 20 SB → BAT 20*2049*8 B → 1MB region.
     assert_eq!(std::fs::metadata(p).unwrap().len(), 4 * MB);
     let _ = std::fs::remove_file(p);
