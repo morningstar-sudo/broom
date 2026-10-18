@@ -16,7 +16,7 @@ for a in $(cat /proc/cmdline); do
   esac
 done
 case "$LX" in ''|*[!0-9]*) LX=0;; esac
-case "$WB_GB" in ''|*[!0-9]*) WB_GB=30;; esac   # boot script of an older version
+case "$WB_GB" in ''|*[!0-9]*) WB_GB=30;; esac
 # LOCAL disks = physical disks present BEFORE attaching iSCSI (golden iSCSI not visible yet). Skip removable and
 # USB disks (an external USB HDD/SSD often reports removable=0).
 localdisks=""
@@ -38,8 +38,8 @@ pname(){ sed -n 's/^PARTNAME=//p' "$1/uevent" 2>/dev/null; }
 byname(){ for p in /sys/block/$1/$1*; do [ "$(pname $p)" = "$2" ] && { echo /dev/${p##*/}; return; }; done; }
 # 1. The Broom SSD — ONE disk shared with the Windows stage (same layout, same partition names):
 #    p1 BROOMEFI 512M | p2 BROOMWIN (Windows) | p3 broomwb WB_GB (writeback, mkfs every boot) | p4 broomcache (kept)
-#    LX = GB for the Linux part, sized by the server from its Linux goldens. No room for Windows (< 32 GB left) or no
-#    LX (boot script of an older version) → Linux takes the whole disk (p1 broomwb + p2 broomcache, as before).
+#    LX = GB for the Linux part, sized by the server from its Linux goldens. No room for Windows (< 32 GB left) →
+#    Linux takes the whole disk (p1 broomwb + p2 broomcache).
 layout(){
   gb=$(( $(cat /sys/block/$1/size) / 2097152 )); win=$((gb - 1 - LX))
   [ $gb -ge $((WB_GB + 8)) ] || return 1
@@ -139,7 +139,7 @@ log "cache: $MODE ($cache)"
 # 3. MISS / no cache → attach iSCSI as before.
 if [ "$MODE" != hit ]; then
   # The card iPXE booted from, with the address it had (BOOTIF + broom.ip "ip:mask:gw"): up at once — no DHCP round,
-  # no 15 s wait on an unplugged card that sorts first. Not found (boot script of an older version) → DHCP on each card.
+  # no 15 s wait on an unplugged card that sorts first. Not found → DHCP on each card.
   up=""
   if [ -n "$MAC" ] && [ -n "${BIP%%:*}" ]; then
     mask=${BIP#*:}; gw=${mask#*:}; mask=${mask%%:*}

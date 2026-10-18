@@ -1,4 +1,5 @@
 use super::*;
+use crate::disk::{rd, u32le, u64le};
 
 #[test]
 fn crc32c_vector() {
@@ -199,8 +200,8 @@ fn diff_roundtrip() {
     let i = read_info(p).unwrap();
     assert_eq!(i.virtual_size, parent.virtual_size);
     assert_eq!((i.logical_sector, i.physical_sector), (512, 4096));
-    let mut f = File::open(p).unwrap();
-    let raw = read_at(&mut f, off, 76).unwrap();
+    let f = File::open(p).unwrap();
+    let raw = rd(&f, off, 76).unwrap();
     let s: Vec<u16> = raw
         .chunks(2)
         .map(|c| u16::from_le_bytes([c[0], c[1]]))
@@ -211,7 +212,7 @@ fn diff_roundtrip() {
     );
     // The relative path right after it (+76 GUID + 26 key "relative_path"): the stage patches it there for the
     // driver layer (.\base.vhdx → .\drvs.vhdx, same length).
-    let raw = read_at(&mut f, off + 102, 26).unwrap();
+    let raw = rd(&f, off + 102, 26).unwrap();
     let s: Vec<u16> = raw
         .chunks(2)
         .map(|c| u16::from_le_bytes([c[0], c[1]]))
@@ -223,24 +224,6 @@ fn diff_roundtrip() {
 }
 
 // The VHDX reader: the stage reads goldens on the clients; here only the tests check what was written.
-fn u16le(b: &[u8], o: usize) -> u16 {
-    u16::from_le_bytes([b[o], b[o + 1]])
-}
-fn u32le(b: &[u8], o: usize) -> u32 {
-    u32::from_le_bytes(b[o..o + 4].try_into().unwrap())
-}
-fn u64le(b: &[u8], o: usize) -> u64 {
-    u64::from_le_bytes(b[o..o + 8].try_into().unwrap())
-}
-
-fn read_at(f: &mut File, off: u64, len: usize) -> Result<Vec<u8>, String> {
-    let mut buf = vec![0u8; len];
-    f.seek(SeekFrom::Start(off)).map_err(|e| e.to_string())?;
-    f.read_exact(&mut buf)
-        .map_err(|e| format!("read VHDX @{off}: {e}"))?;
-    Ok(buf)
-}
-
 /// Verify the checksum of a block whose crc field is at bytes 4..8.
 fn crc_ok(block: &[u8]) -> bool {
     let mut t = block.to_vec();
@@ -251,13 +234,13 @@ fn crc_ok(block: &[u8]) -> bool {
 
 /// Read parameters + DataWriteGuid (current header = highest valid seq).
 pub(crate) fn read_info(path: &str) -> Result<Info, String> {
-    let mut f = File::open(path).map_err(|e| format!("{path}: {e}"))?;
-    if read_at(&mut f, 0, 8)? != b"vhdxfile" {
+    let f = File::open(path).map_err(|e| format!("{path}: {e}"))?;
+    if rd(&f, 0, 8)? != b"vhdxfile" {
         return Err(format!("{path}: not a VHDX"));
     }
     let mut hdr: Option<Vec<u8>> = None;
     for off in [KB64, 2 * KB64] {
-        let h = read_at(&mut f, off, 4096)?;
+        let h = rd(&f, off, 4096)?;
         if &h[0..4] == b"head"
             && crc_ok(&h)
             && hdr.as_ref().is_none_or(|c| u64le(&h, 8) > u64le(c, 8))
@@ -271,7 +254,7 @@ pub(crate) fn read_info(path: &str) -> Result<Info, String> {
             "{path}: VHDX has an unreplayed log (unclean shutdown?)"
         ));
     }
-    let rt = read_at(&mut f, 3 * KB64, KB64 as usize)?;
+    let rt = rd(&f, 3 * KB64, KB64 as usize)?;
     if &rt[0..4] != b"regi" || !crc_ok(&rt) {
         return Err(format!("{path}: corrupt region table"));
     }
@@ -281,13 +264,13 @@ pub(crate) fn read_info(path: &str) -> Result<Info, String> {
         .find(|&e| rt[e..e + 16] == meta)
         .map(|e| (u64le(&rt, e + 16), u32le(&rt, e + 24) as usize))
         .ok_or(format!("{path}: missing metadata region"))?;
-    let m = read_at(&mut f, moff, mlen)?;
+    let m = rd(&f, moff, mlen)?;
     if &m[0..8] != b"metadata" {
         return Err(format!("{path}: corrupt metadata"));
     }
     let item = |id: &str| -> Result<usize, String> {
         let g = guid_bytes(id);
-        (0..u16le(&m, 10) as usize)
+        (0..u16::from_le_bytes([m[10], m[11]]) as usize)
             .map(|i| 32 + i * 32)
             .find(|&e| m[e..e + 16] == g)
             .map(|e| u32le(&m, e + 16) as usize)

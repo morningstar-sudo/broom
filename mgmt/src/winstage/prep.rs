@@ -64,8 +64,8 @@ fn prep_win() -> &'static str {
 
 /// /broom-prep-win: embeds the guest user/password (config shared with Linux).
 pub fn prep_script(db: &dyn Db) -> String {
-    let user = db.get_config("ltsp_user", "guest");
-    let pass = db.get_config("ltsp_password", "123456");
+    let user = db.get_config("guest_user", "guest");
+    let pass = db.get_config("guest_password", "123456");
     // The values sit inside unattend.xml (XML-escaped) AND inside a PowerShell here-string (`$`/backtick would be
     // expanded). set_cafe_user already rejects those characters; escaping here too covers an old stored value.
     let esc = |s: &str| xml(s).replace('`', "``").replace('$', "`$");
@@ -99,8 +99,7 @@ fn stub() -> &'static str {
 }
 const STUB_MARK: &str = "broom-stub v1";
 
-/// The golden holds the stubs (prep of this version or newer). An older golden still has full scripts of the version
-/// the server last wrote into it: they keep working, just never update.
+/// The golden holds the stubs that run the server's current scripts from BROOMWIN (prep of this version or newer).
 pub(super) fn has_stub(vol: &mut Vol) -> bool {
     vol.read("Windows/Setup/Scripts/broom-done.ps1")
         .ok()

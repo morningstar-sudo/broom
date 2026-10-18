@@ -88,51 +88,16 @@ fn delete_image_unlinks_machines_and_moves_default() {
 }
 
 #[test]
-fn old_db_migrates_to_user_version() {
-    let p = tmp("broom_test_migrate.db");
-    Connection::open(&p)
-            .unwrap()
-            .execute_batch(
-                "CREATE TABLE images(id INTEGER PRIMARY KEY, name TEXT UNIQUE NOT NULL, os TEXT NOT NULL,
-                     is_default INTEGER NOT NULL DEFAULT 0, dataset TEXT);
-                 CREATE TABLE machines(id INTEGER PRIMARY KEY, mac TEXT UNIQUE NOT NULL, ip TEXT, hostname TEXT,
-                     image_id INTEGER REFERENCES images(id));
-                 INSERT INTO images(name,os,dataset) VALUES('old','linux','pool/old');
-                 INSERT INTO machines(mac) VALUES('aa:bb:cc:dd:ee:01');",
-            )
-            .unwrap();
-    for _ in 0..2 {
-        let db = Sqlite::open(&p).unwrap(); // second open: already migrated, nothing to do
-        assert_eq!(db.images().unwrap()[0].cache_mode, "disk");
-        assert_eq!(db.machines().unwrap()[0].mac, "aa:bb:cc:dd:ee:01");
-    }
-    let c = Connection::open(&p).unwrap();
-    assert_eq!(
-        c.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
-            .unwrap(),
-        SCHEMA_VERSION
-    );
-    assert!(
-        !has_column(&c, "images", "dataset").unwrap()
-            && has_column(&c, "machines", "notes").unwrap()
-            && has_column(&c, "machines", "base_image").unwrap()
-    );
-    // A new DB starts at the latest version.
-    let p2 = tmp("broom_test_migrate_new.db");
-    drop(Sqlite::open(&p2).unwrap());
-    let v: i64 = Connection::open(&p2)
-        .unwrap()
-        .query_row("PRAGMA user_version", [], |r| r.get(0))
-        .unwrap();
-    assert_eq!(v, SCHEMA_VERSION);
-    let sync: i64 = Sqlite::open(&p2)
+fn synchronous_normal_on_every_open() {
+    let p = tmp("broom_test_sync.db");
+    drop(Sqlite::open(&p).unwrap());
+    let sync: i64 = Sqlite::open(&p)
         .unwrap()
         .c()
         .query_row("PRAGMA synchronous", [], |r| r.get(0))
         .unwrap();
     assert_eq!(sync, 1, "NORMAL on every open (per-connection pragma)");
-    tmp("broom_test_migrate.db");
-    tmp("broom_test_migrate_new.db");
+    tmp("broom_test_sync.db");
 }
 
 #[test]
@@ -152,17 +117,6 @@ fn db_files_owner_only() {
     }
     drop(db);
     tmp("broom_test_perm.db");
-}
-
-#[test]
-fn dhcp_mode_proxy_becomes_off() {
-    let p = tmp("broom_test_proxy.db");
-    Sqlite::open(&p)
-        .unwrap()
-        .set_config("dhcp_mode", "proxy")
-        .unwrap();
-    assert_eq!(Sqlite::open(&p).unwrap().get_config("dhcp_mode", ""), "off");
-    tmp("broom_test_proxy.db");
 }
 
 #[test]
@@ -333,7 +287,6 @@ fn images_machines_leases() {
         ip: Some("10.0.0.100".into()),
         hostname: Some("x".into()),
         expires: 5,
-        source: "full".into(),
     };
     db.put_lease(&l).unwrap();
     // None ip/hostname keep the stored values.
@@ -341,18 +294,10 @@ fn images_machines_leases() {
         ip: None,
         hostname: None,
         expires: 9,
-        source: "proxy".into(),
         ..l.clone()
     })
     .unwrap();
-    assert_eq!(
-        db.leases().unwrap(),
-        vec![Lease {
-            expires: 9,
-            source: "proxy".into(),
-            ..l
-        }]
-    );
+    assert_eq!(db.leases().unwrap(), vec![Lease { expires: 9, ..l }]);
     db.delete_lease("m1").unwrap();
     assert!(db.leases().unwrap().is_empty());
 
@@ -415,51 +360,30 @@ fn bench_rows_latest_prune() {
     );
 }
 
-/// A DB from before v3 with rows breaking the rules: fixed on open (the oldest row keeps the value), then the database
-/// itself refuses a second machine with the same MAC (any case) / fixed IP / hostname (any case), a second default
-/// image and a machine pointing at an image that does not exist.
+/// The database itself refuses a second machine with the same MAC (any case) / fixed IP / hostname (any case), a
+/// second default image and a machine pointing at an image that does not exist.
 #[test]
-fn v3_rules_fixed_then_kept() {
-    let p = tmp("broom_test_v3.db");
-    Connection::open(&p)
-        .unwrap()
+fn rules_kept_by_the_db() {
+    let p = tmp("broom_test_rules.db");
+    let db = Sqlite::open(&p).unwrap();
+    db.c()
         .execute_batch(
-            "PRAGMA foreign_keys=OFF; -- rows an older build could have left
-             CREATE TABLE images(id INTEGER PRIMARY KEY, name TEXT UNIQUE NOT NULL, os TEXT NOT NULL,
-                 is_default INTEGER NOT NULL DEFAULT 0);
-             CREATE TABLE machines(id INTEGER PRIMARY KEY, mac TEXT UNIQUE NOT NULL, ip TEXT, hostname TEXT,
-                 image_id INTEGER REFERENCES images(id));
-             INSERT INTO images(id,name,os,is_default) VALUES(1,'a','linux',1),(2,'b','linux',1);
+            "INSERT INTO images(id,name,os,is_default) VALUES(1,'a','linux',1),(2,'b','linux',0);
              INSERT INTO machines(id,mac,ip,hostname,image_id) VALUES
                  (1,'aa:bb:cc:dd:ee:01','10.0.0.11','MAY01',1),
-                 (2,'AA:BB:CC:DD:EE:01',NULL,NULL,NULL),
-                 (3,'aa:bb:cc:dd:ee:03','10.0.0.11','may01',99);",
+                 (3,'aa:bb:cc:dd:ee:03',NULL,NULL,NULL);",
         )
         .unwrap();
-    let db = Sqlite::open(&p).unwrap();
-    let ms = db.machines().unwrap();
-    assert_eq!(ms.len(), 2, "the second spelling of a MAC removed");
-    let m3 = ms.iter().find(|m| m.id == 3).unwrap();
-    assert_eq!(
-        (m3.ip.as_deref(), m3.hostname.as_deref(), m3.image_id),
-        (None, None, None)
-    );
-    let m1 = ms.iter().find(|m| m.id == 1).unwrap();
-    assert_eq!(
-        (m1.ip.as_deref(), m1.hostname.as_deref(), m1.image_id),
-        (Some("10.0.0.11"), Some("MAY01"), Some(1))
-    );
-    assert_eq!(
-        db.images().unwrap().iter().filter(|i| i.is_default).count(),
-        1
-    );
-
-    // From now on the database refuses them itself.
+    let mut m = db
+        .machines()
+        .unwrap()
+        .into_iter()
+        .find(|m| m.id == 3)
+        .unwrap();
     assert!(
         db.add_machine("AA:BB:CC:DD:EE:03", None, None).is_err(),
         "same MAC, other case"
     );
-    let mut m = m3.clone();
     m.ip = Some("10.0.0.11".into());
     assert!(db.update_machine(&m).is_err(), "same fixed IP");
     m.ip = None;
@@ -492,7 +416,7 @@ fn v3_rules_fixed_then_kept() {
             .all(|(mac, _)| mac != "aa:bb:cc:dd:ee:03")
     );
     drop(db);
-    tmp("broom_test_v3.db");
+    tmp("broom_test_rules.db");
 }
 
 /// Many edits of one JSON value at the same time: every one lands (none overwrites another), and an edit that
@@ -531,22 +455,4 @@ fn json_edits_are_atomic() {
     assert_eq!(v.len(), 200, "a refused edit writes nothing");
     drop(db);
     tmp("broom_test_edit.db");
-}
-
-/// A v3 database (before base mode per machine) gets machines.base_image on open.
-#[test]
-fn v3_gets_base_image() {
-    let p = tmp("broom_test_v4.db");
-    drop(Sqlite::open(&p).unwrap());
-    {
-        let c = Connection::open(&p).unwrap();
-        c.execute_batch("ALTER TABLE machines DROP COLUMN base_image; PRAGMA user_version=3;")
-            .unwrap();
-        assert!(!has_column(&c, "machines", "base_image").unwrap());
-    }
-    let db = Sqlite::open(&p).unwrap();
-    let m = db.add_machine("aa:bb:cc:dd:ee:09", None, None).unwrap();
-    db.set_machine_base(m, None).unwrap();
-    assert!(has_column(&db.c(), "machines", "base_image").unwrap());
-    tmp("broom_test_v4.db");
 }

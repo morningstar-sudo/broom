@@ -1,10 +1,11 @@
-// drivers.rs — custom Windows driver packages (VGA, LAN, audio…) installed on each machine at every boot.
+// drivers.rs — custom Windows driver packages (VGA, LAN, audio…) installed once into each machine's driver layer.
 // Upload: a .zip of an EXTRACTED driver folder (at least one .inf) → <home>/tftp/broom-drivers/<name>.tar.gz
 // (the stage has tar/gzip, no unzip) + the hardware IDs read from its .inf files.
 // Stage, every boot: POST /api/drivers/for?mac= (body = its PCI/USB IDs) → "name sha256" lines of the packages
 // for this machine: a hardware ID matches, the package targets its group, or it is ticked "all machines".
-// broom-bootorder.ps1 (scripts/, handed to the client by the stage) pnputil-installs them at every boot: plug and play,
-// a new or updated package needs no new base.
+// broom-bootorder.ps1 (scripts/, handed to the client by the stage) pnputil-installs them when the stage asks
+// (drvinstall.txt): into the base being built, or once into a driver layer over it (drvs.vhdx) that every later boot
+// keeps — a new or updated package needs no new base.
 use axum::{
     Json, Router,
     body::Body,

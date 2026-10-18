@@ -5,16 +5,10 @@
 // because image.img is never written in place: an upload, a rollback, a restored version all REPLACE it (rename),
 // and the Windows publish trims only an image not trimmed yet (on its own copy if a version shares the file).
 // Storage on another filesystem than the images (no hard link possible) → the version is a copy (holes kept).
-// Versions saved by older releases are 4 MB chunk lists (storage/chunks/<ab>/<blake3>, "zero" = hole): no new ones
-// are made, but they still restore, export, clone and delete (gc frees their chunks with them).
 // Snapshot/rollback run as publish jobs (images.rs), serialized by versions_lock.
 use serde::{Deserialize, Serialize};
 use std::fs::File;
-use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
-
-const CHUNK: u64 = 4 << 20;
-const ZERO: &str = "zero";
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Manifest {
@@ -23,18 +17,8 @@ pub struct Manifest {
     /// Unix seconds.
     pub created: u64,
     pub size: u64,
-    #[serde(default = "chunk")]
-    pub chunk_size: u64,
-    /// Chunk version (older releases); empty in list() results.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub chunks: Vec<String>,
     /// The version's file, relative to the storage root.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub file: Option<String>,
-}
-
-fn chunk() -> u64 {
-    CHUNK
+    pub file: String,
 }
 
 /// `<home>/storage` by default (next to the binary); override with BOOTROM_STORAGE_DIR.
@@ -43,10 +27,6 @@ pub(crate) fn storage_dir() -> PathBuf {
     std::env::var("BOOTROM_STORAGE_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|_| crate::home().join("storage"))
-}
-
-fn chunk_path(root: &Path, hash: &str) -> PathBuf {
-    root.join("chunks").join(&hash[..2]).join(hash)
 }
 
 fn manifest_dir(root: &Path, name: &str) -> PathBuf {
@@ -70,7 +50,7 @@ fn same_file(a: &Path, b: &Path) -> bool {
     }
 }
 
-/// Every manifest of an image (with chunks), newest first.
+/// Every manifest of an image, newest first.
 fn manifests(root: &Path, name: &str) -> Vec<Manifest> {
     let mut v: Vec<Manifest> = std::fs::read_dir(manifest_dir(root, name))
         .into_iter()
@@ -83,18 +63,9 @@ fn manifests(root: &Path, name: &str) -> Vec<Manifest> {
     v
 }
 
-/// Versions of an image, newest first (without their chunk lists).
+/// Versions of an image, newest first.
 pub fn list(name: &str) -> Vec<Manifest> {
-    let _ = std::fs::remove_file(crate::images_dir().join(name).join("current.chunks")); // cache of older releases
-    list_at(&storage_dir(), name)
-}
-
-fn list_at(root: &Path, name: &str) -> Vec<Manifest> {
-    let mut v = manifests(root, name);
-    for m in &mut v {
-        m.chunks.clear();
-    }
-    v
+    manifests(&storage_dir(), name)
 }
 
 /// Save image.img as a new version "v<N>": a hard link (instant, no copy). Refused when image.img already is a version
@@ -107,11 +78,7 @@ fn snapshot_at(root: &Path, img: &Path, name: &str, label: &str) -> Result<Manif
     let img = std::fs::canonicalize(img).map_err(e(&img.display().to_string()))?;
     let meta = std::fs::metadata(&img).map_err(e("stat image"))?;
     let have = manifests(root, name);
-    if let Some(m) = have.iter().find(|m| {
-        m.file
-            .as_ref()
-            .is_some_and(|f| same_file(&root.join(f), &img))
-    }) {
+    if let Some(m) = have.iter().find(|m| same_file(&root.join(&m.file), &img)) {
         return Err(format!("the golden is already saved as {}", m.version));
     }
     let n = have
@@ -141,9 +108,7 @@ fn snapshot_at(root: &Path, img: &Path, name: &str, label: &str) -> Result<Manif
         label: label.to_string(),
         created,
         size: meta.len(),
-        chunk_size: CHUNK,
-        chunks: Vec::new(),
-        file: Some(rel),
+        file: rel,
     };
     write_durable(
         &dir.join(format!("{}.json", m.version)),
@@ -193,7 +158,7 @@ fn load(root: &Path, name: &str, version: &str) -> Result<Manifest, String> {
 }
 
 /// `version` of image `from` → v1 of the new image `to`: only the manifest is copied, the data is shared (gc keeps a
-/// file / chunk while any manifest of any image names it).
+/// file while any manifest of any image names it).
 pub fn clone_to(from: &str, version: &str, to: &str, label: &str) -> Result<(), String> {
     clone_at(&storage_dir(), from, version, to, label)
 }
@@ -214,38 +179,19 @@ fn clone_at(root: &Path, from: &str, version: &str, to: &str, label: &str) -> Re
         .map_err(e("write manifest"))
 }
 
-/// Can `version` be restored? Its file (or every chunk) is there with the right length. → the bytes a restore must
-/// write (0 for a file version: a hard link). Checked BEFORE anything served is touched.
-pub fn check(name: &str, version: &str) -> Result<u64, String> {
+/// Can `version` be restored? Its file is there with the right length. Checked BEFORE anything served is touched.
+pub fn check(name: &str, version: &str) -> Result<(), String> {
     check_at(&storage_dir(), name, version)
 }
 
-fn check_at(root: &Path, name: &str, version: &str) -> Result<u64, String> {
+fn check_at(root: &Path, name: &str, version: &str) -> Result<(), String> {
     let m = load(root, name, version)?;
-    if let Some(f) = &m.file {
-        return match std::fs::metadata(root.join(f)) {
-            Ok(x) if x.len() == m.size => Ok(0),
-            _ => Err(format!(
-                "version {version}: its file is missing or damaged — it can't be restored"
-            )),
-        };
+    match std::fs::metadata(root.join(&m.file)) {
+        Ok(x) if x.len() == m.size => Ok(()),
+        _ => Err(format!(
+            "version {version}: its file is missing or damaged — it can't be restored"
+        )),
     }
-    let mut data = 0;
-    for (i, h) in m
-        .chunks
-        .iter()
-        .enumerate()
-        .filter(|(_, h)| h.as_str() != ZERO)
-    {
-        let len = m.chunk_size.min(m.size - i as u64 * m.chunk_size);
-        if std::fs::metadata(chunk_path(root, h)).map(|x| x.len()).ok() != Some(len) {
-            return Err(format!(
-                "version {version}: chunk {i} is missing or damaged — it can't be restored"
-            ));
-        }
-        data += len;
-    }
-    Ok(data)
 }
 
 /// Make image.img equal to `version` (a new image cloned from a version).
@@ -261,34 +207,15 @@ pub fn rehydrate_to(name: &str, version: &str, dst: &Path) -> Result<(), String>
 fn rehydrate_at(root: &Path, dst: &Path, name: &str, version: &str) -> Result<(), String> {
     let m = load(root, name, version)?;
     let _ = std::fs::remove_file(dst);
-    if let Some(file) = &m.file {
-        // The version's file itself again (hard link), or a copy of its data on another filesystem.
-        let src = root.join(file);
-        if std::fs::hard_link(&src, dst).is_err() {
-            crate::disk::copy_region(&src, 0, None, dst)?;
-        }
-        return Ok(());
+    // The version's file itself again (hard link), or a copy of its data on another filesystem.
+    let src = root.join(&m.file);
+    if std::fs::hard_link(&src, dst).is_err() {
+        crate::disk::copy_region(&src, 0, None, dst)?;
     }
-    // A chunk version of an older release: written chunk by chunk (each checked against its hash), zero = hole.
-    let f = File::create(dst).map_err(e(&dst.display().to_string()))?;
-    f.set_len(m.size).map_err(e("size image"))?;
-    for (i, h) in m
-        .chunks
-        .iter()
-        .enumerate()
-        .filter(|(_, h)| h.as_str() != ZERO)
-    {
-        let data = std::fs::read(chunk_path(root, h)).map_err(e(&format!("chunk {h} missing")))?;
-        if blake3::hash(&data).to_hex().as_str() != h {
-            return Err(format!("chunk {h} is corrupt"));
-        }
-        f.write_all_at(&data, i as u64 * m.chunk_size)
-            .map_err(e("write image"))?;
-    }
-    f.sync_all().map_err(e("sync image"))
+    Ok(())
 }
 
-/// Delete a version, then free the files / chunks no manifest names anymore. Returns how many were freed.
+/// Delete a version, then free the files no manifest names anymore. Returns how many were freed.
 pub fn delete(name: &str, version: &str) -> Result<usize, String> {
     delete_at(&storage_dir(), name, version)
 }
@@ -311,12 +238,9 @@ pub fn delete_all(name: &str) -> Result<usize, String> {
     gc(&root)
 }
 
-/// Mark & sweep: keep the files and chunks named by any manifest of any image.
+/// Mark & sweep: keep the files named by any manifest of any image.
 fn gc(root: &Path) -> Result<usize, String> {
-    let (mut chunks, mut files) = (
-        std::collections::HashSet::new(),
-        std::collections::HashSet::new(),
-    );
+    let mut files = std::collections::HashSet::new();
     for img in std::fs::read_dir(root.join("manifests"))
         .into_iter()
         .flatten()
@@ -335,8 +259,7 @@ fn gc(root: &Path) -> Result<usize, String> {
             let m: Manifest =
                 serde_json::from_slice(&std::fs::read(mf.path()).map_err(e("read manifest"))?)
                     .map_err(e(&mf.path().display().to_string()))?;
-            chunks.extend(m.chunks);
-            files.extend(m.file.map(|f| root.join(f)));
+            files.insert(root.join(m.file));
         }
     }
     let mut freed = 0;
@@ -355,24 +278,6 @@ fn gc(root: &Path) -> Result<usize, String> {
             }
         }
         crate::volumes::remove_dir_if_empty(&img.path()); // only when empty (a link to a volume: its folder too)
-    }
-    for sub in std::fs::read_dir(root.join("chunks"))
-        .into_iter()
-        .flatten()
-        .flatten()
-    {
-        for c in std::fs::read_dir(sub.path())
-            .into_iter()
-            .flatten()
-            .flatten()
-        {
-            if !chunks.contains(&*c.file_name().to_string_lossy())
-                && std::fs::remove_file(c.path()).is_ok()
-            {
-                freed += 1;
-            }
-        }
-        let _ = std::fs::remove_dir(sub.path());
     }
     Ok(freed)
 }

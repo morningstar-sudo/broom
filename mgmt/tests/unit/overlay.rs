@@ -165,7 +165,6 @@ fn cache_list_and_copy() {
             ("gone.img", "g"),
             ("gone.sha256", "hg\n"),
             ("half.img", "x"),
-            ("x.chunks", ""),
         ] {
             std::fs::write(d.join("c").join(f), v).unwrap();
         }
@@ -196,7 +195,7 @@ fn cache_list_and_copy() {
             valid,
             has("kept.img"),
             has("gone.img"),
-            has("half.img") || has("x.chunks"),
+            has("half.img"),
         )
     };
     std::fs::write(d.with_extension("src"), &golden).unwrap();

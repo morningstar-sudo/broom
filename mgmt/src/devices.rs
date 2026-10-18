@@ -671,7 +671,7 @@ async fn detail(
         "machine": m,
         "license_key": license_key,
         "image": image,
-        "lease": lease.map(|l| serde_json::json!({"ip": l.ip, "expires_in": l.expires - crate::now_secs() as i64, "source": l.source})),
+        "lease": lease.map(|l| serde_json::json!({"ip": l.ip, "expires_in": l.expires - crate::now_secs() as i64})),
         "hwids": hw,
         "drivers": got,
         "agent_key": crate::agentauth::info(&st, &m.mac),

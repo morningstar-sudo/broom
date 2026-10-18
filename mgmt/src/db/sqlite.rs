@@ -57,6 +57,12 @@ const SCHEMA: &str = r#"
         base_image     INTEGER REFERENCES images(id) -- base mode (Windows): this image boots its base itself, changes kept
     );
 
+    -- One machine per MAC (any case), per fixed IP and per hostname (any case); one default image.
+    CREATE UNIQUE INDEX IF NOT EXISTS machines_mac_any_case ON machines(lower(mac));
+    CREATE UNIQUE INDEX IF NOT EXISTS machines_one_ip ON machines(ip) WHERE ip IS NOT NULL;
+    CREATE UNIQUE INDEX IF NOT EXISTS machines_one_hostname ON machines(lower(hostname)) WHERE hostname IS NOT NULL;
+    CREATE UNIQUE INDEX IF NOT EXISTS images_one_default ON images(is_default) WHERE is_default=1;
+
     -- Windows driver packages (drivers.rs). hwids / groups: newline-separated lists.
     CREATE TABLE IF NOT EXISTS drivers(
         id           INTEGER PRIMARY KEY,
@@ -76,13 +82,12 @@ const SCHEMA: &str = r#"
         seen  INTEGER NOT NULL
     );
 
-    -- DHCP leases (dhcp.rs). source 'full' = our lease ('proxy' rows only in DBs from old versions).
+    -- DHCP leases (dhcp.rs).
     CREATE TABLE IF NOT EXISTS leases(
         mac      TEXT PRIMARY KEY,
         ip       TEXT,
         hostname TEXT,
-        expires  INTEGER NOT NULL,
-        source   TEXT NOT NULL
+        expires  INTEGER NOT NULL
     );
 
     -- Benchmark results (bench.rs). mac NULL = the server.
@@ -112,8 +117,8 @@ const SCHEMA: &str = r#"
     INSERT OR IGNORE INTO config(key,value) VALUES('dhcp_gateway','');
     INSERT OR IGNORE INTO config(key,value) VALUES('dhcp_dns','');
     INSERT OR IGNORE INTO config(key,value) VALUES('dhcp_lease','12h');
-    INSERT OR IGNORE INTO config(key,value) VALUES('ltsp_user','guest');
-    INSERT OR IGNORE INTO config(key,value) VALUES('ltsp_password','123456');
+    INSERT OR IGNORE INTO config(key,value) VALUES('guest_user','guest');
+    INSERT OR IGNORE INTO config(key,value) VALUES('guest_password','123456');
 "#;
 
 const IMAGE_COLS: &str =
@@ -179,123 +184,10 @@ fn private_files(path: &str) -> std::io::Result<()> {
     Ok(())
 }
 
-/// Schema version in `PRAGMA user_version`. A change to SCHEMA's tables bumps it and adds an `if v < N` step to
-/// migrate() (SCHEMA itself always holds the latest layout, for new DBs).
-const SCHEMA_VERSION: i64 = 4;
-
-fn has_column(c: &Connection, table: &str, col: &str) -> rusqlite::Result<bool> {
-    c.query_row(
-        "SELECT 1 FROM pragma_table_info(?1) WHERE name=?2",
-        [table, col],
-        |_| Ok(()),
-    )
-    .optional()
-    .map(|r| r.is_some())
-}
-
-/// Bring an older DB up to SCHEMA_VERSION, in one transaction: any error is real and stops the open.
-fn migrate(c: &mut Connection) -> rusqlite::Result<()> {
-    let v: i64 = c.query_row("PRAGMA user_version", [], |r| r.get(0))?;
-    if v >= SCHEMA_VERSION {
-        return Ok(());
-    }
-    let tx = c.transaction()?;
-    if v < 4 {
-        // Columns added over time (a new DB already has them all from SCHEMA); v2: images per machine group + preloading;
-        // v4: base mode per machine.
-        const COLS: &[(&str, &str, &str)] = &[
-            ("images", "boot_script", "TEXT"),
-            ("images", "hash", "TEXT"),
-            ("images", "cache_mode", "TEXT NOT NULL DEFAULT 'disk'"),
-            ("images", "active_version", "TEXT"),
-            ("images", "use_ssd", "INTEGER NOT NULL DEFAULT 1"),
-            ("machines", "license_key", "TEXT"),
-            ("machines", "license_state", "TEXT"),
-            ("machines", "license_gen", "INTEGER NOT NULL DEFAULT 0"),
-            ("machines", "license_result", "TEXT"),
-            ("machines", "grp", "TEXT"),
-            ("machines", "notes", "TEXT"),
-            ("images", "grps", "TEXT NOT NULL DEFAULT ''"),
-            ("images", "preload", "INTEGER NOT NULL DEFAULT 0"),
-            ("machines", "base_image", "INTEGER REFERENCES images(id)"),
-        ];
-        for (table, col, ddl) in COLS {
-            if !has_column(&tx, table, col)? {
-                tx.execute(&format!("ALTER TABLE {table} ADD COLUMN {col} {ddl}"), [])?;
-            }
-        }
-        if has_column(&tx, "images", "dataset")? {
-            tx.execute("ALTER TABLE images DROP COLUMN dataset", [])?; // ZFS versioning removed
-        }
-    }
-    if v < 3 {
-        harden(&tx)?;
-    }
-    tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
-    tx.commit()
-}
-
-/// Rules the web pages always checked, now also kept by the database itself (two requests at once, an import, a
-/// bug can't break them): one machine per MAC (any case), per fixed IP and per hostname (any case); one default
-/// image; a machine's image exists. Rows from older versions that break one are fixed first — the oldest row keeps
-/// the value, a later one loses it (logged) — or the indexes could not be made.
-fn harden(tx: &Connection) -> rusqlite::Result<()> {
-    let fixed = |what: &str, n: usize| {
-        if n > 0 {
-            tracing::warn!("database: {n} {what}");
-        }
-    };
-    // MACs in one spelling (lower case); a second row of the same MAC in another case goes.
-    let n = tx.execute(
-        "DELETE FROM machines WHERE id NOT IN (SELECT MIN(id) FROM machines GROUP BY lower(mac))",
-        [],
-    )?;
-    fixed("duplicate machine row(s) (same MAC, other case) removed", n);
-    tx.execute(
-        "UPDATE machines SET mac=lower(mac) WHERE mac<>lower(mac)",
-        [],
-    )?;
-    let n = tx.execute(
-        "UPDATE machines SET image_id=NULL WHERE image_id IS NOT NULL AND image_id NOT IN (SELECT id FROM images)",
-        [],
-    )?;
-    fixed(
-        "machine(s) pointed at a deleted image — now the default image",
-        n,
-    );
-    let n = tx.execute(
-        "UPDATE machines SET ip=NULL WHERE ip IS NOT NULL AND id NOT IN (SELECT MIN(id) FROM machines WHERE ip IS NOT NULL GROUP BY ip)",
-        [],
-    )?;
-    fixed(
-        "machine(s) shared a fixed IP with an older one — their IP cleared",
-        n,
-    );
-    let n = tx.execute(
-        "UPDATE machines SET hostname=NULL WHERE hostname IS NOT NULL AND id NOT IN \
-         (SELECT MIN(id) FROM machines WHERE hostname IS NOT NULL GROUP BY lower(hostname))",
-        [],
-    )?;
-    fixed(
-        "machine(s) shared a hostname with an older one — their hostname cleared",
-        n,
-    );
-    tx.execute(
-        "UPDATE images SET is_default=0 WHERE is_default=1 AND id<>(SELECT MIN(id) FROM images WHERE is_default=1)",
-        [],
-    )?;
-    tx.execute_batch(
-        "CREATE UNIQUE INDEX IF NOT EXISTS machines_mac_any_case ON machines(lower(mac));
-         CREATE UNIQUE INDEX IF NOT EXISTS machines_one_ip ON machines(ip) WHERE ip IS NOT NULL;
-         CREATE UNIQUE INDEX IF NOT EXISTS machines_one_hostname ON machines(lower(hostname)) WHERE hostname IS NOT NULL;
-         CREATE UNIQUE INDEX IF NOT EXISTS images_one_default ON images(is_default) WHERE is_default=1;",
-    )
-}
-
 impl Sqlite {
     pub fn open(path: &str) -> DbResult<Sqlite> {
         private_files(path).map_err(|err| format!("{path}: {err}"))?;
-        let mut c = Connection::open(path).map_err(|err| format!("open {path}: {err}"))?;
+        let c = Connection::open(path).map_err(|err| format!("open {path}: {err}"))?;
         // SQLite silently falls back to read-only when it can't open for writing (e.g. a file owned by
         // another user in /tmp: fs.protected_regular blocks even root).
         if c.is_readonly(rusqlite::MAIN_DB).unwrap_or(false) {
@@ -305,13 +197,6 @@ impl Sqlite {
             ));
         }
         c.execute_batch(SCHEMA).map_err(e)?;
-        migrate(&mut c).map_err(|err| format!("{path}: schema migration: {err}"))?;
-        // ProxyDHCP mode removed: off is the same for broom (the LAN's DHCP points clients at it).
-        c.execute(
-            "UPDATE config SET value='off' WHERE key='dhcp_mode' AND value='proxy'",
-            [],
-        )
-        .map_err(e)?;
         // iSCSI IQN base, random per server, generated once (first open without it) and kept.
         c.execute(
             "INSERT OR IGNORE INTO config(key,value) VALUES('iqn_base',?1)",
@@ -709,27 +594,22 @@ impl Db for Sqlite {
     }
 
     fn leases(&self) -> DbResult<Vec<Lease>> {
-        self.all(
-            "SELECT mac,ip,hostname,expires,source FROM leases",
-            [],
-            |r| {
-                Ok(Lease {
-                    mac: r.get(0)?,
-                    ip: r.get(1)?,
-                    hostname: r.get(2)?,
-                    expires: r.get(3)?,
-                    source: r.get(4)?,
-                })
-            },
-        )
+        self.all("SELECT mac,ip,hostname,expires FROM leases", [], |r| {
+            Ok(Lease {
+                mac: r.get(0)?,
+                ip: r.get(1)?,
+                hostname: r.get(2)?,
+                expires: r.get(3)?,
+            })
+        })
     }
 
     fn put_lease(&self, l: &Lease) -> DbResult<()> {
         self.run(
-            "INSERT INTO leases(mac,ip,hostname,expires,source) VALUES(?1,?2,?3,?4,?5)
+            "INSERT INTO leases(mac,ip,hostname,expires) VALUES(?1,?2,?3,?4)
              ON CONFLICT(mac) DO UPDATE SET ip=COALESCE(excluded.ip,ip),
-               hostname=COALESCE(excluded.hostname,hostname), expires=excluded.expires, source=excluded.source",
-            params![l.mac, l.ip, l.hostname, l.expires, l.source],
+               hostname=COALESCE(excluded.hostname,hostname), expires=excluded.expires",
+            params![l.mac, l.ip, l.hostname, l.expires],
         )
     }
 

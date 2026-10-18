@@ -57,7 +57,6 @@ fn static_ip_not_held_by_a_live_lease() {
         ip: Some(ip.into()),
         hostname: None,
         expires,
-        source: "full".into(),
     };
     let leases = [
         lease("bb:00:00:00:00:01", "10.0.0.50", 2000),

@@ -2,8 +2,6 @@
 // it over its control socket. The daemon runs from its own copy of the binary (<home>/run/iscsid-<id>), outside the
 // mgmt service's cgroup: restarting / upgrading mgmt (overwriting bootrom-mgmt) never stops it, so clients stay
 // connected. A daemon of another build is replaced only once no client is logged in.
-//
-// Also clears targets an older version made in the kernel's LIO (configfs) — they hold port 3260.
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::OnceLock;
@@ -73,8 +71,7 @@ pub fn list() -> Option<Vec<TargetInfo>> {
     call(&Req::List).ok().map(|r| r.targets)
 }
 
-/// The daemon's state: the goldens' targets, the games disks, bytes read per client IP. None = no daemon; peers None =
-/// a daemon of an older build (no counters).
+/// The daemon's state: the goldens' targets, the games disks, bytes read per client IP. None = no daemon.
 pub fn stats() -> Option<crate::iscsid::Resp> {
     call(&Req::List).ok()
 }
@@ -265,59 +262,4 @@ fn start_daemon() -> Result<(), String> {
         "iSCSI daemon did not come up in 10 s (journalctl -u broom-iscsid, or iscsid.log next to the binary){}",
         daemon_log_tail()
     ))
-}
-
-const CONFIGFS: &str = "/sys/kernel/config/target";
-
-/// Remove the LIO targets an older version made (IQNs starting with one of `prefixes`) and their backstores, so the
-/// kernel frees port 3260 for the daemon. Their clients log in again to the daemon (same IQN). True if any was there.
-pub fn clear_lio(prefixes: &[&str]) -> bool {
-    let root = Path::new(CONFIGFS);
-    let subdirs = |p: &Path| -> Vec<PathBuf> {
-        std::fs::read_dir(p)
-            .map(|rd| {
-                rd.flatten()
-                    .map(|e| e.path())
-                    .filter(|p| p.is_dir() && !p.is_symlink())
-                    .collect()
-            })
-            .unwrap_or_default()
-    };
-    let mut any = false;
-    for t in subdirs(&root.join("iscsi")) {
-        let iqn = t
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_default();
-        if !prefixes.iter().any(|p| iqn.starts_with(p)) {
-            continue;
-        }
-        any = true;
-        for tpg in subdirs(&t).into_iter().filter(|p| {
-            p.file_name()
-                .is_some_and(|n| n.to_string_lossy().starts_with("tpgt_"))
-        }) {
-            let _ = std::fs::write(tpg.join("enable"), "0");
-            for lun in subdirs(&tpg.join("lun")) {
-                for e in std::fs::read_dir(&lun).into_iter().flatten().flatten() {
-                    if e.path().is_symlink() {
-                        let _ = std::fs::remove_file(e.path());
-                    }
-                }
-                let _ = std::fs::remove_dir(&lun);
-            }
-            for np in subdirs(&tpg.join("np")) {
-                let _ = std::fs::remove_dir(&np);
-            }
-            let _ = std::fs::remove_dir(&tpg);
-        }
-        let _ = std::fs::remove_dir(&t);
-        // Its backstore was named after the IQN's last part (<name>.g<gen>, or <name> for the oldest targets).
-        let store = iqn.rsplit(':').next().unwrap_or_default().to_string();
-        for hba in subdirs(&root.join("core")) {
-            let _ = std::fs::remove_dir(hba.join(&store));
-        }
-        tracing::info!("removed kernel LIO target {iqn} (now served by the iSCSI daemon)");
-    }
-    any
 }

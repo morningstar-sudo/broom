@@ -104,9 +104,9 @@ pub struct Resp {
     pub games: Vec<games::Info>,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub msg: String,
-    /// With List. None = a daemon of a build without the counters.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub peers: Option<Vec<PeerInfo>>,
+    /// With List.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub peers: Vec<PeerInfo>,
 }
 
 pub struct Lun {
@@ -280,7 +280,7 @@ async fn handle(req: Req) -> Resp {
         }
         Req::List => {
             r.targets = list();
-            r.peers = Some(conn::peers());
+            r.peers = conn::peers();
             r.games = games::info(); // the benchmark page's throughput (list() is the goldens only: publish/gc use it)
         }
         Req::Version => r.version = crate::iscsi::exe_id(),

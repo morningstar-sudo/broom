@@ -268,16 +268,15 @@ async fn rollback(
             )
         };
         // Everything is checked and the version rebuilt into image.img.new BEFORE the served golden or its target is
-        // touched: a missing chunk, a full disk or a crash leaves the image exactly as it was.
+        // touched: a missing version file or a crash leaves the image exactly as it was.
         if disk_target && crate::publish::image_in_use(st, name) {
             in_use()?;
         }
-        let data = {
+        {
             let _g = st.versions_lock.lock();
             crate::versions::check(name, &version)?
         };
         let dir = crate::images_dir().join(name);
-        crate::publish::need_space(&dir, data, "rolling back")?;
         steps.go(&format!("restore {version}"));
         let (img_path, tmp) = (dir.join("image.img"), dir.join("image.img.new"));
         let _ = std::fs::remove_file(&tmp);
@@ -891,20 +890,6 @@ async fn set_use_ssd(
     if img.os == "windows" && !b.on {
         return Err(bad(
             "Windows images always use the SSD (they boot from a VHDX on it)",
-        ));
-    }
-    // A boot script from before the switch existed doesn't pass it to the client, which would keep using the SSD.
-    if img
-        .boot_script
-        .as_deref()
-        .is_some_and(|s| !s.contains("broom.ssd="))
-    {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            format!(
-                "publish image {} again first (its boot script predates the SSD switch)",
-                img.name
-            ),
         ));
     }
     st.db.set_use_ssd(b.id, b.on).map_err(ise)?;

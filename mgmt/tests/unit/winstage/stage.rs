@@ -765,7 +765,7 @@ fn stage_whole_golden_download() {
         ] {
             std::fs::write(d.join("srv").join(f), f).unwrap();
         }
-        for f in ["golden.vhdx", "golden.chunks", "base.vhdx", "child.vhdx"] {
+        for f in ["golden.vhdx", "base.vhdx", "child.vhdx"] {
             std::fs::write(d.join("b").join(f), "old").unwrap();
         }
         let hash = crate::hash::file_hash(&d.join("srv/golden.vhdx").to_string_lossy()).unwrap();
@@ -783,7 +783,7 @@ fn stage_whole_golden_download() {
         let out = String::from_utf8_lossy(&o.stdout).trim().to_string();
         let got = std::fs::read(d.join("b/golden.vhdx")).ok();
         let sum = std::fs::read_to_string(d.join("b/golden.sha256")).ok();
-        let old_gone = !d.join("b/base.vhdx").exists() && !d.join("b/golden.chunks").exists();
+        let old_gone = !d.join("b/base.vhdx").exists() && !d.join("b/child.vhdx").exists();
         let _ = std::fs::remove_dir_all(&d);
         (
             out,

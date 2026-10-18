@@ -34,9 +34,9 @@ if [ -n "$SRV" ] && command -v wget >/dev/null && list=$(cache_list); then
     printf '%s\n' "$list" | grep -qxF "$n $(cat "$f")" || { rm -f "$C/$n.img" "$f"; log "cache: $n removed (no longer cached / other version)"; }
   done
 fi
-# Unfinished copies (no .sha256) + leftovers of older versions (*.chunks: delta manifests).
+# Unfinished copies (no .sha256).
 for f in $C/*.img; do [ -f "${f%.img}.sha256" ] || rm -f "$f"; done
-rm -f $C/*.chunks $C/*.tmp
+rm -f $C/*.tmp
 # Benchmark page: boot time (reported once the desktop target is up; the server times it from the menu choice) and,
 # when the admin asked, the boot disk's read speed (iflag=direct: the disk, not the page cache) + zeros downloaded from
 # the server. Before the cache copy (a service: a background job would be killed when this script ends); the copy

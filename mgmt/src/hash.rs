@@ -76,11 +76,7 @@ const CACHED: usize = 8;
 pub(crate) fn file_hash_cached(path: &std::path::Path, cache: &std::path::Path) -> Option<String> {
     let stamp = stamp(path)?;
     let text = std::fs::read_to_string(cache).unwrap_or_default();
-    // Older builds wrote "<stamp>\n<hash>": read as one entry.
-    let entries: Vec<(&str, &str)> = match text.split_once('\n') {
-        Some((head, h)) if !head.contains('\t') && h.trim().len() == 64 => vec![(head, h.trim())],
-        _ => text.lines().filter_map(|l| l.split_once('\t')).collect(),
-    };
+    let entries: Vec<(&str, &str)> = text.lines().filter_map(|l| l.split_once('\t')).collect();
     if let Some((_, h)) = entries.iter().find(|(s, h)| *s == stamp && h.len() == 64) {
         return Some(h.to_string());
     }

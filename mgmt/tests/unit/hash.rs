@@ -31,9 +31,6 @@ fn cached_hash_follows_size_and_mtime() {
     );
     std::fs::write(&c, format!("{stamp}\t{}\n", "0".repeat(64))).unwrap();
     assert_eq!(super::file_hash_cached(&p, &c).unwrap(), "0".repeat(64));
-    // The one-entry file of older builds ("<stamp>\n<hash>") is still read.
-    std::fs::write(&c, format!("{stamp}\n{}", "1".repeat(64))).unwrap();
-    assert_eq!(super::file_hash_cached(&p, &c).unwrap(), "1".repeat(64));
     // File changed (size + mtime) → hashed again.
     std::fs::write(&p, "abcd").unwrap();
     assert_eq!(

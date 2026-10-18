@@ -10,35 +10,6 @@ use std::process::Command;
 
 use crate::{db, preflight};
 
-/// Distro services that older versions installed and the binary now replaces: stop + disable them
-/// if running so their ports (67/69) are free. Anything else holding a port is left alone
-/// (the bind error then names the port).
-pub fn takeover(services: &[&str]) {
-    // Probes only: a unit that isn't installed makes systemctl print "Failed to get unit file state" even
-    // with --quiet → stderr dropped.
-    let probe = |verb: &str, s: &str| {
-        Command::new("systemctl")
-            .args([verb, "--quiet", s])
-            .stderr(std::process::Stdio::null())
-            .status()
-            .is_ok_and(|x| x.success())
-    };
-    for s in services {
-        let (active, enabled) = (probe("is-active", s), probe("is-enabled", s));
-        if active || enabled {
-            let ok = Command::new("systemctl")
-                .args(["disable", "--now", s])
-                .status()
-                .is_ok_and(|x| x.success());
-            if ok {
-                tracing::info!("takeover: {s} stopped + disabled (now built into bootrom-mgmt)");
-            } else {
-                tracing::warn!("takeover: failed to stop {s}");
-            }
-        }
-    }
-}
-
 const UNIT_PATH: &str = "/etc/systemd/system/bootrom-mgmt.service";
 
 /// SELinux (Rocky / RHEL / Alma): systemd may only run programs labelled as such. A binary under /root or /home (or

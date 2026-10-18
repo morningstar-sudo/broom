@@ -78,14 +78,7 @@ fn full_offer_first_free_ip_and_pxe_bootfile() {
     );
     assert_eq!(p.opt(3), Some(&[10, 0, 0, 1][..]));
     assert_eq!(p.opt(51), Some(&3600u32.to_be_bytes()[..]));
-    assert!(matches!(
-        out.lease,
-        LeaseOp::Set {
-            expires: 1060,
-            source: "full",
-            ..
-        }
-    ));
+    assert!(matches!(out.lease, LeaseOp::Set { expires: 1060, .. }));
 }
 
 #[test]

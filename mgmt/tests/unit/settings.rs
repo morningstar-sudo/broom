@@ -92,7 +92,6 @@ fn dhcp_pool_need() {
         ip: Some("10.0.0.150".into()),
         hostname: None,
         expires,
-        source: "full".into(),
     };
     let machines = [
         m("aa:00:00:00:00:01", None),              // needs a pool address

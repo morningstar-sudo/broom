@@ -165,40 +165,15 @@ fn export_target(
     Ok(iqn)
 }
 
-/// At start: LIO targets of an older version handed over (cleared, so the daemon gets port 3260), the iSCSI daemon
-/// checked / started, then every published Linux image's target restored if the daemon lacks it, and the games disk
-/// settings sent. Blocking.
+/// At start: the iSCSI daemon checked / started, then every published Linux image's target restored if the daemon
+/// lacks it, and the games disk settings sent. Blocking.
 pub fn start_iscsi(st: &SharedState) {
-    let base = st.db.get_config("iqn_base", "iqn.2026-01.local.broom");
-    if crate::iscsi::clear_lio(&[&base, "iqn.2026-08.net.tiem:"]) {
-        clear_legacy_zram(st);
-    }
     match crate::iscsi::ensure_daemon() {
         Ok(s) => tracing::info!("{s}"),
         Err(e) => return tracing::error!("iSCSI targets not served: {e}"),
     }
     restore_targets(st);
     let _ = crate::games::sync(st); // logs its own errors
-}
-
-/// zram devices an older version loaded goldens into (kernel RAM held until reset). Their LIO targets are gone.
-fn clear_legacy_zram(st: &SharedState) {
-    for img in st.db.images().unwrap_or_default() {
-        let keys = std::iter::once(format!("zram_dev:{}", img.name))
-            .chain((0..=gen_of(st, &img.name)).map(|g| format!("zram_dev:{}:g{g}", img.name)));
-        for k in keys {
-            let dev = st.db.get_config(&k, "");
-            if let Some(n) = dev.strip_prefix("/dev/zram") {
-                let _ = std::fs::write(format!("/sys/block/zram{n}/reset"), "1");
-                let _ = std::fs::write("/sys/class/zram-control/hot_remove", n);
-                let _ = st.db.set_config(&k, "");
-                tracing::info!(
-                    "freed {dev} (image {}: RAM copies now live in the iSCSI daemon)",
-                    img.name
-                );
-            }
-        }
-    }
 }
 
 /// Every published Linux image whose current target the daemon doesn't have (first start, daemon lost its state):

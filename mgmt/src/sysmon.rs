@@ -89,7 +89,7 @@ async fn services(
         "iscsi": iscsi.map(|s| serde_json::json!({
             "targets": s.targets.len(),
             "sessions": s.targets.iter().map(|t| t.sessions).sum::<usize>(),
-            "clients": s.peers.map(|p| p.iter().filter(|p| p.connected).count()),
+            "clients": s.peers.iter().filter(|p| p.connected).count(),
         })),
         "agents": crate::vnc::count(),
         "dns": {"on": crate::dns::on(&st), "running": crate::dns::active(), "allowed": crate::dns::allowed_count(),
@@ -583,7 +583,7 @@ pub async fn run(st: SharedState) {
             .await
             .ok()
             .flatten()
-            .and_then(|s| s.peers)
+            .map(|s| s.peers)
             .unwrap_or_default()
             .into_iter()
             .map(|p| (p.ip, p.read_bytes))

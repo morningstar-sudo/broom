@@ -268,9 +268,7 @@ fn rates(st: &SharedState, (a, at): &Sample, (b, bt): &Sample) -> serde_json::Va
     let (Some(a), Some(b)) = (a, b) else {
         return serde_json::json!({"daemon": "none"});
     };
-    let (Some(p1), Some(p2)) = (&a.peers, &b.peers) else {
-        return serde_json::json!({"daemon": "old"});
-    };
+    let (p1, p2) = (&a.peers, &b.peers);
     let secs = bt.duration_since(*at).as_secs_f64().max(1e-3);
     let mbps = |a: u64, b: u64| b.saturating_sub(a) as f64 / 1e6 / secs;
     // Golden targets (iqn …:<image>.<gen>) and games disks, those with a client logged in.

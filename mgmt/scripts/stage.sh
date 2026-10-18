@@ -95,7 +95,7 @@ scan(){
 #   p1 BROOMEFI 512M | p2 BROOMWIN (Windows) | p3 broomwb (WB GB, broom.wbgb) + p4 broomcache (Linux, only when LX > 0)
 # LX = GB kept for the Linux side, sized by the server from its Linux goldens (broom.lxgb; 0 = no Linux image).
 case "$LX" in ''|*[!0-9]*) LX=0;; esac
-case "$WB" in ""|*[!0-9]*) WB=30;; esac   # writeback GB (broom.wbgb); 30 = boot script of an older version
+case "$WB" in ""|*[!0-9]*) WB=30;; esac   # writeback GB (broom.wbgb)
 pn(){ p=$(part $1 $2); sed -n 's/^PARTNAME=//p' $SYSB/$1/${p##*/}/uevent 2>/dev/null; }
 broomdisk(){
   for n in $disks; do
@@ -179,7 +179,7 @@ if [ -n "$WANT" ]; then
   fi
 fi
 if [ -n "$disk" ]; then
-  # p1/p2 not Windows' = a Linux-only layout of an older version → laid out again (only broom data on it).
+  # p1/p2 not Windows' = a Linux-only layout (no room for Windows then) → laid out again (only broom data on it).
   # Laid out by a Linux boot → Windows' partitions are there, just not formatted yet.
   if [ "$(pn $disk 1)" != BROOMEFI ] || [ "$(pn $disk 2)" != BROOMWIN ]; then NEWDISK=1
   elif [ "$(lbl $(part $disk 2))" != BROOMWIN ]; then FORMAT=1; fi
@@ -212,7 +212,7 @@ fi
 W=/run/broomwin; E=/run/broomefi; B=$W/broom
 mkdir -p $W $E
 # BROOMWIN has no drive letter in Windows (GPT bit 63): users can't see/delete broom files;
-# vhdmp still opens the VHDX normally. Disk partitioned by an older version → set the flag again.
+# vhdmp still opens the VHDX normally. Flag missing → set again.
 [ "$(sfdisk --part-attrs /dev/$disk 2 2>/dev/null)" = GUID:63 ] \
   || { sfdisk -q --part-attrs /dev/$disk 2 GUID:63 >/dev/null 2>&1; udevadm settle 2>/dev/null; }
 # Hard power-off while Windows runs (happens often) → NTFS host "dirty" → ntfs3 refuses to mount.
@@ -331,15 +331,13 @@ if [ "$(cat $B/golden.sha256 2>/dev/null)" != "$HASH" ]; then
   done
   D=$B/dl-$HASH
   for x in $B/dl-*; do [ "$x" = "$D" ] || rm -rf "$x"; done
-  # (golden.chunks / .patching / .spare: leftovers of the delta update of older versions.)
-  rm -f $B/golden.sha256 $B/golden.vhdx $B/golden.chunks $B/golden.vhdx.patching $B/base.vhdx $B/base.ok $B/first.pending \
+  rm -f $B/golden.sha256 $B/golden.vhdx $B/base.vhdx $B/base.ok $B/first.pending \
     $B/child.vhdx $B/child-local.vhdx $B/base.open $B/drvs.vhdx $B/drvs.sig $B/drvs.pending
-  rm -rf $B/golden.vhdx.spare
   mkdir -p $D
   # Golden size from the server. NO $((...)) on external data (an ash arithmetic error exits the whole script) → awk.
   # Free space: the golden (minus the part a cut download already holds) + 1 GB for base/child to start with.
   size=$(wget -q -O - http://$SRV/tftp/broom-win/$NAME/golden.size 2>/dev/null)
-  case "$size" in ''|*[!0-9]*) die "server has no golden.size for $NAME (published by an older version) -> Publish again, then reboot";; esac
+  case "$size" in ''|*[!0-9]*) die "server has no golden.size for $NAME (publish failed?) -> Publish again, then reboot";; esac
   room(){
     have=$(fsize $D/golden.vhdx); avail=$(df -Pk $W | tail -1 | awk '{ print $4 }')
     awk -v a="$avail" -v h="${have:-0}" -v s="$size" 'BEGIN { exit !(a * 1024 + h >= s + 1073741824) }'
@@ -414,7 +412,7 @@ if wget -q -O /run/broom-files.sha256 http://$SRV/tftp/broom-win/$NAME/files.sha
   [ -z "$g" ] || [ "$g" = "$HASH" ] || restart "image $NAME changed on the server -> reboot to get the new version"
   check_list /run/broom-files.sha256 http://$SRV/tftp/broom-win/$NAME efi.tar.gz child-template.vhdx child-template.off base-template.vhdx
 else
-  log "no files.sha256 on the server for $NAME (published by an older version) -> Publish again to check the boot files"
+  log "no files.sha256 from the server for $NAME -> boot files not checked (Publish again if this repeats)"
 fi
 if wget -q -O /run/broom-scripts.sha256 http://$SRV/tftp/broom-scripts/scripts.sha256 2>/dev/null && [ -s /run/broom-scripts.sha256 ]; then
   check_list /run/broom-scripts.sha256 http://$SRV/tftp/broom-scripts broom-done.ps1 broom-bootorder.ps1 broom-games.ps1 broom-watch.ps1 broom-fw.cs broom-fw.dll broom-vnc.cs broom-vnc.exe
@@ -648,13 +646,12 @@ bench
 # The pagefile goes with them (what was paged out of the last session's RAM); broom-bootorder.ps1 makes a fresh one of
 # PF GB once Windows is up (pagefile.txt) and says how that went (pagefile.result).
 [ -f pagefile.result ] && log "pagefile of the last session: $(cat pagefile.result)"
-# (In base mode child.vhdx IS the base, open: kept.)
-if [ -f base.open ]; then rm -f child-local.vhdx games-*-child.vhdx pagefile.sys pagefile.result
-else rm -f child.vhdx child-local.vhdx games-*-child.vhdx pagefile.sys pagefile.result; fi
+[ -f base.open ] || rm -f child.vhdx   # (in base mode child.vhdx IS the base, open: kept)
+rm -f child-local.vhdx games-*-child.vhdx pagefile.sys pagefile.result
 if [ "$PF" -gt 0 ]; then echo "$PF" > pagefile.txt; else rm -f pagefile.txt; fi
 g=""; [ -f base.vhdx ] && g=$(vhdx_guid base.vhdx)
 if [ -f base.vhdx ] && [ -z "$g" ]; then
-  log "base.vhdx header unreadable -> rebuilding base"; rm -f base.vhdx base.host base.lic base.drv
+  log "base.vhdx header unreadable -> rebuilding base"; rm -f base.vhdx base.host base.lic
 fi
 # Drivers (drvinstall.txt, read by broom-bootorder.ps1): installed into the base being built or the open base ("keep");
 # a driver session installs them into a fresh layer over the base, then restarts ("once"); else they are in the layer.

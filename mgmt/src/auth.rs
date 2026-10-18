@@ -2,8 +2,7 @@
 // shared LAN, so every admin route needs a session. Client/boot routes stay open (a PXE client can't log in).
 // Accounts (config `users`, argon2 hashes) with one of two roles: owner (everything) or staff (the day-to-day: look,
 // Remote, Wake, save a games update — staff_may()). The first owner is made with a one-time setup token printed to the
-// server log (so only someone with access to the server can claim the install); a DB from before accounts becomes
-// owner `admin` with its old password. Sessions are STATELESS signed cookies `<expiry>.<user>.<blake3-keyed MAC>`
+// server log (so only someone with access to the server can claim the install). Sessions are STATELESS signed cookies `<expiry>.<user>.<blake3-keyed MAC>`
 // over (expiry, user, the user's password generation) with a per-install secret in config `session_secret`: no
 // server-side session map, so restarting the binary logs nobody out; a password change ends that user's sessions,
 // a deleted user's end too, a role change applies at the next request. Every change (not a GET) is logged with who
@@ -66,22 +65,9 @@ pub(crate) fn name_ok(n: &str) -> bool {
             .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-')
 }
 
-/// The accounts. A DB from before accounts: its admin password becomes owner `admin`.
+/// The accounts.
 pub(crate) fn users(st: &SharedState) -> Vec<User> {
-    let v: Vec<User> = serde_json::from_str(&st.db.get_config("users", "[]")).unwrap_or_default();
-    if !v.is_empty() {
-        return v;
-    }
-    let old = st.db.get_config("admin_pw", "");
-    if old.is_empty() {
-        return v;
-    }
-    vec![User {
-        name: "admin".into(),
-        role: Role::Owner,
-        pw: old,
-        pw_gen: 0,
-    }]
+    serde_json::from_str(&st.db.get_config("users", "[]")).unwrap_or_default()
 }
 
 /// The accounts changed as one step: two owners editing at once both land. An Err of `f` changes nothing; `f` must
@@ -91,11 +77,6 @@ pub(crate) fn edit_users<R>(
     f: impl FnOnce(&mut Vec<User>) -> Result<R, ApiError>,
 ) -> Result<R, ApiError> {
     crate::db::edit_json(&*st.db, "users", f).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?
-}
-
-pub(crate) fn save_users(st: &SharedState, v: &[User]) -> Result<(), String> {
-    st.db
-        .set_config("users", &serde_json::to_string(v).unwrap())
 }
 
 /// A user with a new password hash (its sessions end).
@@ -256,17 +237,7 @@ pub(crate) async fn hash_blocking(pw: String) -> Result<String, ApiError> {
 static SETUP_TOKEN: OnceLock<String> = OnceLock::new();
 
 pub fn init_setup_token(st: &SharedState) {
-    let have = users(st);
-    if !have.is_empty() {
-        // A DB from before accounts: its admin password saved as owner `admin` (users() already reads it so).
-        if st.db.get_config("users", "").is_empty() {
-            match save_users(st, &have) {
-                Ok(()) => {
-                    tracing::info!("accounts: the admin password is now owner account `admin`")
-                }
-                Err(e) => tracing::error!("accounts not saved: {e}"),
-            }
-        }
+    if !users(st).is_empty() {
         return;
     }
     let tok = random_token();

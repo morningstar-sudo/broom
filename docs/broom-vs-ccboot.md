@@ -2,7 +2,7 @@
 title: Broom vs CCBoot — open-source alternative for diskless internet cafés
 description: How Broom, a free open-source diskless boot server, compares with CCBoot and other commercial diskless software, and where Broom is still behind.
 date: 2026-10-11T23:07:00+07:00
-last_modified_at: 2026-10-17
+last_modified_at: 2026-10-19
 ---
 
 [← Broom](index.md)
@@ -22,6 +22,8 @@ change between versions; check their own documentation for current details.
 | Linux clients | yes (ext4 / LVM goldens) | — |
 | Where the client runs | from a VHDX cached on the PC's own SSD | depends on product and setup |
 | Reset | every boot | every boot |
+| Imaging | capture a PC's disk as an image, deploy an image onto a PC's disk | check the product |
+| Drivers | packages per hardware ID or group, installed once into a driver layer | check the product |
 | Secure Boot / TPM / HVCI | yes, no MOK enrollment — [works with FACEIT](faceit-diskless.md) | check the product |
 | Games | shared iSCSI disks (games, apps), versioned, updated from one PC | product-specific game update tools |
 | Remote view / control | built in: live wall of every PC's screen, control in the browser | check the product |
@@ -38,6 +40,8 @@ change between versions; check their own documentation for current details.
   admin are all inside one binary.
 - **Signed boot chain.** With Secure Boot clients on, the whole network boot is signed, so Secure Boot, TPM 2.0 and
   HVCI stay on — what modern anti-cheats require. No MOK to enroll on any PC.
+- **Diskless and imaging in one.** The same boot menu captures a real PC's disk as an image (only what NTFS uses is
+  sent) or writes an image onto a PC's disk so it boots that Windows natively, like Ghost over the network.
 - **Versions in a click.** Snapshots of the golden are hard links: instant and free until the golden changes. Games
   disks get a new version on every save, and PCs already playing keep the old one until they reboot.
 - **The room in one browser tab.** A live wall of every PC's screen, take one over with the mouse and keyboard

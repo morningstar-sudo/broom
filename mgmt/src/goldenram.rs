@@ -4,8 +4,7 @@
 // zstd blocks as the Linux RAM targets) — after a publish a whole room fetches the new golden at once, 30 streams at
 // 30 offsets would keep the disk seeking for an hour; from RAM it is never touched.
 // The golden being served keeps image.img open: a new upload / rollback renamed over it changes nothing until the
-// publish that installs the new golden. An image published by an older version (a real golden.vhdx file, no
-// golden.id) is served from that file until it is published again.
+// publish that installs the new golden.
 //
 // Download queue: TCP shares the link evenly, so a whole room downloading at once would all finish at the very end.
 // At most `limit` downloads run at once instead (each at a client's full speed), so machines finish one batch after
@@ -19,7 +18,7 @@ use std::sync::{Arc, LazyLock};
 use std::time::{Duration, Instant};
 
 use axum::body::Body;
-use axum::extract::{ConnectInfo, Path, Request, State};
+use axum::extract::{ConnectInfo, Path, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 
@@ -129,7 +128,7 @@ pub fn restore_all(st: &SharedState) {
             .map(str::trim)
             != Some(id.as_str())
         {
-            continue; // published by an older version (golden.vhdx file) or image.img changed since
+            continue; // image.img changed since
         }
         match crate::vhdx::Virtual::open(&raw, &id) {
             Ok(v) => install(&img.name, &id, v),
@@ -355,41 +354,23 @@ fn queue_full() -> Response {
         .into_response()
 }
 
-/// GET /tftp/broom-win/{name}/golden.vhdx — the served golden (RAM copy or made from image.img); an image published
-/// by an older version: its golden.vhdx file.
+/// GET /tftp/broom-win/{name}/golden.vhdx — the served golden (RAM copy or made from image.img).
 pub async fn get(
     Path(name): Path<String>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
-    req: Request,
+    headers: HeaderMap,
 ) -> Response {
     let Some(g) = crate::images::valid_name(&name)
         .then(|| served(&name))
         .flatten()
     else {
-        use futures_util::StreamExt;
-        use tower::ServiceExt;
-        let Some(p) = permit(peer.ip()) else {
-            return queue_full();
-        };
-        return match tower_http::services::ServeFile::new(dir(&name).join("golden.vhdx"))
-            .oneshot(req)
-            .await
-        {
-            Ok(r) => {
-                // The place goes with the body (no "done": a short file is rare enough to hold it a minute).
-                let (parts, body) = r.into_response().into_parts();
-                let body = body.into_data_stream().map(move |c| {
-                    if let Ok(b) = &c {
-                        count(p.ip, b.len());
-                    }
-                    c
-                });
-                Response::from_parts(parts, Body::from_stream(body))
-            }
-            Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
-        };
+        return (
+            StatusCode::NOT_FOUND,
+            "golden not served: Publish the image again\n",
+        )
+            .into_response();
     };
-    serve(g, req.headers(), peer.ip())
+    serve(g, &headers, peer.ip())
 }
 
 fn serve(img: Arc<Golden>, headers: &HeaderMap, ip: IpAddr) -> Response {

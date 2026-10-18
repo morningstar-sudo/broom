@@ -178,7 +178,6 @@ dependencies = [
  "sha2",
  "socket2",
  "tokio",
- "tower",
  "tower-http",
  "tracing",
  "tracing-subscriber",

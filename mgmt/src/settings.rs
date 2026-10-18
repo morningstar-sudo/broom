@@ -25,14 +25,13 @@ pub fn routes() -> Router<SharedState> {
         .route("/api/cafe-user", get(get_cafe_user).post(set_cafe_user))
 }
 
-/// Guest user (created in the Windows golden by the prep script → autologon). The DB keys keep the old names
-/// `ltsp_user`/`ltsp_password` so running DBs need no migration.
+/// Guest user (created in the Windows golden by the prep script → autologon).
 async fn get_cafe_user(State(st): State<SharedState>) -> Json<serde_json::Value> {
     // Never return the password (it is the shared local Administrator password baked into the golden — write-only,
     // like license keys). Only say whether one is set.
     Json(serde_json::json!({
-        "user": st.db.get_config("ltsp_user", "guest"),
-        "password_set": !st.db.get_config("ltsp_password", "").is_empty(),
+        "user": st.db.get_config("guest_user", "guest"),
+        "password_set": !st.db.get_config("guest_password", "").is_empty(),
     }))
 }
 
@@ -65,7 +64,7 @@ async fn set_cafe_user(
     if !cafe_user_ok(user) {
         return Err(bad("user: 1-20 letters/digits/-_. only"));
     }
-    st.db.set_config("ltsp_user", user).map_err(ise)?;
+    st.db.set_config("guest_user", user).map_err(ise)?;
     // Password write-only: an empty value keeps the stored one (the web never sends it back).
     if !b.password.is_empty() {
         if !cafe_pass_ok(&b.password) {
@@ -74,7 +73,7 @@ async fn set_cafe_user(
             ));
         }
         st.db
-            .set_config("ltsp_password", &b.password)
+            .set_config("guest_password", &b.password)
             .map_err(ise)?;
     }
     tracing::info!("guest user set to {user}");

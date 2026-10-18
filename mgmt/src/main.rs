@@ -95,47 +95,6 @@ pub fn work_dir() -> PathBuf {
     home().join("work")
 }
 
-/// Older versions kept bootrom.db / images / storage in the CURRENT directory and boot files in /srv/tftp →
-/// move them next to the binary once (rename: instant on the same filesystem; golden.vhdx keeps its hash →
-/// clients don't download again). Runs before the database is opened. Items with an env override are left alone.
-fn migrate_old_layout() {
-    let mut moves: Vec<(PathBuf, PathBuf)> = Vec::new();
-    if let Ok(cwd) = std::env::current_dir() {
-        let same = |a: &Path, b: &Path| a.canonicalize().ok() == b.canonicalize().ok();
-        if !same(&cwd, home()) {
-            // -wal/-shm: SQLite's last writes when the old server was killed — they belong with the db.
-            for (item, env) in [
-                ("bootrom.db", "BOOTROM_DB"),
-                ("bootrom.db-wal", "BOOTROM_DB"),
-                ("bootrom.db-shm", "BOOTROM_DB"),
-                ("images", "BOOTROM_IMAGES_DIR"),
-                ("storage", "BOOTROM_STORAGE_DIR"),
-            ] {
-                if std::env::var_os(env).is_none() {
-                    moves.push((cwd.join(item), home().join(item)));
-                }
-            }
-        }
-    }
-    for sub in ["broom", "broom-win", "broom-stage"] {
-        moves.push((Path::new("/srv/tftp").join(sub), tftp_dir().join(sub)));
-    }
-    for (old, new) in moves {
-        if !old.exists() || new.exists() {
-            continue;
-        }
-        let _ = std::fs::create_dir_all(new.parent().unwrap_or(home()));
-        match std::fs::rename(&old, &new) {
-            Ok(()) => info!("moved {} → {}", old.display(), new.display()),
-            Err(e) => warn!(
-                "could not move {} → {} ({e}): move it by hand",
-                old.display(),
-                new.display()
-            ),
-        }
-    }
-}
-
 /// Temp files a job leaves when the server stops midway (crash, power loss, restart). At start no job runs yet, so
 /// every one of them is a leftover: removed before anything else (they can be GBs).
 fn clean_leftovers() {
@@ -432,7 +391,6 @@ async fn main() {
             std::process::exit(1)
         });
 
-    migrate_old_layout();
     info!("data in {}", home().display());
     // One instance per data directory: a second one on another --port gets past the HTTP bind above, and would then
     // delete the running one's temp files and share :67/:69 with it (SO_REUSEPORT). The kernel drops the lock when the
@@ -506,10 +464,8 @@ async fn main() {
         volumes::mount_all(&state);
     }
 
-    // Built-in DHCP server + TFTP + iSCSI targets. Distro services from older versions
-    // (dnsmasq, tftpd, targetcli's restore service) → stopped first; stopping the latter clears LIO.
+    // Built-in DHCP server + TFTP + iSCSI targets.
     if preflight::is_root() {
-        setup::takeover(&["dnsmasq", "tftpd-hpa", "rtslib-fb-targetctl", "target"]);
         match dhcp::start(&state).await {
             Ok(s) => info!("{s}"),
             Err(e) => error!("DHCP/TFTP not started: {e} (fix it on the Network page → Apply)"),

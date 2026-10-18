@@ -244,7 +244,7 @@ async function dvOpen(id){
   const m=d.machine; m.license_key=d.license_key; // key is skip-serialized on machine; detail returns it separately
   const name=m.hostname||m.mac, who=esc(name), st=dvAll.find(x=>x.id===id)||{};
   const opt=dvImages.map(i=>`<option value="${i.id}" ${i.id===m.image_id?'selected':''}>${esc(i.name)}</option>`).join('');
-  const lease=d.lease?esc(d.lease.ip||'—')+' · '+esc(d.lease.source)+' · '+(d.lease.expires_in>0?'expires in '+Math.round(d.lease.expires_in/60)+' min':'expired'):'—';
+  const lease=d.lease?esc(d.lease.ip||'—')+' · '+(d.lease.expires_in>0?'expires in '+Math.round(d.lease.expires_in/60)+' min':'expired'):'—';
   box.hidden=false;
   const fld=(label,id,input)=>`<div><label class="form-label small mb-1" for="${id}">${label}</label>${input}</div>`;
   box.innerHTML=`<h2 class="h5 mb-3">${who} ${led(st.online)}</h2>
@@ -412,7 +412,7 @@ function watchJob(name,el,done){
   // catch up once: the job may have moved on (or finished) before this tab started watching
   j('/api/images/job?name='+encodeURIComponent(name)).then(r=>showJob(name,r.status)).catch(()=>{});
 }
-// ---- image versions (versions.rs: dedup 4 MB chunks; snapshot/rollback run as jobs) ----
+// ---- image versions (versions.rs: hard links to the golden; snapshot/rollback run as jobs) ----
 let verImg=null;
 async function showVersions(id,name,os){verImg={id,name,os};
   const el=document.getElementById('img_versions');
@@ -1060,7 +1060,6 @@ function loadIscsi(){
 function showIscsi(d){
   const el=document.getElementById('b_iscsi');if(!el)return;
   if(d.daemon==='none'){el.textContent='iSCSI daemon not running';return;}
-  if(d.daemon==='old'){el.textContent='the running iSCSI daemon is an older build without counters — it is replaced by itself once no client is connected';return;}
   if(!d.targets.length&&!d.peers.length){el.textContent='no client connected';return;}
   const mb=x=>x.toFixed(1)+' MB/s';
   el.innerHTML=`<div class="d-flex flex-wrap align-items-start gap-4">

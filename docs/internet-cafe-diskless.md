@@ -3,7 +3,7 @@ title: Free diskless boot for internet cafés with Broom — Windows 11 without 
 description: "Free, open-source diskless boot for internet cafés and gaming centers: a one-file Linux server, Windows 11 clients booting over the network, clean after every restart."
 date: 2026-10-18T10:00:00+07:00
 redirect_from: [/bootrom-quan-net.html]
-last_modified_at: 2026-10-18
+last_modified_at: 2026-10-19
 faq:
   - q: Is Broom free?
     a: Yes. It is licensed Apache-2.0, can be used in a commercial café, and has no per-PC fee.
@@ -15,6 +15,8 @@ faq:
     a: FACEIT Anti-Cheat runs with Secure Boot (no MOK needed), TPM 2.0 and HVCI — see the [FACEIT guide](faceit-diskless.html).
   - q: Can the owner see the PCs' screens?
     a: Yes. The Remote page shows every Windows client's screen at once; click one to control it (mouse, keyboard, Ctrl+Alt+Del, clipboard paste). The client shows no notice while it is watched — if your café's rules require it, tell your customers.
+  - q: Can it clone a PC's disk, like Ghost?
+    a: "Yes. Boot menu → [C] Capture / deploy: Capture sends a PC's disk to the server as an image (only what Windows uses), Deploy writes an image onto a PC's disk so it boots that Windows natively."
   - q: How does it compare with CCBoot?
     a: See [Broom vs CCBoot](broom-vs-ccboot.html).
 ---
@@ -30,29 +32,20 @@ installed or deleted is gone.
 
 ## What you get
 
-- **Clean after every boot** — everything a customer writes lands on the client's SSD and is wiped at the next boot.
-- **A one-file server** — runs on any Linux (tested on Debian/Ubuntu and Rocky Linux 10); no separate DHCP, TFTP or
-  iSCSI to install: all of it is built into Broom.
-- **Clients as fast as a local install** — the image is kept on each PC's SSD and Windows runs straight from it; the
-  network is only used when there is a new image, so the server stays light even when the whole room boots at once.
-- **Shared iSCSI disks** (games, apps) — games live on their own iSCSI disk, not in the image. Update a game **on one
-  PC**, press Save, and the whole room has it at its next boot; PCs in the middle of a game keep the old version until
-  they restart.
-- **Secure Boot without MOK** — the whole network boot chain is already signed, no key to enroll on any PC. Secure
-  Boot, TPM 2.0 and HVCI are all on, so **FACEIT Anti-Cheat runs** ([details](faceit-diskless.md)).
-- **Watch and control the clients in the browser** — one page shows every PC's screen live; click one to use its mouse
-  and keyboard as if you sat there, full-screen games included. No VNC to install, no port open on the clients.
-- **Health monitoring** — CPU, RAM, temperatures and disk health (SMART, bad sectors) of every client and of the
-  server, flagged red when a disk is failing or a PC runs hot; how long each client has been up and how many MB/s it
-  draws from the server; 10-minute charts of the server's load and the state of each service (DHCP, TFTP, iSCSI).
-- **Logs in the browser** — filter errors, search by PC name, follow a PC live while it boots; no SSH into the server.
-- **No agent, no internet** (optional, Network → DNS) — the server is the room's DNS and only resolves names for PCs
-  whose agent runs, PCs that just booted and exempt PCs (cashier, staff). A customer who kills the agent, a PC booted
-  without the network, a stranger's laptop plugged into the LAN: none of them gets online. Also block outbound DNS
-  (ports 53 and 853) on the router.
-- **Instant image snapshot / rollback**, **machine groups** (each with its own boot menu, images and iSCSI disks),
-  **Wake-on-LAN** and PC status in the browser.
-- **Free and open source** (Apache-2.0) — no per-PC fee, fine for a commercial café.
+- **Clean after every boot**: everything a customer writes lands on the client's SSD and is wiped at the next boot.
+- **A one-file server** on any Linux (tested on Debian/Ubuntu and Rocky Linux 10), with DHCP, TFTP and iSCSI built in.
+- **As fast as a local install**: Windows runs from the image kept on each PC's SSD; the network is only used for a
+  new image, so the server stays light even when the whole room boots at once.
+- **Games on shared iSCSI disks**: update a game on one PC, press Save, and the whole room has it at its next boot.
+- **Secure Boot without MOK**, TPM 2.0 and HVCI on, so **FACEIT Anti-Cheat runs** ([details](faceit-diskless.md)).
+- **Imaging**: capture a PC's disk as an image, or deploy an image onto a PC's disk, from the boot menu.
+- **Remote in the browser**: every PC's screen live on one page, click one to take over, full-screen games included.
+- **Health and logs**: CPU, RAM, temperatures and disk health of every PC and the server, flagged red when something
+  is wrong; the server's log searchable by PC name.
+- **No agent, no internet** (optional, Network → DNS): the server is the room's DNS and only answers PCs whose agent
+  runs, PCs that just booted and exempt ones (cashier, staff). Block outbound DNS (53, 853) on the router.
+- **Snapshots, machine groups, driver packages, Wake-on-LAN.**
+- **Free and open source** (Apache-2.0): no per-PC fee, fine for a commercial café.
 
 ![Broom's Remote page: controlling a Windows 11 client in the browser](images/remote-control.webp){: width="1883" height="867"}
 
@@ -61,7 +54,7 @@ installed or deleted is gone.
 - **Server:** an x86_64 machine running Linux, disk space for the images, Gigabit LAN to the clients.
 - **Clients:** UEFI PCs with network boot (PXE) first, and **an SSD in each** (the Windows image is cached and runs
   there).
-- **Image:** Windows 11 Pro installed in a virtual machine (e.g. VMware).
+- **Image:** Windows 11 Pro installed in a virtual machine (e.g. VMware), or on one of the room's PCs and captured.
 
 ## Steps
 
@@ -72,10 +65,10 @@ sudo mkdir -p /opt/bootrom && cd /opt/bootrom
 sudo curl -fLO https://github.com/morningstar-sudo/broom/releases/latest/download/bootrom-mgmt
 sudo chmod +x bootrom-mgmt
 sudo ./bootrom-mgmt install-service
-journalctl -u bootrom-mgmt -f      # shows the one-time setup code
+journalctl -u bootrom-mgmt -f      # shows the one-time setup token
 ```
 
-Open `http://<server-ip>/`, enter the setup code and set the admin password.
+Open `http://<server-ip>/`, enter the setup token and set the admin password.
 
 ### 2. Network boot
 

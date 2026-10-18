@@ -80,7 +80,7 @@ pub struct Driver {
     pub created: i64,
 }
 
-/// DHCP lease (dhcp.rs). source "full" = handed out by us ("proxy" only in DBs from old versions).
+/// DHCP lease handed out by dhcp.rs.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Lease {
     pub mac: String,
@@ -88,7 +88,6 @@ pub struct Lease {
     pub hostname: Option<String>,
     /// Unix seconds.
     pub expires: i64,
-    pub source: String,
 }
 
 /// One benchmark result (bench.rs). mac None = measured on the server.
@@ -135,7 +134,6 @@ pub trait Db: Send + Sync {
     /// Result of a publish: boot script + golden hash.
     fn set_published(&self, id: i64, boot_script: &str, hash: &str) -> DbResult<()>;
     fn set_cache_mode(&self, id: i64, mode: &str) -> DbResult<()>;
-    /// Windows: the first logon on each machine waits in BASE MODE for a technician (true) or commits base at once.
     fn set_use_ssd(&self, id: i64, on: bool) -> DbResult<()>;
     fn set_image_groups(&self, id: i64, groups: &[String]) -> DbResult<()>;
     fn set_preload(&self, id: i64, on: bool) -> DbResult<()>;
@@ -234,13 +232,13 @@ where
     out.ok_or_else(|| format!("{key}: not edited"))
 }
 
-/// Open the database named by `url`: a plain path or `sqlite://path` → SQLite.
-/// (Future drivers: `mysql://…`, `postgres://…`.) Creates/migrates the schema.
 /// A number setting: `default` when unset or not a number.
 pub fn num<T: std::str::FromStr>(db: &dyn Db, key: &str, default: T) -> T {
     db.get_config(key, "").parse().unwrap_or(default)
 }
 
+/// Open the database named by `url`: a plain path or `sqlite://path` → SQLite.
+/// (Future drivers: `mysql://…`, `postgres://…`.) Creates the schema.
 pub fn open(url: &str) -> DbResult<Box<dyn Db>> {
     match url.split_once("://") {
         None => Ok(Box::new(sqlite::Sqlite::open(url)?)),

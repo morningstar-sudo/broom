@@ -269,7 +269,6 @@ impl Store {
             .leases()
             .unwrap_or_default()
             .into_iter()
-            .filter(|l| l.source == "full")
             .filter_map(|l| Some((l.mac, (l.ip?.parse().ok()?, l.expires.max(0) as u64))))
             .collect();
         Store {
@@ -294,7 +293,6 @@ pub enum LeaseOp {
         ip: Option<Ipv4Addr>,
         hostname: Option<String>,
         expires: u64,
-        source: &'static str,
     },
     Remove(String),
 }
@@ -535,7 +533,6 @@ pub fn handle(req: &Packet, cfg: &Cfg, st: &Store) -> Outcome {
             .and_then(|(_, h)| h.clone())
             .or_else(|| host.clone()),
         expires: st.now + secs,
-        source: "full",
     };
     match mt {
         DISCOVER => match pick(&mac, cfg, st) {
@@ -634,7 +631,6 @@ pub fn handle(req: &Packet, cfg: &Cfg, st: &Store) -> Outcome {
                         ip: Some(ip),
                         hostname: None,
                         expires: st.now + cfg.lease_s as u64,
-                        source: "full",
                     };
                 }
                 // A static IP is not parked (the admin chose it) — but the conflict must be visible.
@@ -676,13 +672,11 @@ fn apply_lease(db: &dyn Db, op: LeaseOp) {
             ip,
             hostname,
             expires,
-            source,
         } => db.put_lease(&Lease {
             mac,
             ip: ip.map(|i| i.to_string()),
             hostname,
             expires: expires as i64,
-            source: source.into(),
         }),
         LeaseOp::Remove(mac) => db.delete_lease(&mac),
     };

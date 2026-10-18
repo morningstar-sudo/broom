@@ -40,8 +40,8 @@ fn stage_dir() -> String {
 /// The Windows scripts (scripts/<name>) the stage puts in BROOMWIN broom\ (the golden only holds fixed stubs that run
 /// them). ASCII only.
 /// - broom-done.ps1: first logon (when base.vhdx is created on each machine): writes base.ok to BROOMWIN, then restarts
-///   at once → the stage commits base. With base mode on for the image (broom\basemode.txt from the stage): a popup
-///   tells the technician to set up apps (FACEIT AC...) and restart; that restart → the stage commits base. BROOMWIN
+///   at once → the stage commits base. With base mode on for this machine (Machines page; broom\basemode.txt from the
+///   stage): no restart, a popup says changes are kept until base mode is turned off on the server. BROOMWIN
 ///   has no drive letter (GPT bit 63, set by the stage) → written through its volume path `\\?\Volume{..}\`.
 /// - broom-bootorder.ps1: the BroomBootOrder task (SYSTEM, at startup + every 5 minutes). Windows pulls "Windows Boot
 ///   Manager" to the top of BootOrder every boot → the next power-on would skip PXE (no reset): restores the order the
@@ -190,7 +190,6 @@ pub fn publish(
     // stage checks its free space and the downloaded length). golden.sha256 is written LAST: the stage treats its
     // absence as "publish running".
     let sum_file = format!("{out}/golden.sha256");
-    let _ = std::fs::remove_file(format!("{out}/golden.chunks")); // delta manifest of older versions
     let (drivers, hash) = match golden_fresh(&raw, &out) {
         Some((id, hash)) => {
             // After a server restart the golden is made again from image.img (same id → same bytes).
@@ -212,9 +211,6 @@ pub fn publish(
     // First line: the golden these files belong to — the stage applies them only to that golden (a client still on
     // the previous hash during a publish never gets the new templates next to its old golden).
     // (The Windows scripts are not per image: install_scripts.)
-    for f in SCRIPTS {
-        let _ = std::fs::remove_file(format!("{out}/{f}")); // per-image copies of older versions
-    }
     let mut sums = format!("{hash}  golden\n");
     for f in [
         "efi.tar.gz",
@@ -340,7 +336,7 @@ fn build_golden(
                     the prep command again and let it power off by itself, then upload"
             .into());
     }
-    let mut drivers = boot_storage_done(&mut vol)?;
+    let drivers = boot_storage_done(&mut vol)?;
     if !vol.exists("broom/efi/EFI/Microsoft/Boot/BCD") {
         return Err("golden is missing C:\\broom\\efi\\EFI\\Microsoft\\Boot\\BCD — run broom-prep-win in the VM before sysprep".into());
     }
@@ -353,8 +349,9 @@ fn build_golden(
     let _ = std::fs::remove_dir_all(&efi);
     r?;
     if !has_stub(&mut vol) {
-        drivers.push_str("; WARNING: golden prepped by an older version — broom-done/boot-order scripts inside it won't \
-                          update with the server (run the Windows prep again when convenient)");
+        return Err("golden prepped by an older version (its scripts would never update with the server) — boot the \
+                    VM, run the Windows prep command again (Images page), let it power off, then upload"
+            .into());
     }
     drop(vol);
 
@@ -456,10 +453,6 @@ fn build_golden(
     std::fs::write(format!("{out}/golden.size"), v.len().to_string())
         .map_err(|e| format!("golden.size: {e}"))?;
     crate::goldenram::install(name, &id, v);
-    // The file an older version wrote (50 GB) is not served any more.
-    for f in ["golden.vhdx", "golden.vhdx.tmp"] {
-        let _ = std::fs::remove_file(format!("{out}/{f}"));
-    }
     std::fs::write(format!("{out}/golden.id"), &id).map_err(|e| format!("golden.id: {e}"))?;
     Ok((drivers, hash))
 }
