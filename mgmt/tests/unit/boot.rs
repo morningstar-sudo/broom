@@ -182,3 +182,17 @@ fn menu_secure_boot_footer_as_gap_lines() {
     assert!(head < item && s.contains("item --gap Arrows/number to select, Enter to boot\n"));
     assert!(!menu_script(&[img("a", false)], 5, None, None, false, false).contains("item --gap"));
 }
+
+/// [C] Capture is on every menu (also with no image yet), last, never the default.
+#[test]
+fn menu_has_capture_last() {
+    for imgs in [vec![img("a", true)], vec![]] {
+        let s = menu_script(&imgs, 5, None, None, false, false);
+        let c = s.find("item --key c capture [C] Capture").unwrap();
+        assert!(s.find("item --key").unwrap() < c || imgs.is_empty());
+        assert!(s.contains(
+            ":capture\nchain /boot/capture?mac=${net0/mac}&ip=${net0/ip} || goto start\n"
+        ));
+        assert!(!s.contains("--default capture"));
+    }
+}

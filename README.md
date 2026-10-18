@@ -260,6 +260,15 @@ sent, in parallel 8 MB chunks with retry) — or a single `.vmdk` / `.img` / `.z
   ```
   The script carries the guest password and is readable by anyone on the boot LAN (like the golden itself). The VM
   syspreps and powers off by itself → upload (OS = Windows).
+- **Windows from a real PC (Capture)** — no VM: install Windows on one of the lab's own machines, run the same
+  prep script there (it syspreps and powers off), then PXE-boot that PC and pick **[C] Capture** at the bottom of
+  the boot menu. It boots the Windows stage, which runs this server's own binary: pick the disk, type the image name
+  and an **owner** account; the disk is read (never written) and sent through the normal upload — only the
+  partition tables, the clusters NTFS has in use and the small partitions (EFI, recovery) whole, so a 1 TB disk
+  with 40 GB of Windows sends about 40 GB. A new name creates the image; an existing Windows image gets this disk as
+  its new golden (its saved versions stay). Then it converts + publishes like an upload. It refuses a BitLocker
+  disk (`manage-bde -off C:` first) and warns about a hibernated (Fast Startup) or unclean volume. Keep C: small: a
+  client gets a C: as big as the captured partition. Needs the release (static) binary and the stage installed.
 - **Base build on each machine:** on its first boot (and after a new golden, a rename or a driver change) every
   Windows machine specializes the golden once and saves that as its *base*; every later boot resets to it. By default
   the base is saved automatically (the machine restarts by itself after the first logon). Tick **Base mode** on an
@@ -312,6 +321,12 @@ the stage frees *Keep free* GB at each boot (parked images, unused the longest f
 Machines page), below *Restart* it restarts the machine after 60 s. Without it Windows stops with a blue screen once
 the SSD is full (it can't grow its boot VHDX) — and C: shows the VHDX's virtual free space, so Windows never warns.
 Big writes come mostly from launchers updating games on the machines: let only the iSCSI disk's update machine do it.
+
+*Pagefile* (same card, 0 = none, the default): Windows refuses a paging file inside the VHDX it boots from, so without
+one a session that runs out of RAM closes programs. Set N GB and every boot gets a fixed-size pagefile on the SSD next
+to the VHDX files (made at startup by `broom-bootorder.ps1`, no drive letter), encrypted with a key of that boot and
+deleted with the child at each reset; the stage keeps those N GB free on top of *Keep free*. The stage log says how
+the last one went (`pagefile of the last session: …`).
 
 ## iSCSI disks (Windows)
 
@@ -521,7 +536,7 @@ title) and released.
 broom/
 ├── build.sh / build.cmd     # one-step build (Linux/WSL, or Windows→WSL)
 └── mgmt/                     # the app (Rust / axum, single binary, web UI embedded)
-    ├── src/                  # boot menu, images + publish, overlay (Linux), winstage + vhdx (Windows),
+    ├── src/                  # boot menu, images + publish + capture, overlay (Linux), winstage + vhdx (Windows),
     │   │                     # dhcp / tftp / iscsi, machines, monitor + WOL, vnc (Remote) + metrics,
     │   │                     # sysmon (server load + SMART), setup / preflight, auth
     │   ├── iscsid/           # the iSCSI target daemon (protocol, SCSI, compressed RAM copies)

@@ -97,6 +97,31 @@ impl Vol {
         }
     }
 
+    /// The first `n` bytes of a file (less when it is shorter); None when it doesn't exist (or is a directory).
+    pub fn head(&mut self, path: &str, n: u64) -> Result<Option<Vec<u8>>, String> {
+        let Vol { fs, ntfs } = self;
+        match find(ntfs, fs, path)? {
+            Some(f) if !f.is_directory() => {
+                let mut v = Vec::new();
+                copy_some(&f, fs, &mut v, n).map_err(|e| format!("{path}: {e}"))?;
+                Ok(Some(v))
+            }
+            _ => Ok(None),
+        }
+    }
+
+    /// Byte ranges (offset, length) from the partition start of the clusters in use ($Bitmap) — what a copy of the
+    /// volume must hold. The backup boot sector after the last cluster is not in it.
+    pub fn used_ranges(&mut self) -> Result<Vec<(u64, u64)>, String> {
+        let Vol { fs, ntfs } = self;
+        let f = ntfs
+            .file(fs, ntfs::KnownNtfsFileRecordNumber::Bitmap as u64)
+            .map_err(err)?;
+        let mut bm = Vec::new();
+        copy_data(&f, fs, &mut bm).map_err(|e| format!("$Bitmap: {e}"))?;
+        Ok(bitmap_ranges(&bm, ntfs.cluster_size() as u64, ntfs.size()))
+    }
+
     /// Up to `max` names in the root directory (for error messages).
     pub fn root_names(&mut self, max: usize) -> Vec<String> {
         let Vol { fs, ntfs } = self;
@@ -169,21 +194,62 @@ fn entries(
     Ok(v)
 }
 
+/// Runs of set bits of an NTFS cluster bitmap (bit c = cluster c, LSB first) → (offset, length) byte ranges. Bits
+/// past the volume's `size` bytes are padding and ignored.
+pub(crate) fn bitmap_ranges(bm: &[u8], cluster: u64, size: u64) -> Vec<(u64, u64)> {
+    let clusters = (size / cluster).min(bm.len() as u64 * 8);
+    let mut v = Vec::new();
+    let mut run = None;
+    let mut c = 0;
+    while c < clusters {
+        let byte = bm[(c / 8) as usize];
+        // Whole bytes that change nothing (all free outside a run, all used inside one) at once: 1 TB = 32 MB of bitmap.
+        if c % 8 == 0 && c + 8 <= clusters && byte == if run.is_some() { 0xff } else { 0 } {
+            c += 8;
+            continue;
+        }
+        let used = byte >> (c % 8) & 1 == 1;
+        match (used, run) {
+            (true, None) => run = Some(c),
+            (false, Some(s)) => {
+                v.push((s * cluster, (c - s) * cluster));
+                run = None;
+            }
+            _ => {}
+        }
+        c += 1;
+    }
+    if let Some(s) = run {
+        v.push((s * cluster, (clusters - s) * cluster));
+    }
+    v
+}
+
 /// The unnamed $DATA stream of `f` into `w`.
 fn copy_data(f: &NtfsFile, fs: &mut Fs, w: &mut impl Write) -> Result<(), String> {
+    copy_some(f, fs, w, u64::MAX)
+}
+
+/// The first `max` bytes of the unnamed $DATA stream of `f` into `w`.
+fn copy_some(f: &NtfsFile, fs: &mut Fs, w: &mut impl Write, mut max: u64) -> Result<(), String> {
     let Some(item) = f.data(fs, "") else {
         return Ok(());
     }; // no data stream = empty file
     let attr = item.map_err(err)?;
     let attr = attr.to_attribute().map_err(err)?;
     let mut value = attr.value(fs).map_err(err)?;
-    let mut buf = vec![0u8; 1 << 20];
-    loop {
-        match value.read(fs, &mut buf).map_err(err)? {
-            0 => return Ok(()),
-            n => w.write_all(&buf[..n]).map_err(|e| e.to_string())?,
+    let mut buf = vec![0u8; (1 << 20).min(max) as usize];
+    while max > 0 {
+        let want = (buf.len() as u64).min(max) as usize;
+        match value.read(fs, &mut buf[..want]).map_err(err)? {
+            0 => break,
+            n => {
+                w.write_all(&buf[..n]).map_err(|e| e.to_string())?;
+                max -= n as u64;
+            }
         }
     }
+    Ok(())
 }
 
 fn extract(ntfs: &Ntfs, fs: &mut Fs, dir: &NtfsFile, dest: &Path) -> Result<(), String> {

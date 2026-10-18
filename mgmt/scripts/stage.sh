@@ -35,12 +35,26 @@ getfile(){
   if [ -x /broom/bin/wget ]; then /broom/bin/wget -T 30 -t 3 -q --show-progress --progress=bar:force:noscroll "$@"
   else wget "$@"; fi
 }
-NAME=""; HASH=""; SRV=""; HOST=""; LIC=""; MAC=""; REG=""; BASE=""; STRICT=""; LX=""; WB=""
+NAME=""; HASH=""; SRV=""; HOST=""; LIC=""; MAC=""; REG=""; BASE=""; STRICT=""; LX=""; WB=""; CAPTURE=""
 for a in $(cat /proc/cmdline); do
-  case "$a" in broom.name=*) NAME=${a#*=};; broom.hash=*) HASH=${a#*=};; broom.srv=*) SRV=${a#*=};;
+  case "$a" in broom.name=*) NAME=${a#*=};; broom.hash=*) HASH=${a#*=};; broom.srv=*) SRV=${a#*=};; broom.capture=*) CAPTURE=${a#*=};;
     broom.host=*) HOST=${a#*=};; broom.lic=*) LIC=${a#*=};; BOOTIF=01-*) MAC=$(echo "${a#BOOTIF=01-}" | tr - :);;
     broom.reg=*) REG=${a#*=};; broom.base=*) BASE=${a#*=};; broom.strict=*) STRICT=${a#*=};; broom.lxgb=*) LX=${a#*=};; broom.wbgb=*) WB=${a#*=};; esac
 done
+# Capture (boot menu [C]): this PC's disk -> an image on the server. Nothing below runs (no disk is touched): only the
+# network, then the server's own binary, which reads the disk and asks on screen.
+if [ "$CAPTURE" = 1 ]; then
+  [ -n "$SRV" ] || die "missing broom.srv on cmdline"
+  udevadm settle 2>/dev/null
+  configure_networking
+  if getfile -O /run/bootrom-mgmt "http://$SRV/broom-capture" && chmod +x /run/bootrom-mgmt; then
+    /run/bootrom-mgmt capture "$SRV" < /dev/console > /dev/console 2>&1
+  else
+    echo "broom: could not download the capture tool from $SRV" > /dev/console
+  fi
+  printf 'broom: press Enter to restart ' > /dev/console; read -r ans < /dev/console
+  restart "capture finished"
+fi
 [ -n "$NAME" ] && [ -n "$HASH" ] && [ -n "$SRV" ] || die "missing broom.name/hash/srv on cmdline"
 for m in ntfs3 vfat nls_cp437 nls_iso8859_1 nls_utf8 efivarfs; do modprobe $m 2>/dev/null; done
 udevadm settle 2>/dev/null
@@ -254,10 +268,13 @@ oldest(){
 }
 # Room for this session (the child grows with what the guest writes; a base build needs a few GB): parked images go,
 # the oldest first, while BROOMWIN has less than ROOM GB free (Settings → SSD room; 20 when the server doesn't say).
-# (A new golden makes its own room in step 1.)
-ROOM=$(wget -q -O - "http://$SRV/api/client-config" 2>/dev/null | awk 'NR == 1 && $1 ~ /^[0-9]+$/ { print $1 }')
-[ -n "$ROOM" ] || ROOM=20
-while df -Pk $W | tail -1 | awk -v r="$ROOM" '{ exit !($4 < r * 1048576) }'; do
+# (A new golden makes its own room in step 1.) Plus PF GB for Windows' pagefile (same settings, 0 = none); the last
+# session's pagefile goes at the reset below, so its size counts as free here.
+CFG=$(wget -q -O - "http://$SRV/api/client-config" 2>/dev/null | head -n 1)
+ROOM=$(echo "$CFG" | awk '$1 ~ /^[0-9]+$/ { print $1 }'); [ -n "$ROOM" ] || ROOM=20
+PF=$(echo "$CFG" | awk '$4 ~ /^[0-9]+$/ { print $4 }'); [ -n "$PF" ] || PF=0
+OLDPF=$(ls -ln $B/pagefile.sys 2>/dev/null | awk '{ print int($5 / 1024) }'); [ -n "$OLDPF" ] || OLDPF=0
+while df -Pk $W | tail -1 | awk -v r="$((ROOM + PF))" -v o="$OLDPF" '{ exit !($4 + o < r * 1048576) }'; do
   oldest; [ -n "$old" ] || break
   rm -rf "$old"; log "image ${old##*/img.} removed from this disk (unused the longest) to keep room for the session"
 done
@@ -572,7 +589,11 @@ bench
 # its writes on the games disk (broom-games.ps1 makes that child again once Windows is up).
 # The child is rebuilt from the (checked) template every boot, with base's DataWriteGuid as its parent link — base is
 # only ever opened read-only, so that GUID is still the one it had when committed. (child-local.vhdx: older layout.)
-rm -f child.vhdx child-local.vhdx games-*-child.vhdx
+# The pagefile goes with them (what was paged out of the last session's RAM); broom-bootorder.ps1 makes a fresh one of
+# PF GB once Windows is up (pagefile.txt) and says how that went (pagefile.result).
+[ -f pagefile.result ] && log "pagefile of the last session: $(cat pagefile.result)"
+rm -f child.vhdx child-local.vhdx games-*-child.vhdx pagefile.sys pagefile.result
+if [ "$PF" -gt 0 ]; then echo "$PF" > pagefile.txt; else rm -f pagefile.txt; fi
 g=""; [ -f base.vhdx ] && g=$(vhdx_guid base.vhdx)
 if [ -f base.vhdx ] && [ -z "$g" ]; then
   log "base.vhdx header unreadable -> rebuilding base"; rm -f base.vhdx base.host base.lic base.drv

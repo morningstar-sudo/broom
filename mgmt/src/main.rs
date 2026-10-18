@@ -8,6 +8,7 @@ mod assets;
 mod auth;
 mod bench;
 mod boot;
+mod capture;
 mod db;
 mod devices;
 mod dhcp;
@@ -258,6 +259,31 @@ async fn login_js() -> impl axum::response::IntoResponse {
     )
 }
 
+/// GET /broom-capture — this very binary: the stage runs it as `bootrom-mgmt capture` (boot menu [C], capture.rs), so
+/// the tool is always this server's version. Only a static (musl) build runs inside the stage.
+async fn capture_bin() -> axum::response::Response {
+    use axum::response::IntoResponse;
+    if !cfg!(target_env = "musl") {
+        return (
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            "Capture needs the release (static) build of bootrom-mgmt",
+        )
+            .into_response();
+    }
+    match tokio::fs::read("/proc/self/exe").await {
+        Ok(b) => (
+            [(axum::http::header::CONTENT_TYPE, "application/octet-stream")],
+            b,
+        )
+            .into_response(),
+        Err(e) => (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            format!("read own binary: {e}"),
+        )
+            .into_response(),
+    }
+}
+
 /// Server events (SSE): "ping" on connect + after 5 s without any other event (keep-alive) — the sidebar dot
 /// counts every event as "server up" and marks it offline on a connection error or when events stop arriving
 /// ("res" alone comes every 2 s, so pings are rare); "job" {name,status} on every
@@ -405,6 +431,7 @@ async fn main() {
         Some("iscsid") => iscsid::run(&args).await, // the iSCSI target daemon (started by iscsi.rs)
         Some("pack-assets") => assets::pack(&args), // CI: broom-assets.zip for the release binary
         Some("pins") => assets::print_pins(),       // CI: the bundle pins this binary reads
+        Some("capture") => capture::run(&args), // on a client (boot menu [C]): its disk → an image
         _ => {}
     }
 
@@ -603,6 +630,8 @@ async fn main() {
         .route("/api/events", get(events)) // SSE: server liveness (sidebar dot) + image job status
         .route("/boot.ipxe", get(boot::render)) // iPXE menu
         .route("/boot/start", get(boot::start)) // menu choice → "client started" log + image boot script
+        .route("/boot/capture", get(boot::capture)) // menu [C]: the stage in capture mode
+        .route("/broom-capture", get(capture_bin)) // this binary, for that stage
         .merge(images::routes()) // images, versions, upload, publish
         .merge(drivers::routes()) // Windows driver packages
         .merge(games::routes()) // games disks (Windows)

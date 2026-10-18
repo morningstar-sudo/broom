@@ -18,8 +18,6 @@ try {
         & mountvol "${L}:" /d | Out-Null
       }
     }
-    $of = $v.Path + 'broom\bootorder.txt'
-    if (-not [IO.File]::Exists($of)) { return }
     # BroomFw (broom-fw.cs: UEFI variables): the release's broom-fw.dll, compiled by CI and checked by the stage on
     # BROOMWIN like these scripts, copied to Temp and loaded from there - no C# compiler run on a machine someone is
     # playing on. A local build ships only broom-fw.cs: compiled into the same Temp file. The Temp name carries the
@@ -41,6 +39,8 @@ try {
         Add-Type -Path $dll -ErrorAction Stop
       } catch { if (-not ('BroomFw' -as [type])) { Add-Type -TypeDefinition ([IO.File]::ReadAllText($src)) } }
     }
+    $of = $v.Path + 'broom\bootorder.txt'
+    if (-not [IO.File]::Exists($of)) { return }
     [BroomFw]::EnablePrivilege()
     $cur = [BroomFw]::Get('BootOrder')
     if ($null -eq $cur) { return }
@@ -68,6 +68,29 @@ try {
     }
   }
 } catch { }
+# Pagefile (Windows page -> SSD room; the stage leaves its size in GB in broom\pagefile.txt): C: is a VHDX booted
+# natively, where Windows refuses a paging file -> one of that fixed size next to it on BROOMWIN, made now
+# (NtCreatePagingFile: no drive letter, no registry entry, so no "temporary paging file" message), encrypted with a key
+# of this boot. The stage deletes it with the child at every reset. How it went -> broom\pagefile.result (the stage
+# logs it at the next boot).
+try {
+  $pf = $v.Path + 'broom\pagefile.txt'
+  $res = $v.Path + 'broom\pagefile.result'
+  if ([IO.File]::Exists($pf) -and ('BroomFw' -as [type])) {
+    $gb = [int64]([IO.File]::ReadAllText($pf).Trim())
+    $file = $v.Path + 'broom\pagefile.sys'
+    $have = 0; if ([IO.File]::Exists($file)) { $have = (New-Object IO.FileInfo $file).Length }
+    $free = [BroomFw]::Free($v.Path)
+    if ($gb -lt 1 -or $gb -gt 64) { $msg = "bad size $gb GB" }
+    elseif ($free -ge 0 -and $free + $have - $gb * 1GB -lt 3GB) { $msg = 'skipped: only {0:N1} GB free' -f ($free / 1GB) }
+    else {
+      & fsutil behavior set encryptpagingfile 1 | Out-Null
+      $st = [BroomFw]::Pagefile('\??\' + $v.Path.Substring(4) + 'broom\pagefile.sys', $gb * 1GB)
+      $msg = if ($st -eq 0) { "$gb GB in use" } else { 'failed, NTSTATUS 0x{0:X8}' -f $st }
+    }
+    [IO.File]::WriteAllText($res, $msg)
+  }
+} catch { try { [IO.File]::WriteAllText($res, "failed: $_") } catch { } }
 # Tell the server this Windows boot happened (once per boot; retried every 5 minutes until it answers). The server
 # flags the machine "not reset" when no PXE boot came just before = Windows started from the SSD without the stage.
 $bootId = (Get-CimInstance Win32_OperatingSystem).LastBootUpTime.ToString('o')

@@ -683,6 +683,7 @@ async function loadCafe(){
     if(t)t.value=c.boot_timeout;if(z)z.value=c.zram_reserve_mb;
     const al=document.getElementById('alert_pct');if(al)al.value=c.alert_pct;
     for(const k of ['room','warn','reboot']){const e=document.getElementById('ssd_'+k);if(e)e.value=c['ssd_'+k+'_gb'];}
+    const pf=document.getElementById('ssd_pagefile');if(pf)pf.value=c.pagefile_gb;
     showGoldenStreams(c);}).catch(()=>{});
   const c=await j('/api/cafe-user');
   const u=document.getElementById('cafe_user');if(u)u.value=c.user||'';
@@ -719,7 +720,7 @@ async function userPw(name,role){const p=await ask('New password for '+name,'At 
 async function userDel(name){if(await sure('Delete account '+name+'? Their open sessions end.'))userCall('/api/users/delete',{name},name+' deleted');}
 async function setTimeout_(){await j('/api/config/timeout',mk({seconds:+document.getElementById('timeout').value}));say(document.getElementById('to_msg'),' ✓ saved');}
 async function setSsd(){const m=document.getElementById('ssd_msg');
-  try{await j('/api/config/ssd',mk({room_gb:+v('ssd_room'),warn_gb:+v('ssd_warn'),reboot_gb:+v('ssd_reboot')}));say(m,' ✓ saved');}
+  try{await j('/api/config/ssd',mk({room_gb:+v('ssd_room'),warn_gb:+v('ssd_warn'),reboot_gb:+v('ssd_reboot'),pagefile_gb:+v('ssd_pagefile')}));say(m,' ✓ saved');}
   catch(e){say(m,' ✗ '+e.message);}}
 // Golden download queue: "auto" (number from the link speed) or the admin's number; 0 = no queue.
 let gsAuto=8;

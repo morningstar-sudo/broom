@@ -3,6 +3,7 @@
 //   item + countdown; on timeout → the default.
 // GET /boot/start?image=&mac=&ip=  (a menu choice chains here) → logs "client … started" and returns
 //   that image's boot script.
+// GET /boot/capture?mac=&ip=  (menu [C]) → the stage kernel in capture mode: this machine's disk → a golden.
 // iPXE (snponly.efi) is embedded in the binary — the built-in TFTP server (tftp.rs) serves it from memory.
 use axum::{
     extract::{Query, State},
@@ -108,7 +109,7 @@ fn secure_boot(st: &SharedState) -> bool {
 /// Under Secure Boot, iPXE boots the Canonical-signed Ubuntu kernel (Windows stage or Linux golden) through Ubuntu's
 /// Microsoft-signed shim (from the stage bundle, publish::refresh_shim → tftp/shim/). None when the switch is off or
 /// no shim is there yet (the server fetches the stage bundle at start, when the switch is turned on, and from here).
-fn shim_line(st: &SharedState, img: &crate::db::Image) -> Option<String> {
+fn shim_line(st: &SharedState, what: &str) -> Option<String> {
     if !secure_boot(st) {
         return None;
     }
@@ -131,8 +132,7 @@ fn shim_line(st: &SharedState, img: &crate::db::Image) -> Option<String> {
             tokio::task::spawn_blocking(crate::publish::prepare_stage);
         }
         warn!(
-            "image {}: no shim/shimx64.efi yet — fetching the stage bundle; Secure Boot clients can boot once it is in",
-            img.name
+            "{what}: no shim/shimx64.efi yet — fetching the stage bundle; Secure Boot clients can boot once it is in"
         );
         return None;
     }
@@ -241,7 +241,7 @@ pub async fn start(
                 // A Linux image hides the machine's other disks itself (broom.hide=); the Windows stage asks
                 // /api/disks/report.
                 (!mac.is_empty() && crate::disks::hide_for(&st, &mac)) as u8,
-                shim_line(&st, i).unwrap_or_default()
+                shim_line(&st, &format!("image {}", i.name)).unwrap_or_default()
             )
         }
         _ => {
@@ -254,6 +254,30 @@ pub async fn start(
             )
         }
     })
+}
+
+/// Menu [C]: this machine's disk to the server as an image's golden. The Windows stage kernel boots with
+/// broom.capture=1: it only brings the network up and runs `bootrom-mgmt capture` (capture.rs), fetched from
+/// /broom-capture, which reads the disk and asks for an owner account on screen.
+pub async fn capture(State(st): State<SharedState>, Query(q): Q) -> impl IntoResponse {
+    let (mac, ip) = client_ids(&q);
+    let back = "sleep 5\nchain /boot.ipxe?mac=${net0/mac}&ip=${net0/ip}\n";
+    let stage = crate::tftp_dir().join("broom-stage");
+    if !stage.join("vmlinuz").is_file() || !stage.join("stage.img").is_file() {
+        warn!("client {mac} - ip {ip}: Capture, but the Windows stage is not installed yet");
+        return script(format!(
+            "#!ipxe\necho The Windows stage is not on the server yet (see the server log)\n{back}"
+        ));
+    }
+    info!("client {mac} - ip {ip}: Capture (disk -> server) started");
+    let srv = st.db.get_config("dhcp_server_ip", "");
+    script(format!(
+        "#!ipxe\n{}kernel http://{srv}/tftp/broom-stage/vmlinuz initrd=stage.img ip=${{ip}}::${{gateway}}:${{netmask}}:::off BOOTIF=01-${{mac:hexhyp}} broom.capture=1 broom.srv={srv}\n\
+         initrd http://{srv}/tftp/broom-stage/stage.img\n\
+         boot\n\
+         echo Capture could not start\n{back}",
+        shim_line(&st, "Capture").unwrap_or_default()
+    ))
 }
 
 /// GB of the Linux writeback partition (broomwb) on the Broom SSD — the only place this number lives: the stage and
@@ -322,6 +346,10 @@ fn menu_script(
             "item --key s shell [S] iPXE shell (no image yet - upload one in the web admin)\n",
         );
     }
+    // Last, never the default: reads this machine's disk into an image (owner login on its screen; nothing is written).
+    items.push_str("item --key c capture [C] Capture this PC's disk to the server (admin)\n");
+    targets
+        .push_str(":capture\nchain /boot/capture?mac=${net0/mac}&ip=${net0/ip} || goto start\n\n");
     // Windows computer name (NetBIOS): letters/digits/'-', max 15 — also safe inside the iPXE script.
     // broom-host → stage cmdline (broom.host=) → Windows sets the name when base is created.
     let host: String = host

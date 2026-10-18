@@ -37,6 +37,9 @@ if ($cs.AutomaticManagedPagefile -or (Get-CimInstance Win32_PageFileSetting)) {
   Set-CimInstance $cs -Property @{AutomaticManagedPagefile = $false}
   Get-CimInstance Win32_PageFileSetting | Remove-CimInstance
 }
+# Clients get their pagefile at each boot on BROOMWIN (broom-bootorder.ps1, Windows page -> SSD room): encrypted
+# with a key of that boot, so nothing paged out stays readable on the SSD.
+& fsutil behavior set encryptpagingfile 1 | Out-Null
 if (Get-CimInstance Win32_PageFileUsage) {
   Write-Host '>>> Pagefile disabled. The machine will RESTART - then RUN this command AGAIN.' -ForegroundColor Yellow
   Start-Sleep 5; Restart-Computer -Force; return

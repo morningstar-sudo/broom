@@ -74,10 +74,18 @@ fn guid_bytes(s: &str) -> Option<[u8; 16]> {
     Some(g)
 }
 
-/// The partition table of a disk image; None = no table (a bare filesystem / empty disk).
+/// Bytes in a disk image file or a disk (/dev/sda: its metadata says 0, the end of the device is its size).
+pub fn size(f: &File) -> std::io::Result<u64> {
+    match f.metadata()?.len() {
+        0 => std::io::Seek::seek(&mut &*f, std::io::SeekFrom::End(0)),
+        n => Ok(n),
+    }
+}
+
+/// The partition table of a disk image or a disk; None = no table (a bare filesystem / empty disk).
 pub fn read(path: &str) -> Result<Option<Table>, String> {
     let f = File::open(path).map_err(|e| format!("{path}: {e}"))?;
-    let len = f.metadata().map_err(|e| e.to_string())?.len();
+    let len = size(&f).map_err(|e| format!("{path}: {e}"))?;
     if len < 1024 {
         return Ok(None);
     }

@@ -87,7 +87,7 @@ async fn set_cafe_user(
 
 /// System page values (same defaults as their readers: boot.rs, publish.rs).
 async fn get_config(State(st): State<SharedState>) -> Json<serde_json::Value> {
-    let (room, warn, reboot) = ssd_limits(&st);
+    let (room, warn, reboot, pagefile) = ssd_limits(&st);
     let (streams, _, link) = crate::goldenram::streams(&st);
     let (active, waiting) = crate::goldenram::queue_stats();
     Json(serde_json::json!({
@@ -97,6 +97,7 @@ async fn get_config(State(st): State<SharedState>) -> Json<serde_json::Value> {
         "ssd_room_gb": room,
         "ssd_warn_gb": warn,
         "ssd_reboot_gb": reboot,
+        "pagefile_gb": pagefile,
         "golden_streams": streams,
         "golden_streams_auto": crate::goldenram::limit_for("auto", link.as_ref().and_then(|l| l.1)),
         "golden_link": link.map(|(i, s)| match s {
@@ -110,8 +111,9 @@ async fn get_config(State(st): State<SharedState>) -> Json<serde_json::Value> {
 
 /// Windows SSD (BROOMWIN), GB: free room the stage keeps for each session (parked images go to make it), and the free
 /// room at which the session watchdog (broom-watch.ps1) warns the guest / restarts the machine — before Windows itself
-/// would crash with its boot disk out of room.
-fn ssd_limits(st: &SharedState) -> (u64, u64, u64) {
+/// would crash with its boot disk out of room. Last: the pagefile Windows gets on BROOMWIN (0 = none; its C: is a
+/// VHDX, where Windows refuses one), made by broom-bootorder.ps1 at every boot, kept free on top of the room.
+fn ssd_limits(st: &SharedState) -> (u64, u64, u64, u64) {
     let n = |k, d: u64| {
         st.db
             .get_config(k, &d.to_string())
@@ -122,13 +124,14 @@ fn ssd_limits(st: &SharedState) -> (u64, u64, u64) {
         n("ssd_room_gb", 20),
         n("ssd_warn_gb", 10),
         n("ssd_reboot_gb", 3),
+        n("pagefile_gb", 0),
     )
 }
 
-/// GET /api/client-config (public: the Windows stage + watchdog) → "<room GB> <warn GB> <reboot GB>".
+/// GET /api/client-config (public: the Windows stage + watchdog) → "<room GB> <warn GB> <reboot GB> <pagefile GB>".
 pub(crate) async fn client_config(State(st): State<SharedState>) -> String {
-    let (room, warn, reboot) = ssd_limits(&st);
-    format!("{room} {warn} {reboot}\n")
+    let (room, warn, reboot, pagefile) = ssd_limits(&st);
+    format!("{room} {warn} {reboot} {pagefile}\n")
 }
 
 #[derive(Deserialize)]
@@ -136,9 +139,12 @@ struct SsdLimits {
     room_gb: u64,
     warn_gb: u64,
     reboot_gb: u64,
+    /// Older pages send none: unchanged.
+    #[serde(default)]
+    pagefile_gb: Option<u64>,
 }
 
-/// POST /api/config/ssd {room_gb, warn_gb, reboot_gb} — read by the clients at each boot.
+/// POST /api/config/ssd {room_gb, warn_gb, reboot_gb, pagefile_gb} — read by the clients at each boot.
 async fn set_ssd(
     State(st): State<SharedState>,
     Json(b): Json<SsdLimits>,
@@ -146,11 +152,17 @@ async fn set_ssd(
     if !(5..=2000).contains(&b.room_gb)
         || !(1..=b.room_gb).contains(&b.warn_gb)
         || !(1..b.warn_gb).contains(&b.reboot_gb)
+        || b.pagefile_gb.is_some_and(|p| p > 64)
     {
         return Err((
             StatusCode::BAD_REQUEST,
-            "need 5 ≤ room ≤ 2000, 1 ≤ warn ≤ room, 1 ≤ restart < warn (GB)".into(),
+            "need 5 ≤ room ≤ 2000, 1 ≤ warn ≤ room, 1 ≤ restart < warn, pagefile ≤ 64 (GB)".into(),
         ));
+    }
+    if let Some(p) = b.pagefile_gb {
+        st.db
+            .set_config("pagefile_gb", &p.to_string())
+            .map_err(ise)?;
     }
     st.db
         .set_config("ssd_room_gb", &b.room_gb.to_string())
@@ -162,10 +174,11 @@ async fn set_ssd(
         .set_config("ssd_reboot_gb", &b.reboot_gb.to_string())
         .map_err(ise)?;
     tracing::info!(
-        "SSD: {} GB kept free per session, warn below {} GB, restart below {} GB",
+        "SSD: {} GB kept free per session, warn below {} GB, restart below {} GB, pagefile {} GB",
         b.room_gb,
         b.warn_gb,
-        b.reboot_gb
+        b.reboot_gb,
+        ssd_limits(&st).3
     );
     Ok(ok())
 }

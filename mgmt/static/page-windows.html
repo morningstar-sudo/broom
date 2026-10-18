@@ -17,6 +17,7 @@
       <div><label class="form-label small mb-1" for="ssd_room">Keep free per session</label><div class="input-group input-group-sm"><input class="form-control" id="ssd_room" type="number" min="5" style="width:80px"><span class="input-group-text">GB</span></div></div>
       <div><label class="form-label small mb-1" for="ssd_warn">Warn the guest below</label><div class="input-group input-group-sm"><input class="form-control" id="ssd_warn" type="number" min="1" style="width:80px"><span class="input-group-text">GB</span></div></div>
       <div><label class="form-label small mb-1" for="ssd_reboot">Restart below</label><div class="input-group input-group-sm"><input class="form-control" id="ssd_reboot" type="number" min="1" style="width:80px"><span class="input-group-text">GB</span></div></div>
+      <div><label class="form-label small mb-1" for="ssd_pagefile" title="Windows' paging file, so a session that runs out of RAM slows down instead of closing programs. On the SSD next to the VHDX files (Windows refuses one inside its VHDX C:), fixed size, encrypted, wiped with the session at each reset; kept free on top of the room above. 0 = none.">Pagefile</label><div class="input-group input-group-sm"><input class="form-control" id="ssd_pagefile" type="number" min="0" max="64" style="width:80px"><span class="input-group-text">GB</span></div></div>
       <button class="btn btn-sm btn-outline-primary" data-click="setSsd">Save</button> <span id="ssd_msg" class="msg align-self-center"></span>
     </div>
   </div>

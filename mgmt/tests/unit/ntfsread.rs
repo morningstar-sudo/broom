@@ -83,6 +83,16 @@ fn ntfs_live() {
         b"storahci stornvme\r\n"
     );
     assert_eq!(v.read("broom").unwrap(), None, "a directory has no content");
+    assert_eq!(
+        v.head("broom/boot-storage.ok", 4).unwrap().unwrap(),
+        b"stor"
+    );
+    let used = v.used_ranges().unwrap();
+    assert_eq!(used[0].0, 0, "boot sector cluster in use");
+    assert!(
+        used.iter().map(|r| r.1).sum::<u64>() < 32 << 20,
+        "mostly free"
+    );
     assert!(v.root_names(12).iter().any(|n| n == "Windows"));
     let out = d.join("efi");
     v.extract_dir("broom/efi", &out).unwrap();
@@ -91,4 +101,20 @@ fn ntfs_live() {
         vec![7u8; 300_000]
     );
     let _ = std::fs::remove_dir_all(&d);
+}
+
+#[test]
+fn bitmap_runs_to_byte_ranges() {
+    // Clusters 0-2, 7-16 (across a byte, then a whole 0xff byte), 20; bits from 24 on are past the volume.
+    let bm = [0b1000_0111, 0xff, 0b0001_0001, 0xff];
+    assert_eq!(
+        bitmap_ranges(&bm, 4096, 24 * 4096),
+        vec![(0, 3 * 4096), (7 * 4096, 10 * 4096), (20 * 4096, 4096)]
+    );
+    // A run to the volume's end; a whole free byte skipped.
+    assert_eq!(
+        bitmap_ranges(&[0, 0b1100_0000], 512, 16 * 512),
+        vec![(14 * 512, 2 * 512)]
+    );
+    assert!(bitmap_ranges(&[0xff; 4], 4096, 0).is_empty());
 }

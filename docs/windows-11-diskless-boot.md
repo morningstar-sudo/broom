@@ -72,6 +72,11 @@ DHCP and point its PXE options at Broom: next-server / option 66 = the Broom ser
 
 On the **Images** page, upload the VM folder (OS = Windows). Broom extracts the disk and publishes the image.
 
+**No VM? Capture a real PC.** Do step 3 on one of your own machines instead (it powers off after sysprep), then
+network-boot it and pick **[C] Capture** at the bottom of the boot menu. Choose the disk, type the image name and an
+owner account: Broom reads the disk (never writes it), sends only the space Windows uses and publishes the image.
+Decrypt BitLocker first (`manage-bde -off C:`), and keep C: small: every client gets a C: that size.
+
 ### 5. Register the machines and boot
 
 Add the PCs on the **Machines** page before their first Windows boot — on a registered PC with exactly one internal

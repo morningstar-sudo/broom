@@ -102,6 +102,11 @@ Chọn một trong hai cách:
 
 Ở trang **Images**, tải cả thư mục máy ảo lên (OS = Windows). Broom tự tách ổ đĩa và publish image.
 
+**Không dùng máy ảo? Chụp thẳng một máy trạm.** Làm bước 3 trên một máy trong phòng (sysprep xong máy tự tắt), rồi
+boot mạng máy đó và chọn **[C] Capture** ở cuối menu boot. Chọn ổ, gõ tên image và tài khoản owner: Broom chỉ đọc ổ
+(không ghi gì), chỉ gửi phần Windows đang dùng (ổ 1 TB dùng 40 GB → gửi khoảng 40 GB) rồi publish image. Tắt
+BitLocker trước (`manage-bde -off C:`), và để ổ C: nhỏ thôi: máy trạm nào cũng thấy ổ C: đúng bằng cỡ đó.
+
 ### 5. Thêm máy trạm và boot
 
 Thêm các máy ở trang **Machines** trước lần boot Windows đầu tiên — máy đã đăng ký và chỉ có một ổ trong thì Broom tự

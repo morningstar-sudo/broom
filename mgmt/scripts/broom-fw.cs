@@ -21,11 +21,25 @@ public static class BroomFw {
   [StructLayout(LayoutKind.Sequential, Pack = 4)]
   struct TokenPriv { public uint Count; public long Luid; public uint Attr; }
   const string EfiGlobal = "{8BE4DF61-93CA-11D2-AA0D-00E098032B8C}";
-  public static void EnablePrivilege() {
+  public static void EnablePrivilege() { EnablePrivilege("SeSystemEnvironmentPrivilege"); }
+  public static void EnablePrivilege(string name) {
     IntPtr t; OpenProcessToken(GetCurrentProcess(), 0x28, out t); // TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY
     TokenPriv tp = new TokenPriv(); tp.Count = 1; tp.Attr = 2;    // SE_PRIVILEGE_ENABLED
-    LookupPrivilegeValueW(null, "SeSystemEnvironmentPrivilege", out tp.Luid);
+    LookupPrivilegeValueW(null, name, out tp.Luid);
     AdjustTokenPrivileges(t, false, ref tp, 0, IntPtr.Zero, IntPtr.Zero);
+  }
+  [StructLayout(LayoutKind.Sequential)]
+  struct UnicodeString { public ushort Length; public ushort MaximumLength; [MarshalAs(UnmanagedType.LPWStr)] public string Buffer; }
+  [DllImport("ntdll.dll")]
+  static extern int NtCreatePagingFile(ref UnicodeString name, ref long min, ref long max, uint priority);
+  // A paging file of `bytes` (fixed size) at the NT path `path` (\??\Volume{...}\broom\pagefile.sys), in use at once -
+  // no restart, no registry entry. NTSTATUS, 0 = done.
+  public static int Pagefile(string path, long bytes) {
+    EnablePrivilege("SeCreatePagefilePrivilege");
+    UnicodeString u = new UnicodeString();
+    u.Buffer = path; u.Length = (ushort)(path.Length * 2); u.MaximumLength = (ushort)(u.Length + 2);
+    long min = bytes, max = bytes;
+    return NtCreatePagingFile(ref u, ref min, ref max, 0);
   }
   public static byte[] Get(string name) {
     byte[] b = new byte[4096];
