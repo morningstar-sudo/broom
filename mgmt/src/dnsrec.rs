@@ -1,6 +1,7 @@
-// dnsrec.rs — the recursive mode of the clients' DNS server (dns.rs, Network page → DNS → Resolve: recursive): names
-// are resolved from the root servers down (root → TLD → the domain's own servers) instead of being passed to another
-// resolver, so the room depends on no outside DNS service. Answers and delegations are cached for their TTL.
+// dnsrec.rs — how the clients' DNS server (dns.rs) gets its answers, with a cache: every answer is kept for its TTL,
+// so a name the room already asked comes from here. Forward (Network page → DNS → Resolve): asked of other resolvers
+// (router, 1.1.1.1…). Recursive: resolved from the root servers down (root → TLD → the domain's own servers), the
+// forwarders as the fallback, so the room depends on no outside DNS service; delegations are cached too.
 // Kept small: IPv4 to the servers, no DNSSEC validation, records re-encoded without name compression (a large answer
 // goes over TCP). A forged reply must guess a random ID and source port and name the question asked; records are only
 // taken from servers responsible for them (in-bailiwick glue, CNAME targets outside the zone looked up separately).
@@ -336,10 +337,11 @@ fn random_id() -> u16 {
     u16::from_be_bytes(b)
 }
 
-/// A non-recursive question for a server, with our EDNS buffer.
-pub(crate) fn query(id: u16, name: &str, qtype: u16) -> Vec<u8> {
+/// A question for a server, with our EDNS buffer: `rd` asks it to resolve recursively (a forwarder), else only what
+/// it holds (the servers of a zone).
+pub(crate) fn query(id: u16, name: &str, qtype: u16, rd: bool) -> Vec<u8> {
     let mut q = id.to_be_bytes().to_vec();
-    q.extend_from_slice(&[0, 0, 0, 1, 0, 0, 0, 0, 0, 1]);
+    q.extend_from_slice(&[rd as u8, 0, 0, 1, 0, 0, 0, 0, 0, 1]);
     write_name(&mut q, name);
     q.extend_from_slice(&qtype.to_be_bytes());
     q.extend_from_slice(&1u16.to_be_bytes());
@@ -351,9 +353,9 @@ pub(crate) fn query(id: u16, name: &str, qtype: u16) -> Vec<u8> {
 
 /// Ask one server (UDP from a fresh random port; over TCP when the answer is truncated). Only a reply to exactly this
 /// question (ID, name, type) counts.
-async fn ask(ip: Ipv4Addr, name: &str, qtype: u16) -> Option<Msg> {
+async fn ask(ip: Ipv4Addr, name: &str, qtype: u16, rd: bool) -> Option<Msg> {
     let id = random_id();
-    let q = query(id, name, qtype);
+    let q = query(id, name, qtype, rd);
     let matches = |m: &Msg| {
         m.id == id
             && m.flags & 0x8000 != 0
@@ -397,7 +399,7 @@ async fn ask(ip: Ipv4Addr, name: &str, qtype: u16) -> Option<Msg> {
 /// The first of `ips` (at most 4 tried) that answers with NOERROR or NXDOMAIN.
 async fn ask_any(ips: &[Ipv4Addr], name: &str, qtype: u16) -> Option<Msg> {
     for &ip in ips.iter().take(4) {
-        if let Some(m) = ask(ip, name, qtype).await
+        if let Some(m) = ask(ip, name, qtype, false).await
             && matches!(m.rcode(), 0 | NXDOMAIN)
         {
             return Some(m);
@@ -554,12 +556,64 @@ pub(crate) fn resolve(
     })
 }
 
-/// The reply to a client's query `q` (raw), resolved here.
-pub(crate) async fn answer_query(q: &[u8]) -> Option<Vec<u8>> {
+/// An answer from a server's reply: its records, the SOA of a negative one, cached for their TTL.
+fn to_answer(m: Msg) -> Answer {
+    let rcode = m.rcode();
+    if rcode == NXDOMAIN || m.an.is_empty() {
+        let soa: Vec<Rr> = m.ns.into_iter().filter(|r| r.rtype == T_SOA).collect();
+        return Answer {
+            rcode,
+            expires: Instant::now() + ttl_of(&soa, true),
+            an: Vec::new(),
+            ns: soa,
+        };
+    }
+    let an: Vec<Rr> = m.an.into_iter().filter(|r| r.rtype != T_OPT).collect();
+    Answer {
+        rcode,
+        expires: Instant::now() + ttl_of(&an, false),
+        an,
+        ns: Vec::new(),
+    }
+}
+
+/// Ask the forwarders (they resolve: RD set), each in turn; their answer is cached like one resolved here.
+async fn forward(ups: &[Ipv4Addr], name: &str, qtype: u16) -> Answer {
+    for &ip in ups.iter().take(4) {
+        if let Some(m) = ask(ip, name, qtype, true).await
+            && matches!(m.rcode(), 0 | NXDOMAIN)
+        {
+            let a = to_answer(m);
+            remember((name.to_string(), qtype), &a);
+            return a;
+        }
+    }
+    servfail()
+}
+
+/// The reply to a client's query `q` (raw). From the cache when it holds the answer; else forwarded to `ups`
+/// (`recursive` false), or resolved here from the root servers — the forwarders as the fallback when that fails.
+pub(crate) async fn answer_query(q: &[u8], ups: &[Ipv4Addr], recursive: bool) -> Option<Vec<u8>> {
     let m = parse(q)?;
     let (name, qtype, _) = m.q?;
     let (edns, _) = client_udp_size(q);
-    let a = resolve(name, qtype, 0).await;
+    let cached = ANSWERS
+        .lock()
+        .get(&(name.clone(), qtype))
+        .filter(|a| a.expires > Instant::now())
+        .cloned();
+    let a = match cached {
+        Some(a) => a,
+        None if !recursive => forward(ups, &name, qtype).await,
+        None => {
+            let a = resolve(name.clone(), qtype, 0).await;
+            if a.rcode == SERVFAIL && !ups.is_empty() {
+                forward(ups, &name, qtype).await
+            } else {
+                a
+            }
+        }
+    };
     response(q, a.rcode, &a, edns)
 }
 

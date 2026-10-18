@@ -63,7 +63,7 @@ fn zones() {
 /// A client query → our answer: its ID and question, RA, the records; too big for its UDP size → TC.
 #[test]
 fn answers_to_clients() {
-    let q = query(0x4242, "Www.Example.com", 1);
+    let q = query(0x4242, "Www.Example.com", 1, true);
     let (edns, size) = client_udp_size(&q);
     assert!(edns && size == EDNS as usize);
     let a = Answer {
@@ -155,4 +155,45 @@ async fn resolves_live() {
     assert!(t.elapsed() < Duration::from_millis(5), "cached");
     let six = resolve("google.com".into(), 28, 0).await;
     assert!(six.an.iter().any(|r| r.rtype == 28), "AAAA {six:?}");
+}
+
+/// A forwarder's reply → the cached answer: its records (OPT dropped) for their TTL; a negative one by its SOA.
+#[test]
+fn forwarder_answers() {
+    let mut m = parse(&sample()).unwrap();
+    m.ar.push(Rr {
+        name: String::new(),
+        rtype: T_OPT,
+        class: 1232,
+        ttl: 0,
+        rdata: Vec::new(),
+    });
+    let a = to_answer(m);
+    assert_eq!((a.rcode, a.an.len()), (0, 2));
+    assert!(
+        a.expires > Instant::now() + Duration::from_secs(50),
+        "min TTL 60 s of its records"
+    );
+    let mut neg = parse(&sample()).unwrap();
+    neg.flags |= NXDOMAIN as u16;
+    neg.an.clear();
+    let a = to_answer(neg);
+    assert_eq!((a.rcode, a.an.len()), (NXDOMAIN, 0));
+}
+
+/// Live (by hand: cargo test forwards_live -- --ignored): asked of a public resolver, then from the cache.
+#[tokio::test]
+#[ignore]
+async fn forwards_live() {
+    let ups = [Ipv4Addr::new(1, 1, 1, 1)];
+    let q = query(0x7777, "example.org", 1, true);
+    let r = parse(&answer_query(&q, &ups, false).await.unwrap()).unwrap();
+    assert_eq!((r.id, r.rcode()), (0x7777, 0));
+    assert!(r.an.iter().any(|x| x.rtype == T_A));
+    let t = Instant::now();
+    answer_query(&q, &[], false).await.unwrap();
+    assert!(
+        t.elapsed() < Duration::from_millis(5),
+        "cached: no forwarder needed"
+    );
 }

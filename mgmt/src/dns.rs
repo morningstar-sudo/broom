@@ -1,7 +1,7 @@
 // dns.rs — the clients' DNS server (Network page, off by default). With it on, the built-in DHCP hands out this server
-// as the only DNS, and a name is resolved — forwarded to the resolvers listed on the DNS card (else the DHCP card's
-// list, else the gateway), or recursively from the root servers with a cache (dnsrec.rs) — only for a machine that is
-// healthy: its Remote agent connected (it proved its key, agentauth.rs), or it PXE-booted
+// as the only DNS, and a name is resolved — asked of the resolvers listed on the DNS card (else the DHCP card's list,
+// else the gateway), or recursively from the root servers with those as the fallback; answers cached for their TTL
+// either way (dnsrec.rs) — only for a machine that is healthy: its Remote agent connected (it proved its key, agentauth.rs), or it PXE-booted
 // a few minutes ago (Windows and the launchers want the network before the agent is up), or it is exempt (a group or an
 // IP / range: the cashier, staff PCs, Linux machines…). Anything else gets REFUSED: a machine whose agent was killed,
 // one that started Windows from its SSD without the stage, a laptop plugged into the LAN.
@@ -41,7 +41,6 @@ static HANDLES: Mutex<Vec<tokio::task::JoinHandle<()>>> = Mutex::new(Vec::new())
 static LOGGED: LazyLock<Mutex<HashMap<Ipv4Addr, Instant>>> = LazyLock::new(Default::default);
 
 const REFRESH: Duration = Duration::from_secs(5);
-const UPSTREAM_WAIT: Duration = Duration::from_secs(2);
 /// Firefox turns its default DNS over HTTPS off when this name does not resolve.
 const FIREFOX_CANARY: &str = "use-application-dns.net";
 
@@ -49,8 +48,8 @@ pub fn on(st: &SharedState) -> bool {
     st.db.get_config("dns_mode", "off") == "on"
 }
 
-/// How names are resolved: "forward" (passed to the resolvers of `upstream`) or "recursive" (from the root servers,
-/// dnsrec.rs).
+/// How names are resolved, cached either way (dnsrec.rs): "forward" (asked of the resolvers of `upstream`) or
+/// "recursive" (from the root servers, `upstream` as the fallback).
 pub fn recursive(st: &SharedState) -> bool {
     st.db.get_config("dns_resolve", "forward") == "recursive"
 }
@@ -61,8 +60,8 @@ fn ip_list(s: &str) -> Vec<Ipv4Addr> {
         .collect()
 }
 
-/// The resolvers queries are passed to in forward mode: the DNS card's list, else the DHCP card's DNS list (what
-/// the clients had before), else the gateway.
+/// The resolvers asked in forward mode (the fallback in recursive mode): the DNS card's list, else the DHCP card's
+/// DNS list (what the clients had before), else the gateway.
 pub fn upstream(st: &SharedState) -> Vec<Ipv4Addr> {
     for k in ["dns_upstream", "dhcp_dns"] {
         let v = ip_list(&st.db.get_config(k, ""));
@@ -289,70 +288,30 @@ where
     forward(q.to_vec()).await
 }
 
-/// One query to the real resolvers over UDP, each tried in turn; the reply must carry the query's ID.
-async fn forward_udp(q: Vec<u8>, ups: Vec<Ipv4Addr>) -> Option<Vec<u8>> {
-    for up in ups {
-        let Ok(s) = tokio::net::UdpSocket::bind("0.0.0.0:0").await else {
-            continue;
-        };
-        if s.send_to(&q, (up, 53)).await.is_err() {
-            continue;
-        }
-        let mut buf = vec![0u8; 4096];
-        if let Ok(Ok(n)) = tokio::time::timeout(UPSTREAM_WAIT, s.recv(&mut buf)).await
-            && n >= 12
-            && buf[..2] == q[..2]
-        {
-            buf.truncate(n);
-            return Some(buf);
-        }
-    }
-    None
+/// How names are resolved: forwarded to `ups` (they resolve), or here from the root servers with `ups` as the
+/// fallback. Either way through the cache (dnsrec.rs).
+#[derive(Clone)]
+struct How {
+    recursive: bool,
+    ups: Vec<Ipv4Addr>,
 }
 
-/// Same over TCP (a client retries over TCP when an answer did not fit in UDP).
-async fn forward_tcp(q: Vec<u8>, ups: Vec<Ipv4Addr>) -> Option<Vec<u8>> {
-    for up in ups {
-        let r = tokio::time::timeout(UPSTREAM_WAIT, async {
-            let mut s = tokio::net::TcpStream::connect((up, 53)).await.ok()?;
-            s.write_all(&(q.len() as u16).to_be_bytes()).await.ok()?;
-            s.write_all(&q).await.ok()?;
-            let n = s.read_u16().await.ok()? as usize;
-            let mut buf = vec![0u8; n];
-            s.read_exact(&mut buf).await.ok()?;
-            Some(buf)
-        })
-        .await;
-        if let Ok(Some(b)) = r {
-            return Some(b);
-        }
-    }
-    None
+/// A query resolved for a UDP client, cut to what the client takes over UDP (it asks again over TCP).
+async fn resolve_udp(q: Vec<u8>, how: How) -> Option<Vec<u8>> {
+    let r = crate::dnsrec::answer_query(&q, &how.ups, how.recursive).await?;
+    let (_, size) = crate::dnsrec::client_udp_size(&q);
+    Some(if r.len() > size {
+        crate::dnsrec::truncated(&r, &q)
+    } else {
+        r
+    })
 }
 
-/// A query resolved for a UDP client: forwarded to `ups`, or (None) resolved here and cut to what the client takes
-/// over UDP (it asks again over TCP).
-async fn resolve_udp(q: Vec<u8>, ups: Option<Vec<Ipv4Addr>>) -> Option<Vec<u8>> {
-    let Some(ups) = ups else {
-        let r = crate::dnsrec::answer_query(&q).await?;
-        let (_, size) = crate::dnsrec::client_udp_size(&q);
-        return Some(if r.len() > size {
-            crate::dnsrec::truncated(&r, &q)
-        } else {
-            r
-        });
-    };
-    forward_udp(q, ups).await
+async fn resolve_tcp(q: Vec<u8>, how: How) -> Option<Vec<u8>> {
+    crate::dnsrec::answer_query(&q, &how.ups, how.recursive).await
 }
 
-async fn resolve_tcp(q: Vec<u8>, ups: Option<Vec<Ipv4Addr>>) -> Option<Vec<u8>> {
-    match ups {
-        Some(ups) => forward_tcp(q, ups).await,
-        None => crate::dnsrec::answer_query(&q).await,
-    }
-}
-
-async fn serve_udp(sock: tokio::net::UdpSocket, ups: Option<Vec<Ipv4Addr>>) {
+async fn serve_udp(sock: tokio::net::UdpSocket, how: How) {
     let sock = std::sync::Arc::new(sock);
     let mut buf = vec![0u8; 4096];
     loop {
@@ -362,16 +321,16 @@ async fn serve_udp(sock: tokio::net::UdpSocket, ups: Option<Vec<Ipv4Addr>>) {
         let SocketAddr::V4(from4) = from else {
             continue;
         };
-        let (q, sock, ups) = (buf[..n].to_vec(), sock.clone(), ups.clone());
+        let (q, sock, how) = (buf[..n].to_vec(), sock.clone(), how.clone());
         tokio::spawn(async move {
-            if let Some(r) = reply(&q, *from4.ip(), |q| resolve_udp(q, ups)).await {
+            if let Some(r) = reply(&q, *from4.ip(), |q| resolve_udp(q, how)).await {
                 let _ = sock.send_to(&r, from).await;
             }
         });
     }
 }
 
-async fn serve_tcp(l: tokio::net::TcpListener, ups: Option<Vec<Ipv4Addr>>) {
+async fn serve_tcp(l: tokio::net::TcpListener, how: How) {
     loop {
         let Ok((mut s, from)) = l.accept().await else {
             continue;
@@ -379,7 +338,7 @@ async fn serve_tcp(l: tokio::net::TcpListener, ups: Option<Vec<Ipv4Addr>>) {
         let SocketAddr::V4(from4) = from else {
             continue;
         };
-        let ups = ups.clone();
+        let how = how.clone();
         tokio::spawn(async move {
             // Messages one after the other on the connection; quiet for 10 s = closed.
             while let Ok(Ok(n)) = tokio::time::timeout(Duration::from_secs(10), s.read_u16()).await
@@ -388,8 +347,8 @@ async fn serve_tcp(l: tokio::net::TcpListener, ups: Option<Vec<Ipv4Addr>>) {
                 if s.read_exact(&mut q).await.is_err() {
                     return;
                 }
-                let ups = ups.clone();
-                let Some(r) = reply(&q, *from4.ip(), |q| resolve_tcp(q, ups)).await else {
+                let how = how.clone();
+                let Some(r) = reply(&q, *from4.ip(), |q| resolve_tcp(q, how)).await else {
                     return;
                 };
                 if s.write_all(&(r.len() as u16).to_be_bytes()).await.is_err()
@@ -431,22 +390,20 @@ pub async fn restart(st: &SharedState) -> Result<String, String> {
         .trim()
         .parse()
         .map_err(|_| "DNS: the server IP is not set (Network page)".to_string())?;
-    // Forward: the resolvers to pass queries to; recursive (None): resolved here from the root servers.
-    let ups = if recursive(st) {
-        None
-    } else {
-        let u = upstream(st);
-        if u.is_empty() {
-            return Err(
-                "DNS: no resolver to forward to — enter them on the DNS card (or a gateway), or resolve recursively"
-                    .into(),
-            );
-        }
-        if u.contains(&server) {
-            return Err("DNS: the forward list names this server itself — list the real resolvers (router, 1.1.1.1…)".into());
-        }
-        Some(u)
+    // Forward: the resolvers that answer (required); recursive: from the root servers, the forwarders (if any) as
+    // the fallback. Cached either way.
+    let how = How {
+        recursive: recursive(st),
+        ups: upstream(st),
     };
+    if !how.recursive && how.ups.is_empty() {
+        return Err(
+            "DNS: no resolver to forward to — enter them on the DNS card (or a gateway), or resolve recursively".into(),
+        );
+    }
+    if how.ups.contains(&server) {
+        return Err("DNS: the forward list names this server itself — list the real resolvers (router, 1.1.1.1…)".into());
+    }
     let addr = SocketAddrV4::new(server, 53);
     let udp =
         crate::dhcp::udp(addr, "", false).map_err(|e| format!("DNS: bind udp {addr}: {e}"))?;
@@ -464,19 +421,22 @@ pub async fn restart(st: &SharedState) -> Result<String, String> {
     });
     *HANDLES.lock() = vec![
         refresh,
-        tokio::spawn(serve_udp(udp, ups.clone())),
-        tokio::spawn(serve_tcp(tcp, ups.clone())),
+        tokio::spawn(serve_udp(udp, how.clone())),
+        tokio::spawn(serve_tcp(tcp, how.clone())),
     ];
     ACTIVE.store(true, Ordering::Relaxed);
-    let how = match &ups {
-        Some(u) => format!(
-            "forwarded to {}",
-            u.iter()
-                .map(|u| u.to_string())
-                .collect::<Vec<_>>()
-                .join(", ")
-        ),
-        None => "resolved here from the root servers (cached)".into(),
+    let list = how
+        .ups
+        .iter()
+        .map(|u| u.to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let how = if !how.recursive {
+        format!("forwarded to {list}, cached")
+    } else if list.is_empty() {
+        "resolved here from the root servers, cached".to_string()
+    } else {
+        format!("resolved here from the root servers (else {list}), cached")
     };
     Ok(format!(
         "DNS server on {server}:53, {how} — only for healthy machines"

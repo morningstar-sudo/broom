@@ -274,9 +274,10 @@ sent, in parallel 8 MB chunks with retry) — or a single `.vmdk` / `.img` / `.z
   the boot LAN segmented and check the flag.
 - **DNS only for healthy machines** (Network page → DNS, off by default): this server becomes the clients' only DNS
   (the built-in DHCP hands it out — the DHCP card's DNS list is hidden then; with the router's DHCP, set its DNS to
-  this server). It resolves either by **forwarding** (passthrough) to the servers on its card (router, 1.1.1.1…), or
-  **recursively** from the root servers down to each domain's own servers, with a cache (answers kept for their TTL;
-  no outside DNS service needed; no DNSSEC validation) — but only for a machine whose Remote agent is connected, that PXE-booted
+  this server). Every answer is cached for its TTL, so a name the room already asked is answered at once; a new one
+  is either **forwarded** to the servers on its card (router, 1.1.1.1…) or resolved **recursively** from the root
+  servers down to each domain's own servers (no outside DNS service needed; the forwarders as the fallback; no DNSSEC
+  validation) — but only for a machine whose Remote agent is connected, that PXE-booted
   in the last few minutes (5 by default: Windows wants the network before the agent is up), or that is exempt (groups,
   IPs / ranges: cashier, staff, Linux machines). Anything else gets REFUSED, so no internet: an agent killed, Windows
   started without the stage, a laptop plugged in. The Machines page marks them "no DNS". A soft lock — a guest can
