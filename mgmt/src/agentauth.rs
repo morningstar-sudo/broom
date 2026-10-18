@@ -153,15 +153,21 @@ async fn agent_key(
     if !pxe.is_some_and(|t| crate::now_secs().saturating_sub(t) <= WINDOW_S) {
         return refuse(format!("{who}: no PXE boot in the last 30 min"));
     }
-    let mut r = match load(&st, &mac) {
-        None => fresh(),
-        Some(r) if r.delivered.is_none() => r,
-        Some(_) => return Ok((StatusCode::NO_CONTENT, String::new())), // its stage has it
+    // Handed over once, as one step: two requests at the same moment can't both get it.
+    let key = crate::db::edit_json(&*st.db, &rec_key(&mac), |r: &mut Option<KeyRec>| {
+        if r.as_ref().is_some_and(|x| x.delivered.is_some()) {
+            return Ok::<_, ApiError>(None); // its stage has it
+        }
+        let rec = r.get_or_insert_with(fresh);
+        rec.delivered = Some(crate::now_secs());
+        Ok(Some(rec.key.clone()))
+    })
+    .map_err(ise)??;
+    let Some(key) = key else {
+        return Ok((StatusCode::NO_CONTENT, String::new()));
     };
-    r.delivered = Some(crate::now_secs());
-    store(&st, &mac, &r).map_err(ise)?;
     tracing::info!("remote: agent key handed to {who} ({mac}, {ip})");
-    Ok((StatusCode::OK, r.key))
+    Ok((StatusCode::OK, key))
 }
 
 #[derive(Deserialize)]

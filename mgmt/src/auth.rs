@@ -85,6 +85,15 @@ pub(crate) fn users(st: &SharedState) -> Vec<User> {
     }]
 }
 
+/// The accounts changed as one step: two owners editing at once both land. An Err of `f` changes nothing; `f` must
+/// not use the database.
+pub(crate) fn edit_users<R>(
+    st: &SharedState,
+    f: impl FnOnce(&mut Vec<User>) -> Result<R, ApiErr>,
+) -> Result<R, ApiErr> {
+    crate::db::edit_json(&*st.db, "users", f).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?
+}
+
 pub(crate) fn save_users(st: &SharedState, v: &[User]) -> Result<(), String> {
     st.db
         .set_config("users", &serde_json::to_string(v).unwrap())
@@ -586,8 +595,14 @@ async fn setup(
         ));
     }
     let u = new_user(&name, Role::Owner, hash_blocking(b.password).await?);
-    save_users(&st, std::slice::from_ref(&u))
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    // Still no account (two setups at once: only the first one).
+    edit_users(&st, |v| {
+        if !v.is_empty() {
+            return Err((StatusCode::CONFLICT, "already set up — log in".into()));
+        }
+        v.push(u.clone());
+        Ok(())
+    })?;
     tracing::warn!("owner account {name} created from {}", peer.ip());
     Ok((
         session_cookie(&new_session(&st, &u), SESSION_SECS),
@@ -633,18 +648,16 @@ async fn change_pw(
     axum::Extension(w): axum::Extension<Who>,
     Json(b): Json<NewPw>,
 ) -> Result<impl IntoResponse, ApiErr> {
-    let ise = |e: String| (StatusCode::INTERNAL_SERVER_ERROR, e);
     if b.new.len() < 8 {
         return Err((
             StatusCode::BAD_REQUEST,
             "new password must be at least 8 characters".into(),
         ));
     }
-    let mut all = users(&st);
-    let Some(i) = all.iter().position(|u| u.name == w.name) else {
+    let Some(was) = users(&st).into_iter().find(|u| u.name == w.name) else {
         return Err((StatusCode::FORBIDDEN, "account gone".into()));
     };
-    if !check_pw(peer.ip(), b.current, all[i].pw.clone()).await? {
+    if !check_pw(peer.ip(), b.current, was.pw.clone()).await? {
         tracing::warn!(
             "{}: password change with a wrong current password from {}",
             w.name,
@@ -654,15 +667,28 @@ async fn change_pw(
         return Err((StatusCode::FORBIDDEN, "wrong current password".into()));
     }
     let phc = hash_blocking(b.new).await?;
-    all[i] = with_password(all[i].clone(), phc);
-    save_users(&st, &all).map_err(ise)?;
+    // As one step, and only over the password just checked (another change in between: try again).
+    let u = edit_users(&st, |v| {
+        let u = v
+            .iter_mut()
+            .find(|u| u.name == w.name)
+            .ok_or((StatusCode::FORBIDDEN, "account gone".to_string()))?;
+        if u.pw != was.pw {
+            return Err((
+                StatusCode::CONFLICT,
+                "the password was changed meanwhile — try again".to_string(),
+            ));
+        }
+        *u = with_password(u.clone(), phc);
+        Ok(u.clone())
+    })?;
     tracing::warn!(
         "{}: password changed from {} — their other sessions logged out",
         w.name,
         peer.ip()
     );
     Ok((
-        session_cookie(&new_session(&st, &all[i]), SESSION_SECS),
+        session_cookie(&new_session(&st, &u), SESSION_SECS),
         Json(serde_json::json!({"ok": true})),
     ))
 }

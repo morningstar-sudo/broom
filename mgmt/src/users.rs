@@ -9,7 +9,7 @@ use serde::Deserialize;
 
 use crate::SharedState;
 use crate::api::{ApiError, bad, ise, ok};
-use crate::auth::{Role, User, Who, name_ok, new_user, save_users, users, with_password};
+use crate::auth::{Role, User, Who, name_ok, new_user, users, with_password};
 
 pub fn routes() -> Router<SharedState> {
     Router::new()
@@ -65,38 +65,45 @@ async fn set(
                 .map_err(ise)?,
         )
     };
-    let mut all = users(&st);
-    match all.iter().position(|u| u.name == name) {
-        Some(i) => {
-            let mut u = all[i].clone();
-            u.role = b.role;
-            if let Some(p) = phc {
-                u = with_password(u, p);
-            }
-            all[i] = u;
-            if no_owner(&all) {
-                return Err(bad("there must be an owner left"));
-            }
-            tracing::warn!(
-                "{}: account {name} set to {:?}{}",
-                w.name,
-                b.role,
-                if b.password.is_empty() {
-                    ""
-                } else {
-                    ", new password"
+    // As one step: the "an owner is left" rule holds even when two owners edit at once.
+    let added = crate::auth::edit_users(&st, |all| {
+        let added = match all.iter().position(|u| u.name == name) {
+            Some(i) => {
+                let mut u = all[i].clone();
+                u.role = b.role;
+                if let Some(p) = phc {
+                    u = with_password(u, p);
                 }
-            );
+                all[i] = u;
+                false
+            }
+            None => {
+                let Some(p) = phc else {
+                    return Err(bad("a new account needs a password"));
+                };
+                all.push(new_user(&name, b.role, p));
+                true
+            }
+        };
+        if no_owner(all) {
+            return Err(bad("there must be an owner left"));
         }
-        None => {
-            let Some(p) = phc else {
-                return Err(bad("a new account needs a password"));
-            };
-            all.push(new_user(&name, b.role, p));
-            tracing::warn!("{}: account {name} added ({:?})", w.name, b.role);
-        }
+        Ok(added)
+    })?;
+    if added {
+        tracing::warn!("{}: account {name} added ({:?})", w.name, b.role);
+    } else {
+        tracing::warn!(
+            "{}: account {name} set to {:?}{}",
+            w.name,
+            b.role,
+            if b.password.is_empty() {
+                ""
+            } else {
+                ", new password"
+            }
+        );
     }
-    save_users(&st, &all).map_err(ise)?;
     Ok(ok())
 }
 
@@ -114,14 +121,13 @@ async fn delete(
     if b.name == w.name {
         return Err(bad("you can't delete your own account"));
     }
-    let all: Vec<User> = users(&st)
-        .into_iter()
-        .filter(|u| u.name != b.name)
-        .collect();
-    if no_owner(&all) {
-        return Err(bad("there must be an owner left"));
-    }
-    save_users(&st, &all).map_err(ise)?;
+    crate::auth::edit_users(&st, |all| {
+        all.retain(|u| u.name != b.name);
+        if no_owner(all) {
+            return Err(bad("there must be an owner left"));
+        }
+        Ok(())
+    })?;
     tracing::warn!("{}: account {} deleted", w.name, b.name);
     Ok(ok())
 }

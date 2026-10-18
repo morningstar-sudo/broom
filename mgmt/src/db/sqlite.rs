@@ -354,6 +354,32 @@ impl Db for Sqlite {
             .unwrap_or_else(|_| default.to_string())
     }
 
+    fn update_config(
+        &self,
+        key: &str,
+        default: &str,
+        f: &mut dyn FnMut(&str) -> Result<Option<String>, String>,
+    ) -> DbResult<()> {
+        // One connection behind one lock (self.c()) + an immediate transaction: no other write in between, from
+        // this process or another one.
+        let mut c = self.c();
+        let t = c
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(e)?;
+        let cur: Option<String> = t
+            .query_row("SELECT value FROM config WHERE key=?1", [key], |r| r.get(0))
+            .optional()
+            .map_err(e)?;
+        if let Some(new) = f(cur.as_deref().unwrap_or(default))? {
+            t.execute(
+                "INSERT INTO config(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                [key, &new],
+            )
+            .map_err(e)?;
+        }
+        t.commit().map_err(e)
+    }
+
     fn delete_config(&self, key: &str) -> DbResult<()> {
         self.c()
             .execute("DELETE FROM config WHERE key=?1", [key])

@@ -51,25 +51,37 @@ pub(crate) fn disks(st: &SharedState) -> Vec<Disk> {
     serde_json::from_str(&st.db.get_config("games_disks", "[]")).unwrap_or_default()
 }
 
-pub(crate) fn put(st: &SharedState, d: &[Disk]) -> Result<(), ApiError> {
-    st.db
-        .set_config("games_disks", &serde_json::to_string(d).unwrap())
-        .map_err(ise)
+/// Change the list as one step: two edits at once both land (db::edit_json). An Err of `f` changes nothing. `f` must
+/// not use the database.
+pub(crate) fn edit<R>(
+    st: &SharedState,
+    f: impl FnOnce(&mut Vec<Disk>) -> Result<R, ApiError>,
+) -> Result<R, ApiError> {
+    crate::db::edit_json(&*st.db, "games_disks", f).map_err(ise)?
+}
+
+fn not_found(name: &str) -> ApiError {
+    (
+        StatusCode::NOT_FOUND,
+        format!("iSCSI disk {name} not found"),
+    )
 }
 
 /// Machine `id` was deleted: no longer the update machine of any disk (machines.rs forget). Blocking.
 pub(crate) fn forget_update(st: &SharedState, id: i64, who: &str) {
-    let mut list = disks(st);
-    let mut changed = false;
-    for d in list.iter_mut().filter(|d| d.update == Some(id)) {
-        d.update = None;
-        changed = true;
-        tracing::info!(
-            "iSCSI disk {}: update machine {who} deleted — update mode off",
-            d.name
-        );
+    let changed = edit(st, |list| {
+        let mut n = Vec::new();
+        for d in list.iter_mut().filter(|d| d.update == Some(id)) {
+            d.update = None;
+            n.push(d.name.clone());
+        }
+        Ok(n)
+    })
+    .unwrap_or_default();
+    for name in &changed {
+        tracing::info!("iSCSI disk {name}: update machine {who} deleted — update mode off");
     }
-    if changed && put(st, &list).is_ok() {
+    if !changed.is_empty() {
         let _ = sync(st);
     }
 }
@@ -250,22 +262,33 @@ async fn upsert(
     if b.size_gb == 0 || b.size_gb > 64 << 10 {
         return Err(bad("size: 1 GB to 64 TB"));
     }
+    // The disk as it will be (update machine / RAM kept from the current one), and whether it clashes with another.
+    let place = |list: &mut Vec<Disk>| -> Result<(), ApiError> {
+        let old = list.iter().position(|d| d.name == name);
+        let d = Disk {
+            name: name.clone(),
+            size_gb: b.size_gb,
+            letter: letter.clone(),
+            groups: groups.clone(),
+            update: old.and_then(|i| list[i].update),
+            ram: old.is_some_and(|i| list[i].ram),
+        };
+        if let Some(o) = list.iter().find(|o| clash(&d, o)) {
+            return Err(bad(format!(
+                "drive {}: is already used by iSCSI disk {} for some of the same machines",
+                d.letter, o.name
+            )));
+        }
+        match old {
+            Some(i) => list[i] = d,
+            None => list.push(d),
+        }
+        Ok(())
+    };
+    // Checked on the list as it is now before any file is made, then for real (atomic) once it is.
     let mut list = disks(&st);
     let old = list.iter().position(|d| d.name == name);
-    let d = Disk {
-        name: name.clone(),
-        size_gb: b.size_gb,
-        letter,
-        groups,
-        update: old.and_then(|i| list[i].update),
-        ram: old.is_some_and(|i| list[i].ram),
-    };
-    if let Some(o) = list.iter().find(|o| clash(&d, o)) {
-        return Err(bad(format!(
-            "drive {}: is already used by iSCSI disk {} for some of the same machines",
-            d.letter, o.name
-        )));
-    }
+    place(&mut list)?;
     let p = img(&name);
     let (want, have) = (
         b.size_gb << 30,
@@ -291,11 +314,7 @@ async fn upsert(
         f.set_len(want).map_err(ise)?;
         tracing::info!("iSCSI disk {name}: {} GB ({})", b.size_gb, p.display());
     }
-    match old {
-        Some(i) => list[i] = d,
-        None => list.push(d),
-    }
-    put(&st, &list)?;
+    edit(&st, place)?;
     sync_now(st).await?;
     Ok(ok())
 }
@@ -306,10 +325,10 @@ struct NameBody {
 }
 
 fn find(st: &SharedState, name: &str) -> Result<Disk, ApiError> {
-    disks(st).into_iter().find(|d| d.name == name).ok_or((
-        StatusCode::NOT_FOUND,
-        format!("iSCSI disk {name} not found"),
-    ))
+    disks(st)
+        .into_iter()
+        .find(|d| d.name == name)
+        .ok_or_else(|| not_found(name))
 }
 
 /// POST /api/games/delete {name} — the disk and every game on it. Machines using it keep it until they reboot.
@@ -317,12 +336,14 @@ async fn delete(
     State(st): State<SharedState>,
     Json(b): Json<NameBody>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    find(&st, &b.name)?;
-    let list: Vec<Disk> = disks(&st)
-        .into_iter()
-        .filter(|d| d.name != b.name)
-        .collect();
-    put(&st, &list)?;
+    edit(&st, |list| {
+        let n = list.len();
+        list.retain(|d| d.name != b.name);
+        if list.len() == n {
+            return Err(not_found(&b.name));
+        }
+        Ok(())
+    })?;
     sync_now(st).await?;
     let dir = img(&b.name).parent().unwrap().to_path_buf();
     // Off the async threads: freeing a sparse disk of many TB (+ its versions) can take seconds.
@@ -348,16 +369,18 @@ async fn set_update(
     State(st): State<SharedState>,
     Json(b): Json<UpdateBody>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    find(&st, &b.name)?;
     let who_ = match b.id {
         Some(id) => Some(who(&machine_by_id(&st, id)?)),
         None => None,
     };
-    let mut list = disks(&st);
-    for d in list.iter_mut().filter(|d| d.name == b.name) {
+    edit(&st, |list| {
+        let d = list
+            .iter_mut()
+            .find(|d| d.name == b.name)
+            .ok_or_else(|| not_found(&b.name))?;
         d.update = b.id;
-    }
-    put(&st, &list)?;
+        Ok(())
+    })?;
     match who_ {
         Some(w) => tracing::info!(
             "iSCSI disk {}: {w} is its update machine (from its next boot)",
@@ -381,12 +404,14 @@ async fn set_cache(
     State(st): State<SharedState>,
     Json(b): Json<CacheBody>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    find(&st, &b.name)?;
-    let mut list = disks(&st);
-    for d in list.iter_mut().filter(|d| d.name == b.name) {
+    edit(&st, |list| {
+        let d = list
+            .iter_mut()
+            .find(|d| d.name == b.name)
+            .ok_or_else(|| not_found(&b.name))?;
         d.ram = b.ram;
-    }
-    put(&st, &list)?;
+        Ok(())
+    })?;
     tracing::info!(
         "iSCSI disk {}: cache {}",
         b.name,

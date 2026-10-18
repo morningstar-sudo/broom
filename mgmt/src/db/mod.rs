@@ -110,6 +110,15 @@ pub trait Db: Send + Sync {
     fn set_config(&self, key: &str, value: &str) -> DbResult<()>;
     /// Gone (a deleted machine's settings).
     fn delete_config(&self, key: &str) -> DbResult<()>;
+    /// Read, change and write one value with nothing else written in between (two edits at once both land). `f` gets
+    /// the current value (`default` when unset) and returns the new one (None = leave it). `f` must not use the
+    /// database. See edit_json.
+    fn update_config(
+        &self,
+        key: &str,
+        default: &str,
+        f: &mut dyn FnMut(&str) -> Result<Option<String>, String>,
+    ) -> DbResult<()>;
 
     // --- images ---
     /// All images, by id.
@@ -188,6 +197,40 @@ pub trait Db: Send + Sync {
     fn bench_latest(&self) -> DbResult<Vec<BenchRow>>;
     /// Drop rows older than `cutoff` (unix s), then all but the newest `keep`. Returns how many were removed.
     fn prune_bench(&self, cutoff: i64, keep: usize) -> DbResult<usize>;
+}
+
+/// update_config for a JSON value (a list of games disks, the accounts…): `f` edits it in place, as one step. Unset or
+/// unreadable = `T::default()`. Outer Err = the database failed; inner = what `f` returned (an Err of `f` writes
+/// nothing).
+pub fn edit_json<T, R, E>(
+    db: &dyn Db,
+    key: &str,
+    f: impl FnOnce(&mut T) -> Result<R, E>,
+) -> DbResult<Result<R, E>>
+where
+    T: serde::de::DeserializeOwned + Serialize + Default,
+{
+    let mut f = Some(f);
+    let mut out: Option<Result<R, E>> = None;
+    db.update_config(key, "", &mut |cur| {
+        let Some(f) = f.take() else {
+            return Ok(None);
+        };
+        let mut v: T = serde_json::from_str(cur).unwrap_or_default();
+        match f(&mut v) {
+            Ok(r) => {
+                out = Some(Ok(r));
+                serde_json::to_string(&v)
+                    .map(Some)
+                    .map_err(|e| e.to_string())
+            }
+            Err(e) => {
+                out = Some(Err(e));
+                Ok(None)
+            }
+        }
+    })?;
+    out.ok_or_else(|| format!("{key}: not edited"))
 }
 
 /// Open the database named by `url`: a plain path or `sqlite://path` → SQLite.

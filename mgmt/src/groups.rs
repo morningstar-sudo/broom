@@ -28,10 +28,26 @@ fn saved(st: &SharedState) -> Vec<String> {
     serde_json::from_str(&st.db.get_config("groups", "[]")).unwrap_or_default()
 }
 
-fn save(st: &SharedState, v: &[String]) -> Result<(), ApiError> {
-    st.db
-        .set_config("groups", &serde_json::to_string(v).unwrap())
-        .map_err(ise)
+/// A list of group names kept in config `key` — the groups made here ("groups"), those hiding their machines' other
+/// disks ("hide_disks_groups"), those exempt from the DNS check ("dns_exempt_groups") — changed as one step.
+pub(crate) fn edit_names(
+    st: &SharedState,
+    key: &str,
+    f: impl FnOnce(&mut Vec<String>),
+) -> Result<(), ApiError> {
+    crate::db::edit_json(&*st.db, key, |v: &mut Vec<String>| {
+        f(v);
+        Ok::<(), ApiError>(())
+    })
+    .map_err(ise)?
+}
+
+/// Every name list a group appears in: `from` renamed to `to` (None = removed).
+fn rename_everywhere(st: &SharedState, from: &str, to: Option<&str>) -> Result<(), ApiError> {
+    for key in ["groups", "hide_disks_groups", "dns_exempt_groups"] {
+        edit_names(st, key, |v| *v = swap(v, from, to))?;
+    }
+    Ok(())
 }
 
 fn same(a: &str, b: &str) -> bool {
@@ -124,9 +140,11 @@ async fn create(
     if all(&st).iter().any(|g| same(g, &name)) {
         return Err(bad(format!("group {name} already exists")));
     }
-    let mut v = saved(&st);
-    v.push(name.clone());
-    save(&st, &v)?;
+    edit_names(&st, "groups", |v| {
+        if !v.iter().any(|g| same(g, &name)) {
+            v.push(name.clone());
+        }
+    })?;
     tracing::info!("group {name} created");
     Ok(ok())
 }
@@ -160,7 +178,7 @@ fn apply(
     allow_all: bool,
 ) -> Result<(), ApiError> {
     let images = st.db.images().map_err(ise)?;
-    let mut disks = crate::games::disks(st);
+    let disks = crate::games::disks(st);
     if !allow_all {
         let to_all: Vec<String> = images
             .iter()
@@ -185,32 +203,28 @@ fn apply(
             ));
         }
     }
-    let mut disks_changed = false;
-    for d in disks.iter_mut() {
-        let g = f(&format!("d{}", d.name), &d.groups);
-        if g != d.groups {
-            d.groups = g;
-            disks_changed = true;
+    // The iSCSI disks first, as one step: two a machine could both get can't share a drive letter — a clash writes
+    // nothing at all.
+    crate::games::edit(st, |list| {
+        for d in list.iter_mut() {
+            d.groups = f(&format!("d{}", d.name), &d.groups);
         }
-    }
-    // Two games disks a machine could both get can't share a drive letter (checked before anything is written).
-    for a in &disks {
-        if let Some(b) = disks.iter().find(|b| crate::games::clash(a, b)) {
-            return Err(bad(format!(
-                "iSCSI disks {} and {} would share drive {}: on the same machines",
-                a.name, b.name, a.letter
-            )));
+        for a in list.iter() {
+            if let Some(b) = list.iter().find(|b| crate::games::clash(a, b)) {
+                return Err(bad(format!(
+                    "iSCSI disks {} and {} would share drive {}: on the same machines",
+                    a.name, b.name, a.letter
+                )));
+            }
         }
-    }
+        Ok(())
+    })?;
     let before = crate::drivers::key_sets(st);
     for i in &images {
         let g = f(&format!("i{}", i.id), &i.groups);
         if g != i.groups {
             st.db.set_image_groups(i.id, &g).map_err(ise)?;
         }
-    }
-    if disks_changed {
-        crate::games::put(st, &disks)?;
     }
     for d in st.db.drivers().map_err(ise)? {
         let g = f(&format!("r{}", d.id), &d.groups);
@@ -257,11 +271,7 @@ async fn rename(
             },
             true,
         )?;
-        let hide = swap(&crate::disks::hidden_groups(&st2), &f2, Some(&t2));
-        crate::disks::set_hidden_groups(&st2, &hide).map_err(ise)?;
-        let dns = swap(&crate::dns::exempt_groups(&st2), &f2, Some(&t2));
-        crate::dns::set_exempt_groups(&st2, &dns).map_err(ise)?;
-        save(&st2, &swap(&saved(&st2), &f2, Some(&t2)))
+        rename_everywhere(&st2, &f2, Some(&t2))
     })
     .await
     .map_err(ise)??;
@@ -285,11 +295,7 @@ async fn delete(
             &|m| m.grp.clone().filter(|g| !same(g, &n2)),
             false,
         )?;
-        let hide = swap(&crate::disks::hidden_groups(&st2), &n2, None);
-        crate::disks::set_hidden_groups(&st2, &hide).map_err(ise)?;
-        let dns = swap(&crate::dns::exempt_groups(&st2), &n2, None);
-        crate::dns::set_exempt_groups(&st2, &dns).map_err(ise)?;
-        save(&st2, &swap(&saved(&st2), &n2, None))
+        rename_everywhere(&st2, &n2, None)
     })
     .await
     .map_err(ise)??;
@@ -356,18 +362,18 @@ async fn set(
         };
         apply(&st2, &f, &machine, b.allow_all)?;
         if let Some(on) = b.hide_disks {
-            let mut hide = swap(&crate::disks::hidden_groups(&st2), &n2, None);
-            if on {
-                hide.push(n2.clone());
+            edit_names(&st2, "hide_disks_groups", |v| {
+                *v = swap(v, &n2, None);
+                if on {
+                    v.push(n2.clone());
+                }
+            })?;
+        }
+        edit_names(&st2, "groups", |v| {
+            if !v.iter().any(|g| same(g, &n2)) {
+                v.push(n2.clone());
             }
-            crate::disks::set_hidden_groups(&st2, &hide).map_err(ise)?;
-        }
-        let mut v = saved(&st2);
-        if !v.iter().any(|g| same(g, &n2)) {
-            v.push(n2.clone());
-            save(&st2, &v)?;
-        }
-        Ok::<_, ApiError>(())
+        })
     })
     .await
     .map_err(ise)??;

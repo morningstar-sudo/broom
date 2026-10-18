@@ -57,9 +57,13 @@ fn load(st: &SharedState, mac: &str) -> Entry {
     serde_json::from_str(&st.db.get_config(&key(mac), "{}")).unwrap_or_default()
 }
 
-fn store(st: &SharedState, mac: &str, e: &Entry) -> Result<(), String> {
-    st.db
-        .set_config(&key(mac), &serde_json::to_string(e).unwrap())
+/// The machine's entry changed as one step: a boot's report and an admin's choice at the same moment both land.
+fn edit<R>(
+    st: &SharedState,
+    mac: &str,
+    f: impl FnOnce(&mut Entry) -> Result<R, ApiError>,
+) -> Result<R, ApiError> {
+    crate::db::edit_json(&*st.db, &key(mac), f).map_err(ise)?
 }
 
 fn mac_ok(mac: &str) -> bool {
@@ -150,14 +154,16 @@ async fn report(
     if !registered {
         return Ok("broom=\nhide=0\n".into());
     }
-    let mut e = load(&st, &mac);
-    e.disks = parse_report(&body);
-    e.seen = crate::now_secs();
-    store(&st, &mac, &e).map_err(ise)?;
+    let disks = parse_report(&body);
+    let (broom, hide) = edit(&st, &mac, |e| {
+        e.disks = disks;
+        e.seen = crate::now_secs();
+        Ok((e.broom.clone(), e.hide))
+    })?;
     Ok(format!(
         "broom={}\nhide={}\n",
-        e.broom.as_deref().unwrap_or(""),
-        e.hide.unwrap_or_else(|| group_hides(&st, &mac)) as u8
+        broom.as_deref().unwrap_or(""),
+        hide.unwrap_or_else(|| group_hides(&st, &mac)) as u8
     ))
 }
 
@@ -189,12 +195,16 @@ async fn set_broom(
         .into_iter()
         .find(|m| m.mac.eq_ignore_ascii_case(&b.mac))
         .ok_or_else(|| bad("register the machine first (Machines page)"))?;
-    let mut e = load(&st, &b.mac);
-    let d = e
-        .disks
-        .iter()
-        .find(|d| d.id == b.id)
-        .ok_or_else(|| bad("this machine has not reported that disk"))?;
+    let d = edit(&st, &b.mac, |e| {
+        let d = e
+            .disks
+            .iter()
+            .find(|d| d.id == b.id)
+            .cloned()
+            .ok_or_else(|| bad("this machine has not reported that disk"))?;
+        e.broom = Some(b.id.clone());
+        Ok(d)
+    })?;
     tracing::warn!(
         "disks: {} — Broom disk set to {} ({} {} GB): it is ERASED at the next boot",
         crate::machines::who(&m),
@@ -202,8 +212,6 @@ async fn set_broom(
         d.model,
         d.size >> 30
     );
-    e.broom = Some(b.id);
-    store(&st, &b.mac, &e).map_err(ise)?;
     Ok(ok())
 }
 
@@ -222,16 +230,11 @@ async fn set_hide(
     if !mac_ok(&b.mac.to_lowercase()) {
         return Err(bad("bad mac"));
     }
-    let mut e = load(&st, &b.mac);
-    e.hide = b.hide;
-    store(&st, &b.mac, &e).map_err(ise)?;
+    edit(&st, &b.mac, |e| {
+        e.hide = b.hide;
+        Ok(())
+    })?;
     Ok(ok())
-}
-
-/// Set the groups whose machines hide their other disks (Groups page: edit / rename / delete).
-pub fn set_hidden_groups(st: &SharedState, groups: &[String]) -> Result<(), String> {
-    st.db
-        .set_config("hide_disks_groups", &serde_json::to_string(groups).unwrap())
 }
 
 #[cfg(test)]

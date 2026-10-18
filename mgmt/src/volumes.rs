@@ -42,9 +42,12 @@ fn load(st: &SharedState) -> Vec<Volume> {
     serde_json::from_str(&st.db.get_config("volumes", "[]")).unwrap_or_default()
 }
 
-fn save(st: &SharedState, v: &[Volume]) -> Result<(), String> {
-    st.db
-        .set_config("volumes", &serde_json::to_string(v).unwrap())
+/// The list changed as one step (db::edit_json): outer Err = the database, inner = what `f` refused.
+fn edit<R, E>(
+    st: &SharedState,
+    f: impl FnOnce(&mut Vec<Volume>) -> Result<R, E>,
+) -> Result<Result<R, E>, String> {
+    crate::db::edit_json(&*st.db, "volumes", f)
 }
 
 // ---------- where things live ----------
@@ -507,9 +510,10 @@ fn format_blocking(st: &SharedState, disk: &str) -> Result<Volume, String> {
     for sub in ["images", "games", "storage/files"] {
         std::fs::create_dir_all(v.path.join(sub)).map_err(|e| e.to_string())?;
     }
-    let mut all = load(st);
-    all.push(v.clone());
-    save(st, &all)?;
+    edit(st, |all| {
+        all.push(v.clone());
+        Ok::<(), String>(())
+    })??;
     tracing::warn!(
         "disk {disk} ({} {} GB) ERASED and formatted {fstype}: broom disk {} on {}",
         d.model,
@@ -749,11 +753,11 @@ async fn add_folder(
     if p.starts_with(&home) || home.starts_with(&p) {
         return Err(bad("a folder outside broom's own folder"));
     }
-    let mut all = load(&st);
-    if all
-        .iter()
-        .any(|v| p.starts_with(&v.path) || v.path.starts_with(&p))
-    {
+    let inside = |all: &[Volume]| {
+        all.iter()
+            .any(|v| p.starts_with(&v.path) || v.path.starts_with(&p))
+    };
+    if inside(&load(&st)) {
         return Err(bad("that folder is (inside) a broom disk already"));
     }
     for sub in ["images", "games", "storage/files"] {
@@ -763,14 +767,23 @@ async fn add_folder(
         "dir-{}",
         &blake3::hash(p.as_os_str().as_encoded_bytes()).to_hex()[..6]
     );
-    tracing::info!("folder {} added as broom disk {id}", p.display());
-    all.push(Volume {
-        id,
-        path: p,
+    let shown = p.display().to_string();
+    let vol = Volume {
+        id: id.clone(),
+        path: p.clone(),
         uuid: None,
         fstype: None,
-    });
-    save(&st, &all).map_err(ise)?;
+    };
+    edit(&st, |all| {
+        if inside(all) {
+            return Err("that folder is (inside) a broom disk already".to_string());
+        }
+        all.push(vol);
+        Ok(())
+    })
+    .map_err(ise)?
+    .map_err(bad)?;
+    tracing::info!("folder {shown} added as broom disk {id}");
     Ok(ok())
 }
 
@@ -819,14 +832,12 @@ async fn remove(
         }
         let _ = std::fs::remove_dir(&v.path);
     }
-    save(
-        &st,
-        &load(&st)
-            .into_iter()
-            .filter(|x| x.id != v.id)
-            .collect::<Vec<_>>(),
-    )
-    .map_err(ise)?;
+    edit(&st, |all| {
+        all.retain(|x| x.id != v.id);
+        Ok::<(), String>(())
+    })
+    .map_err(ise)?
+    .map_err(bad)?;
     tracing::info!("broom disk {} removed ({})", v.id, v.path.display());
     Ok(ok())
 }

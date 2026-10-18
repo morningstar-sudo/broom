@@ -491,3 +491,41 @@ fn v3_rules_fixed_then_kept() {
     drop(db);
     tmp("broom_test_v3.db");
 }
+
+/// Many edits of one JSON value at the same time: every one lands (none overwrites another), and an edit that
+/// refuses changes nothing.
+#[test]
+fn json_edits_are_atomic() {
+    let p = tmp("broom_test_edit.db");
+    let db: std::sync::Arc<dyn Db> = std::sync::Arc::new(Sqlite::open(&p).unwrap());
+    let threads: Vec<_> = (0..8)
+        .map(|t| {
+            let db = db.clone();
+            std::thread::spawn(move || {
+                for i in 0..25 {
+                    super::super::edit_json(&*db, "list", |v: &mut Vec<String>| {
+                        v.push(format!("{t}-{i}"));
+                        Ok::<(), String>(())
+                    })
+                    .unwrap()
+                    .unwrap();
+                }
+            })
+        })
+        .collect();
+    for t in threads {
+        t.join().unwrap();
+    }
+    let v: Vec<String> = serde_json::from_str(&db.get_config("list", "[]")).unwrap();
+    assert_eq!(v.len(), 200, "no edit lost");
+    let r = super::super::edit_json(&*db, "list", |v: &mut Vec<String>| {
+        v.clear();
+        Err::<(), _>("refused")
+    })
+    .unwrap();
+    assert_eq!(r, Err("refused"));
+    let v: Vec<String> = serde_json::from_str(&db.get_config("list", "[]")).unwrap();
+    assert_eq!(v.len(), 200, "a refused edit writes nothing");
+    drop(db);
+    tmp("broom_test_edit.db");
+}
