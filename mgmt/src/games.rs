@@ -117,9 +117,9 @@ pub fn sync_except(st: &SharedState, skip: Option<&str>) -> Result<(), String> {
     let mut last = LAST_ERR.lock();
     match &r {
         Err(e) if last.as_deref() != Some(e.as_str()) => {
-            tracing::warn!("games disks not served: {e}")
+            tracing::warn!("iSCSI disks not served: {e}")
         }
-        Ok(()) if last.is_some() => tracing::info!("games disks served again"),
+        Ok(()) if last.is_some() => tracing::info!("iSCSI disks served again"),
         _ => {}
     }
     *last = r.as_ref().err().cloned();
@@ -245,7 +245,7 @@ async fn upsert(
     };
     if let Some(o) = list.iter().find(|o| clash(&d, o)) {
         return Err(bad(format!(
-            "drive {}: is already used by games disk {} for some of the same machines",
+            "drive {}: is already used by iSCSI disk {} for some of the same machines",
             d.letter, o.name
         )));
     }
@@ -256,7 +256,7 @@ async fn upsert(
     );
     if want < have {
         return Err(bad(format!(
-            "games disk {name} is {} GB: it can only grow",
+            "iSCSI disk {name} is {} GB: it can only grow",
             have >> 30
         )));
     }
@@ -272,7 +272,7 @@ async fn upsert(
             .open(&p)
             .map_err(ise)?;
         f.set_len(want).map_err(ise)?;
-        tracing::info!("games disk {name}: {} GB ({})", b.size_gb, p.display());
+        tracing::info!("iSCSI disk {name}: {} GB ({})", b.size_gb, p.display());
     }
     match old {
         Some(i) => list[i] = d,
@@ -291,7 +291,7 @@ struct NameBody {
 fn find(st: &SharedState, name: &str) -> Result<Disk, ApiError> {
     disks(st).into_iter().find(|d| d.name == name).ok_or((
         StatusCode::NOT_FOUND,
-        format!("games disk {name} not found"),
+        format!("iSCSI disk {name} not found"),
     ))
 }
 
@@ -315,7 +315,7 @@ async fn delete(
     .await
     .map_err(|e| ise(e.to_string()))?
     .map_err(ise)?;
-    tracing::info!("games disk {} deleted", b.name);
+    tracing::info!("iSCSI disk {} deleted", b.name);
     Ok(ok())
 }
 
@@ -343,10 +343,10 @@ async fn set_update(
     put(&st, &list)?;
     match who_ {
         Some(w) => tracing::info!(
-            "games disk {}: {w} is its update machine (from its next boot)",
+            "iSCSI disk {}: {w} is its update machine (from its next boot)",
             b.name
         ),
-        None => tracing::info!("games disk {}: update mode off", b.name),
+        None => tracing::info!("iSCSI disk {}: update mode off", b.name),
     }
     sync_now(st).await?;
     Ok(ok())
@@ -371,7 +371,7 @@ async fn set_cache(
     }
     put(&st, &list)?;
     tracing::info!(
-        "games disk {}: cache {}",
+        "iSCSI disk {}: cache {}",
         b.name,
         if b.ram { "RAM" } else { "disk" }
     );
@@ -418,7 +418,7 @@ fn with_update_off<T>(
     }
     let n = crate::iscsi::kick_peer(&ip).map_err(|_| e.clone())?;
     tracing::info!(
-        "games disk {name}: update machine {who} is off (no agent, no ping) — its {n} iSCSI session(s) closed"
+        "iSCSI disk {name}: update machine {who} is off (no agent, no ping) — its {n} iSCSI session(s) closed"
     );
     // The daemon lets go of the update once the closed sessions finish (their last writes flushed).
     for _ in 0..20 {
@@ -447,7 +447,7 @@ async fn save(
     .await
     .map_err(ise)?
     .map_err(|e| (StatusCode::CONFLICT, e))?;
-    tracing::info!("games disk {}: {msg}", b.name);
+    tracing::info!("iSCSI disk {}: {msg}", b.name);
     Ok(Json(serde_json::json!({"ok": true, "status": msg})))
 }
 
@@ -464,12 +464,12 @@ async fn discard(
     .await
     .map_err(ise)?
     .map_err(|e| (StatusCode::CONFLICT, e))?;
-    tracing::info!("games disk {}: update discarded", b.name);
+    tracing::info!("iSCSI disk {}: update discarded", b.name);
     Ok(ok())
 }
 
 /// GET /api/games/for (public, broom-games.ps1) → one line per games disk of the machine at the peer IP (its group):
-/// "<name> <iqn of the newest version> <letter> <1 = its update machine | 0>"; nothing = no games disk. The update flag
+/// "<name> <iqn of the newest version> <letter> <1 = its update machine | 0>"; nothing = no iSCSI disk. The update flag
 /// is decided by the peer IP, exactly as the daemon decides who may write.
 async fn for_client(
     State(st): State<SharedState>,

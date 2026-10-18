@@ -288,7 +288,7 @@ fn rates(st: &SharedState, (a, at): &Sample, (b, bt): &Sample) -> serde_json::Va
         .collect();
     targets.extend(b.games.iter().filter(|g| g.sessions > 0).map(|g| {
         let before = a.games.iter().find(|x| x.name == g.name).map_or(0, |x| x.read_bytes);
-        serde_json::json!({"name": format!("games disk {}", g.name), "sessions": g.sessions, "ram": false, "mbps": mbps(before, g.read_bytes)})
+        serde_json::json!({"name": format!("iSCSI disk {}", g.name), "sessions": g.sessions, "ram": false, "mbps": mbps(before, g.read_bytes)})
     }));
     let hosts: HashMap<String, String> = st
         .db

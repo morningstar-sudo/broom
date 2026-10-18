@@ -18,7 +18,7 @@ enroll, no MokManager screen on any client. With TPM 2.0 + HVCI, [FACEIT Anti-Ch
 [Source code & full manual](https://github.com/morningstar-sudo/broom) ·
 [Hướng dẫn tiếng Việt](bootrom-quan-net.md)
 
-![Windows 11 client network-booted by Broom, with a games disk mounted as G:](images/client-games-disk.webp){: width="1280" height="720"}
+![Windows 11 client network-booted by Broom, with an iSCSI disk mounted as G:](images/client-games-disk.webp){: width="1280" height="720"}
 
 ## Guides
 
@@ -35,7 +35,7 @@ enroll, no MokManager screen on any client. With TPM 2.0 + HVCI, [FACEIT Anti-Ch
 - **Secure Boot without MOK, TPM 2.0, HVCI** — [works with FACEIT Anti-Cheat](faceit-diskless.md).
 - **Clean every boot** — Windows 11 Pro or Linux clients; writes go to the local SSD and are reset at the next boot.
 - **One file to deploy** — no dnsmasq, tftpd, targetcli; build the golden in a VM and upload it from the browser.
-- **Games disks** — update a game once, every PC gets it at its next boot.
+- **Shared iSCSI disks** (games, apps) — update a game once, every PC gets it at its next boot.
 - **Remote control in the browser** — a live wall of every PC's screen; click one to take over mouse and keyboard,
   full-screen games included. No VNC client, no port open on the PCs.
 - **Health at a glance** — CPU, RAM, temperatures and each disk's SMART status and bad sectors, for every PC and the

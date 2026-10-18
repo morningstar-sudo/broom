@@ -242,7 +242,7 @@ pub fn mount_all(st: &SharedState) {
         match mount(&dev, &v.path, v.fstype.as_deref().unwrap_or("ext4")) {
             Ok(()) => tracing::info!("disk {} mounted on {}", v.id, v.path.display()),
             Err(e) => tracing::error!(
-                "disk {}: {e} — the images / games disks on it are not available (disk unplugged?)",
+                "disk {}: {e} — the images / iSCSI disks on it are not available (disk unplugged?)",
                 v.id
             ),
         }
@@ -797,7 +797,7 @@ async fn remove(
             crate::games::disks(&st)
                 .into_iter()
                 .filter(|d| volume_of(&st, "games", &d.name).as_deref() == Some(v.id.as_str()))
-                .map(|d| format!("games disk {}", d.name)),
+                .map(|d| format!("iSCSI disk {}", d.name)),
         )
         .collect();
     if !busy.is_empty() {
@@ -857,7 +857,7 @@ async fn move_item(
         name.clone()
     } else if kind == "games" {
         if !crate::games::disks(&st).iter().any(|d| d.name == name) {
-            return Err(bad(format!("no games disk {name}")));
+            return Err(bad(format!("no iSCSI disk {name}")));
         }
         format!("games:{name}")
     } else {

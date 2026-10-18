@@ -13,6 +13,7 @@ mod devices;
 mod dhcp;
 mod disk;
 mod disks;
+mod dns;
 mod drivers;
 mod export;
 mod games;
@@ -616,6 +617,7 @@ async fn main() {
         .merge(logbuf::routes()) // Logs page: the newest log lines
         .merge(sysmon::routes()) // Server page: services up or down
         .merge(disks::routes()) // client disks: inventory, Broom disk, hide the others
+        .merge(dns::routes()) // DNS server for healthy machines (Network page)
         .merge(volumes::routes()) // server disks: format, mount, images / games disks on them
         .merge(auth::routes()) // admin login
         .merge(users::routes()) // accounts (owners)

@@ -13,7 +13,7 @@ Linux server, DHCP / TFTP / iSCSI / web admin built in. For internet cafés, gam
   enroll, no MokManager screen on any client. With TPM 2.0 + HVCI, **FACEIT Anti-Cheat works**.
 - **Clean every boot** — Windows 11 Pro or Linux clients; writes go to the local SSD and are reset at the next boot.
 - **One file to deploy** — no dnsmasq, tftpd, targetcli; build the golden in a VM and upload it from the browser.
-- **Games disks** — update a game once, every PC gets it at its next boot.
+- **Shared iSCSI disks** (games, apps) — update a game once, every PC gets it at its next boot.
 - **Remote control in the browser** — a live wall of every PC's screen; click one to take over mouse and keyboard.
   Full-screen games show too. No VNC client to install, no port open on the PCs.
 - **Health at a glance** — CPU %, RAM %, temperatures and each disk's SMART status / bad sectors, for every PC and the
@@ -25,9 +25,9 @@ Linux server, DHCP / TFTP / iSCSI / web admin built in. For internet cafés, gam
 
 ## Screenshots
 
-**Windows 11 client booted from Broom** — C: is the shared golden, G: a games disk:
+**Windows 11 client booted from Broom** — C: is the shared golden, G: an iSCSI disk:
 
-![Windows 11 client network-booted by Broom, with a games disk mounted as G:](docs/images/client-games-disk.png)
+![Windows 11 client network-booted by Broom, with an iSCSI disk mounted as G:](docs/images/client-games-disk.png)
 
 **Remote** — every client's screen on one wall; click one to control it with the mouse and keyboard:
 
@@ -102,14 +102,14 @@ What a Windows client loads on every boot, before Windows itself starts from its
 ## Sizing
 
 Nothing in Broom caps the number of machines. What grows with the room is the network traffic — a new golden going
-out to every PC after a publish, and the games disks' reads while people play (Windows itself runs from each PC's
+out to every PC after a publish, and the iSCSI disks' reads while people play (Windows itself runs from each PC's
 SSD) — so the server link, its disk and its RAM decide how big a room one server carries:
 
-| Room | Server link | Image / games disk | RAM | Notes |
+| Room | Server link | Image / iSCSI disk | RAM | Notes |
 |---|---|---|---|---|
 | up to 30 PCs | 1 GbE | SSD | 16 GB | |
 | 30–60 PCs | 10 GbE | NVMe | 32 GB | the page cache keeps the games played most |
-| 60–100 PCs | 2× 10 GbE bonded (LACP) or 25 GbE | NVMe (PCIe 4) | 64 GB + | games disk in RAM (**Cache** on the Games page) if the RAM holds it |
+| 60–100 PCs | 2× 10 GbE bonded (LACP) or 25 GbE | NVMe (PCIe 4) | 64 GB + | iSCSI disk in RAM (**Cache** on the iSCSI Disks page) if the RAM holds it |
 
 - **Bonding:** `802.3ad` with `xmit_hash_policy=layer3+4` on the server, LACP on the switch (one switch, or a stacked
   / MLAG pair). One PC never gets more than one link's speed; a room of them spreads over both.
@@ -228,13 +228,13 @@ The menu is grouped (each group folds; the one holding the open page stays open)
 |---|---|---|
 | Monitor | **Machines** | every machine: on/off, uptime, traffic now, health badge, license, Wake / Manage / Remote |
 | | **Remote** | live wall of every Windows machine's screen; click one to control it |
-| | **Server** | the server's CPU / RAM / network / disk load + 10-minute charts, services up/down, its disks (SMART, format a new one for images / games disks), live iSCSI; alert threshold, RAM reserve |
+| | **Server** | the server's CPU / RAM / network / disk load + 10-minute charts, services up/down, its disks (SMART, format a new one for images / iSCSI disks), live iSCSI; alert threshold, RAM reserve |
 | Manage | **Devices** | register / edit / import machines, a machine's detail (lease, license, drivers, health, its disks: Broom disk, hide the others) |
-| | **Groups** | which images, games disks and drivers each group of machines gets; hide their other disks |
+| | **Groups** | which images, iSCSI disks and drivers each group of machines gets; hide their other disks |
 | Content | **Images** | goldens: upload, publish, cache (disk / RAM), versions, export, boot menu |
-| | **Games** | shared games disks and their update machine |
+| | **iSCSI Disks** | shared disks (games, apps…) and their update machine |
 | | **Drivers** | driver packages installed into each Windows machine's base |
-| Config | **Network** | DHCP server, Secure Boot clients, strict reset |
+| Config | **Network** | DHCP server, Secure Boot clients, strict reset, DNS only for healthy machines |
 | | **Windows** | guest user, SSD room, golden downloads at once |
 | | **Settings** | your password; users (owner / staff); boot menu countdown |
 | Tools | **Benchmark** | server disk speed; per machine boot time and disk / network read speed |
@@ -272,12 +272,21 @@ sent, in parallel 8 MB chunks with retry) — or a single `.vmdk` / `.img` / `.z
   without the reset; the Machines page flags such boots ("not reset"). The guest account is a local administrator
   (games need it), so a determined guest can still interfere with the boot setup of the machine they sit at — keep
   the boot LAN segmented and check the flag.
+- **DNS only for healthy machines** (Network page → DNS, off by default): this server becomes the clients' only DNS
+  (the built-in DHCP hands it out; with the router's DHCP, set its DNS to this server) and passes names on to the DNS
+  servers listed above (else the gateway) — but only for a machine whose Remote agent is connected, that PXE-booted
+  in the last few minutes (5 by default: Windows wants the network before the agent is up), or that is exempt (groups,
+  IPs / ranges: cashier, staff, Linux machines). Anything else gets REFUSED, so no internet: an agent killed, Windows
+  started without the stage, a laptop plugged in. The Machines page marks them "no DNS". A soft lock — a guest can
+  type another DNS server or turn on DNS over HTTPS (Firefox's default one is turned off for everyone): block DNS to
+  the outside (ports 53 and 853) on the router for every IP but this server. With it on, this server down = no names
+  for the clients.
 
-## Machine groups: images, SSD cache, games disks
+## Machine groups: images, SSD cache, iSCSI disks
 
 A machine's **group** decides what it gets; everything set for no group goes to every machine (registered or not).
-The **Groups** page shows each group with its machines, images, games disks and driver packages, and edits them in one
-place (create / rename / delete a group; tick what belongs to it). Removing the last group of an image or games disk
+The **Groups** page shows each group with its machines, images, iSCSI disks and driver packages, and edits them in one
+place (create / rename / delete a group; tick what belongs to it). Removing the last group of an image or iSCSI disk
 asks first: it would then go to every machine.
 
 - **Images → Groups**: the boot menu lists only the images of the machine's group (choosing another one by hand is
@@ -289,24 +298,24 @@ asks first: it would then go to every machine.
 - **Preload** (Windows images): the machines of its groups fetch it onto their SSD ahead of use, while booting another
   image (that boot takes longer once per publish), so choosing it later needs no download — only its base is built on
   its first boot. Only into free space beyond the session's room: a preload never evicts anything.
-- **Games disks** (below): each disk for some groups, or all.
+- **iSCSI disks** (below): each disk for some groups, or all.
 
 ### SSD room (Windows)
 
-Everything a guest writes (C:, games drives) lands on the machine's SSD until the next boot. **Windows → SSD room**:
+Everything a guest writes (C:, iSCSI disk drives) lands on the machine's SSD until the next boot. **Windows → SSD room**:
 the stage frees *Keep free* GB at each boot (parked images, unused the longest first); during the session a watchdog
 (`broom-watch.ps1`) checks the SSD every 15 s — below *Warn* it tells the guest and flags the machine (*SSD full* on the
 Machines page), below *Restart* it restarts the machine after 60 s. Without it Windows stops with a blue screen once
 the SSD is full (it can't grow its boot VHDX) — and C: shows the VHDX's virtual free space, so Windows never warns.
-Big writes come mostly from launchers updating games on the machines: let only the games disk's update machine do it.
+Big writes come mostly from launchers updating games on the machines: let only the iSCSI disk's update machine do it.
 
-## Games disks (Windows)
+## iSCSI disks (Windows)
 
-**Games** page: disks on the server (`games/<name>/games.img`, sparse) for the Windows machines — game
+**iSCSI Disks** page: disks on the server (`games/<name>/games.img`, sparse) for the Windows machines — game
 libraries live there instead of in the golden. A machine gets every disk of its group plus those for all machines, each
 under its drive letter (two disks a machine could both get can't share one). The iSCSI daemon serves them read-only;
 each machine opens the `games.vhdx` inside through a differencing VHDX on its own SSD (`broom\games-<name>-child.vhdx`,
-deleted every boot), so a guest's writes stay on that machine until reboot and a games disk never changes. Mapping
+deleted every boot), so a guest's writes stay on that machine until reboot and an iSCSI disk never changes. Mapping
 changes apply at each machine's next boot; nothing in the golden changes.
 
 To install or update games: pick the disk's **update machine** → (re)boot it → that drive is writable there (its writes
@@ -314,7 +323,7 @@ are kept apart on the server) → install → shut it down properly → **Save**
 copy — the changed blocks become a layer over `games.img`. Each machine gets the new version at its next boot; machines
 already playing keep theirs. Once no machine has used an older version for 10 minutes, the layers are merged into
 `games.img` in the background. A new disk is formatted by its first update machine; the size can only grow (the update
-machine extends the drive on its next boot). No rollback for a games disk — back up its `games.img`.
+machine extends the drive on its next boot). No rollback for an iSCSI disk — back up its `games.img`.
 A disk's **Cache** button serves it from a copy in the server's RAM (loaded in the background, read from the file
 meanwhile) — it needs about as much free RAM as the games on it, since game files barely compress.
 
@@ -387,7 +396,7 @@ Everything lives next to the binary:
 ├── bootrom.db       # config, images, machines, leases (SQLite)
 ├── images/<name>/   # image.img = golden (raw, sparse)
 ├── storage/         # image versions (hard links to the goldens + manifests)
-├── games/<name>/    # games.img = a Windows games disk; layer-N/ = newer versions not merged yet; update.* = unsaved
+├── games/<name>/    # games.img = a Windows iSCSI disk; layer-N/ = newer versions not merged yet; update.* = unsaved
 ├── disks/<id>/      # other server disks broom mounted (Server → Disks): their images/, games/, storage/files/
 ├── tftp/            # boot files (kernel/initrd, Windows templates, stage) — served over HTTP /tftp + TFTP
 └── work/            # scratch for publish steps
@@ -399,9 +408,9 @@ Environment overrides: `BOOTROM_HOME` (the whole tree), `BOOTROM_IMAGES_DIR` / `
 **More disks on the server** (Server → *Disks*): every disk with its partitions, mounts, SMART and state (system /
 in use / broom / free). **Format** a free disk (type its name to confirm): it is erased, made ext4 (`mkfs.ext4`; xfs
 when only `mkfs.xfs` is installed) and mounted at `disks/<id>/` — by broom itself at every start, no fstab. Or **Add
-folder** for something you mounted yourself (LVM, RAID). Then pick that disk when creating an image or a games disk,
-or move one there from the Images / Games page (*Server disk* column): its files are copied — sparse, versions kept as
-hard links — then the old copy goes; refused while machines use it. An image / games disk on another disk is a
+folder** for something you mounted yourself (LVM, RAID). Then pick that disk when creating an image or an iSCSI disk,
+or move one there from the Images / iSCSI Disks page (*Server disk* column): its files are copied — sparse, versions kept as
+hard links — then the old copy goes; refused while machines use it. An image / iSCSI disk on another disk is a
 symlink at its usual place (`images/<name>`, `storage/files/<name>`, `games/<name>`), so backups must follow links
 (`cp -aL` / `rsync -L`, or back the disk up too). A disk that is missing at start is logged and what is on it is not
 served until it is back. The *Disk space* alert covers every broom disk.
@@ -418,7 +427,7 @@ Under systemd: `journalctl -u bootrom-mgmt -f`.
 | `images/` | the goldens (`image.img`, sparse) | stop the service or pick a time with no publish running; `cp --sparse=always -a` / `rsync -S` |
 | `storage/` | image versions (hard links + manifests) | same as `images/` — copy both together, with `cp -a` / `rsync -H` (keeps the links) |
 | `tftp/` | boot files | optional: rebuilt by **Publish** on each image (back it up to skip that) |
-| `disks/<id>/` | images / games disks on other server disks (Server → Disks) | like `images/` and `storage/`; or copy `images/`, `storage/`, `games/` following links (`cp -aL`, `rsync -L` — that loses the version hard links: more space) |
+| `disks/<id>/` | images / iSCSI disks on other server disks (Server → Disks) | like `images/` and `storage/`; or copy `images/`, `storage/`, `games/` following links (`cp -aL`, `rsync -L` — that loses the version hard links: more space) |
 | `work/` | scratch | no |
 
 Restore: stop the service, put the files back in the same layout, start it — iSCSI targets and RAM copies are
@@ -450,7 +459,7 @@ A few properties are inherent to diskless boot on a shared LAN and are handled b
 - **Update `disk`-cache images off-hours.** A `disk` image serves one shared golden file and refuses to
   publish or roll back while clients are connected (they would read changed bytes). Use the RAM (`zram`) cache to
   update live: each publish gets a fresh RAM copy + target, and the old one is kept until its clients drop.
-- **Games disk writes** are allowed only from that disk's update machine: its IP *and* its MAC as the server's ARP
+- **iSCSI disk writes** are allowed only from that disk's update machine: its IP *and* its MAC as the server's ARP
   table sees it (another MAC on that IP gets a read-only session, logged). A host that also fakes the MAC could still
   write into the pending update — check before saving.
 - **Remote**: watching or controlling a machine needs a login (the browser's connection is also checked to come from
@@ -534,13 +543,13 @@ Any x86_64 Linux machine, run as root. Broom is a single static binary — nothi
 
 **How many machines?**
 Up to about 100 per server, given the server link, disk and RAM in [*Sizing*](#sizing): nothing in Broom caps the
-count, the network and the games disk's reads are the limits. Sites running it so far are small rooms — measure yours
+count, the network and the iSCSI disk's reads are the limits. Sites running it so far are small rooms — measure yours
 on the Server and Benchmark pages as you grow.
 
 **How are games handled?**
-Put game libraries on a games disk instead of the golden. Update them once from one machine; every machine gets the
-new version at its next boot, while machines already playing keep theirs. A games disk can be served from a copy in
-the server's RAM (**Cache** button on the Games page) — it needs about as much free RAM as the games on it.
+Put game libraries on an iSCSI disk instead of the golden. Update them once from one machine; every machine gets the
+new version at its next boot, while machines already playing keep theirs. An iSCSI disk can be served from a copy in
+the server's RAM (**Cache** button on the iSCSI Disks page) — it needs about as much free RAM as the games on it.
 
 **Can I see and control the PCs from the counter?**
 Yes — the **Remote** page shows every Windows PC's screen live and lets you take one over in the browser (full-screen

@@ -49,6 +49,9 @@ struct MachineStatus {
     /// Unix time its agent connected (≈ since Windows started).
     #[serde(skip_serializing_if = "Option::is_none")]
     agent_since: Option<u64>,
+    /// The DNS server refuses its names now (dns.rs); None = DNS server off / no IP.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    dns_blocked: Option<bool>,
 }
 
 /// Machines = registered (machines table) + discovered via DHCP (leases table, dhcp.rs) or a PXE boot (pxe_ip).
@@ -160,6 +163,7 @@ async fn status(State(st): State<SharedState>) -> Json<Vec<MachineStatus>> {
                 metrics: crate::metrics::get(&mac),
                 traffic: ip.as_deref().and_then(crate::sysmon::traffic),
                 agent_since: crate::vnc::since(&mac),
+                dns_blocked: ip.as_deref().and_then(crate::dns::blocked),
                 mac,
                 ip,
                 hostname,

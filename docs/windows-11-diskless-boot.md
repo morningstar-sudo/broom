@@ -80,7 +80,7 @@ PC restarts once by itself, and from then on every boot is clean.
 
 ## Useful options
 
-- **Games disks** — keep game libraries out of the golden, on shared disks each PC mounts under a drive letter.
+- **iSCSI disks** — keep game libraries (and other big apps) out of the golden, on shared disks each PC mounts under a drive letter.
   Update them from one machine and save; every PC gets the new version at its next boot.
 - **Base mode** — when something must be set up on each PC once (e.g. an anti-cheat's first run), the first logon
   waits for a technician and their restart saves the base.
@@ -94,8 +94,11 @@ PC restarts once by itself, and from then on every boot is clean.
   the iSCSI target are up on the Server page.
 - **More disks** — on a PC with several disks, pick the one Windows lives on from the web (Devices → Disks) and hide
   the others from the guest (per group or per PC), so nothing written there survives the reset. On the server, format
-  a new disk from the Server page and keep images or games disks on it.
+  a new disk from the Server page and keep images or iSCSI disks on it.
 - **Logs** — the server's log in the browser (Tools → Logs): filter warnings and errors, search a PC's name, follow
   live while it boots.
+- **DNS only for healthy PCs** (Network → DNS, optional) — the server becomes the room's DNS and resolves names only
+  for PCs whose Remote agent runs, PCs that just booted and exempt ones (cashier, staff): an agent killed or a laptop
+  plugged in gets no internet. Block outside DNS (ports 53, 853) on the router to make it stick.
 
 The [full manual](https://github.com/morningstar-sudo/broom#readme) covers every option, backup and security.

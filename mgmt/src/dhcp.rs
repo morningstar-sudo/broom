@@ -231,10 +231,16 @@ impl Cfg {
             end,
             netmask: ip("dhcp_netmask").unwrap_or(Ipv4Addr::new(255, 255, 255, 0)),
             gateway: ip("dhcp_gateway"),
-            dns: g("dhcp_dns", "")
-                .split([',', ' '])
-                .filter_map(|s| s.trim().parse().ok())
-                .collect(),
+            // The built-in DNS server on (dns.rs): it is the clients' only DNS — a second one would answer what it
+            // refuses. Off: the Network page's list.
+            dns: if g("dns_mode", "off") == "on" {
+                vec![server]
+            } else {
+                g("dhcp_dns", "")
+                    .split([',', ' '])
+                    .filter_map(|s| s.trim().parse().ok())
+                    .collect()
+            },
             lease_s: lease_secs(&g("dhcp_lease", "12h")),
             sb: g("ipxe_signed", "0") == "1",
             opts: DhcpOpts::load(db),
@@ -814,6 +820,12 @@ pub async fn start(st: &SharedState) -> Result<String, String> {
     } else {
         &cfg.iface
     };
+    // The DNS server follows (its settings, the server IP, the resolvers list).
+    match crate::dns::restart(st).await {
+        Ok(m) if crate::dns::active() => tracing::info!("{m}"),
+        Ok(_) => {}
+        Err(e) => tracing::error!("{e}"),
+    }
     Ok(if full {
         format!(
             "DHCP {}-{} on {on} (server {}), TFTP :69",

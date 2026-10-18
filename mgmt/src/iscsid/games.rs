@@ -195,13 +195,13 @@ fn load_ram(name: &str) {
                         && s.lun.size == img.size() =>
                 {
                     swap_lun(s, super::Data::Ram(img));
-                    tracing::info!("games disk {name}: served from RAM");
+                    tracing::info!("iSCSI disk {name}: served from RAM");
                     (false, None)
                 }
                 Ok(img) => (s.cfg.ram, Some(img)),
                 Err(e) => {
                     tracing::warn!(
-                        "games disk {name}: not loaded into RAM ({e}) → served from the file"
+                        "iSCSI disk {name}: not loaded into RAM ({e}) → served from the file"
                     );
                     (false, None)
                 }
@@ -275,7 +275,7 @@ pub fn set(cfgs: Vec<Config>) -> Result<(), String> {
     with(|d| d.retain(|name, _| cfgs.iter().any(|c| &c.name == name)));
     for c in &cfgs {
         if let Err(e) = set_one(c.clone()) {
-            errs.push(format!("games disk {}: {e}", c.name));
+            errs.push(format!("iSCSI disk {}: {e}", c.name));
         }
     }
     if let Some(p) = cfg_file() {
@@ -340,7 +340,7 @@ fn set_one(cfg: Config) -> Result<(), String> {
     load_ram(&name);
     // A merge cut off by a crash / restart: games.img is half merged, only the newest gen reads it right → finish now.
     if dir.join("merging").exists() {
-        tracing::warn!("games disk {name}: finishing a merge cut off earlier");
+        tracing::warn!("iSCSI disk {name}: finishing a merge cut off earlier");
         merge_if_idle(&name, Duration::ZERO);
     }
     Ok(())
@@ -416,7 +416,7 @@ pub(crate) fn update_allowed(
         return true;
     }
     tracing::warn!(
-        "games disk {name}: {peer} is the update machine's IP but its MAC is {} (expected {want}) — read-only",
+        "iSCSI disk {name}: {peer} is the update machine's IP but its MAC is {} (expected {want}) — read-only",
         got.as_deref().unwrap_or("unknown")
     );
     false
@@ -444,7 +444,7 @@ pub fn attach(iqn: &str, peer: &str) -> Result<View, String> {
             s.update_users += 1;
             ov = s.update.clone();
             tracing::info!(
-                "games disk {}: {peer} in UPDATE mode on g{ver} — its writes are kept for saving",
+                "iSCSI disk {}: {peer} in UPDATE mode on g{ver} — its writes are kept for saving",
                 s.cfg.name
             );
         }
@@ -480,7 +480,7 @@ pub fn detach(v: &View) {
     if let Some(ov) = &v.ov
         && let Err(e) = ov.flush()
     {
-        tracing::error!("games disk {} update: {e}", v.disk);
+        tracing::error!("iSCSI disk {} update: {e}", v.disk);
     }
 }
 
@@ -543,7 +543,7 @@ pub fn merge_if_idle(name: &str, grace: Duration) {
                 // A RAM copy holds the old bytes under those layers: new sessions read the file until it is loaded again.
                 s.merges += 1;
                 if let Err(e) = to_file(s) {
-                    tracing::error!("games disk {name}: {e}");
+                    tracing::error!("iSCSI disk {name}: {e}");
                     return; // layers kept: still served right from the stale copy; retried at the next tick
                 }
                 s.base_ver = target;
@@ -552,9 +552,9 @@ pub fn merge_if_idle(name: &str, grace: Duration) {
                     let _ = std::fs::remove_dir_all(layer_dir(&dir, *g));
                 }
                 let _ = std::fs::remove_file(&marker);
-                tracing::info!("games disk {name}: versions up to g{target} merged into {path}");
+                tracing::info!("iSCSI disk {name}: versions up to g{target} merged into {path}");
             }
-            Err(e) => tracing::error!("games disk {name}: merge failed (retried later): {e}"),
+            Err(e) => tracing::error!("iSCSI disk {name}: merge failed (retried later): {e}"),
         }
     });
     load_ram(name);
@@ -564,7 +564,7 @@ pub fn merge_if_idle(name: &str, grace: Duration) {
 /// off: its file system must be on disk, whole.
 pub fn save(name: &str) -> Result<String, String> {
     with(|d| {
-        let s = d.get_mut(name).ok_or("games disk not served")?;
+        let s = d.get_mut(name).ok_or("iSCSI disk not served")?;
         if s.update_users > 0 {
             return Err(
                 "the update machine is still connected — shut it down properly first".into(),
@@ -608,7 +608,7 @@ pub fn save(name: &str) -> Result<String, String> {
         if old_sessions(s) == 0 {
             s.old_idle = Instant::now();
         }
-        tracing::info!("games disk {name}: version g{ver} ready");
+        tracing::info!("iSCSI disk {name}: version g{ver} ready");
         Ok(format!(
             "version g{ver} ready: each machine gets it at its next boot"
         ))
@@ -618,7 +618,7 @@ pub fn save(name: &str) -> Result<String, String> {
 /// Throw the update away (the update machine must be off).
 pub fn discard(name: &str) -> Result<(), String> {
     with(|d| {
-        let s = d.get_mut(name).ok_or("games disk not served")?;
+        let s = d.get_mut(name).ok_or("iSCSI disk not served")?;
         if s.update_users > 0 {
             return Err("the update machine is still connected — shut it down first".into());
         }

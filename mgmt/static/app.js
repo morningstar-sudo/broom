@@ -324,6 +324,7 @@ const trText=t=>`iSCSI ${(t[0]/1e6).toFixed(1)} MB/s · golden HTTP ${(t[1]/1e6)
 function upBadge(m){let s='';
   if(m.agent_since)s+=` <span class="badge text-bg-light border" title="agent connected ${new Date(m.agent_since*1000).toLocaleString()}">up ${upFor(m.agent_since)}</span>`;
   const t=m.traffic;if(t&&t[0]+t[1]>=1e5)s+=` <span class="badge text-bg-info" title="${esc(trText(t))}">↓ ${((t[0]+t[1])/1e6).toFixed(1)} MB/s</span>`;
+  if(m.dns_blocked&&m.online)s+=` <span class="badge text-bg-warning" title="the DNS server refuses its names (no Remote agent, no recent PXE boot, not exempt): no internet — Network page → DNS">no DNS</span>`;
   return s;}
 function mxText(m){const l=[`CPU ${m.cpu}%  RAM ${m.ram}%`];
   if(m.temps&&m.temps.length)l.push('ACPI temps (best-effort): '+m.temps.map(t=>t+'°C').join(', '));
@@ -491,7 +492,7 @@ function volCell(kind,name,cur){
   const o=(id,label,dis)=>`<option value="${esc(id)}"${(cur||'')===id?' selected':''}${dis?' disabled':''}>${esc(label)}</option>`;
   return `<select class="form-select form-select-sm w-auto" data-owner data-change="volMove" data-args="${esc(JSON.stringify([kind,name,cur||'']))}">`
     +o('','broom folder')+vols.volumes.map(x=>o(x.id,x.id+(x.mounted?'':' (missing)'),!x.mounted&&x.id!==cur)).join('')+'</select>';}
-async function volMove(kind,name,cur,el){const to=el.value,what=(kind==='image'?'image ':'games disk ')+name;
+async function volMove(kind,name,cur,el){const to=el.value,what=(kind==='image'?'image ':'iSCSI disk ')+name;
   if(!await sure(`Move ${what} to ${to||'the broom folder'}? Its files are copied (a while for a big one), then the old copy is deleted. Machines using it must be shut down first.`)){el.value=cur;return;}
   const job=kind==='image'?name:'games:'+name,m=document.getElementById(kind==='image'?'img_status':'gm_msg');
   try{await j('/api/volumes/move',mk({kind,name,to}));watchJob(job,m,()=>kind==='image'?loadImages():loadGames());}
@@ -501,7 +502,7 @@ async function loadServerDisks(){const el=document.getElementById('b_disks');if(
   let r;try{r=await j('/api/volumes?disks=1');}catch(e){el.textContent='✗ '+e.message;return;}
   vols=r;
   const sp=s=>s?`${gbs(s.used)} used of ${gbs(s.total)}`:'not mounted';
-  const on=x=>[...x.images.map(n=>'image '+n),...x.games.map(n=>'games '+n)].join(', ');
+  const on=x=>[...x.images.map(n=>'image '+n),...x.games.map(n=>'iSCSI disk '+n)].join(', ');
   const vrows=`<tr><td><b>broom folder</b></td><td class="mono">${esc(r.home.path)}</td><td class="mono">${sp(r.home.space)}</td><td>everything not on another disk</td><td></td></tr>`
     +r.volumes.map(x=>`<tr><td><b>${esc(x.id)}</b>${x.mounted?'':' <span class="badge text-bg-danger" title="not mounted: unplugged? what is on it is not served">missing</span>'}</td>
       <td class="mono">${esc(x.path)}${x.fstype?' ('+esc(x.fstype)+')':''}</td><td class="mono">${sp(x.space)}</td><td>${esc(on(x))||'—'}</td>
@@ -517,7 +518,7 @@ async function loadServerDisks(){const el=document.getElementById('b_disks');if(
     <div class="d-flex flex-wrap gap-2 align-items-end" data-owner><div><label class="form-label small mb-1" for="vol_folder">Or a folder you mounted yourself (LVM, RAID…)</label><input class="form-control form-control-sm" id="vol_folder" size="28" placeholder="/mnt/data/broom"></div>
       <button class="btn btn-sm btn-outline-primary" data-click="volFolder">Add folder</button><span id="vol_msg" class="msg align-self-center"></span></div>`;}
 async function volFormat(name,model,size,old){
-  const t=await ask('Format '+name,`ERASES everything on ${name} (${model||'disk'} ${gbs(size)})${old?' — it has partitions / a filesystem now':''} and makes it a broom disk for images and games disks. Type ${name} to confirm.`,'');
+  const t=await ask('Format '+name,`ERASES everything on ${name} (${model||'disk'} ${gbs(size)})${old?' — it has partitions / a filesystem now':''} and makes it a broom disk for images and iSCSI disks. Type ${name} to confirm.`,'');
   if(t==null)return;
   if(t.trim()!==name){toast('Name does not match — nothing changed',true);return;}
   const m=document.getElementById('vol_msg');say(m,' formatting '+name+'…');
@@ -568,7 +569,20 @@ function dnsButton(){const l=document.getElementById('dns_list');if(!l)return;le
 function setDns(csv){const l=document.getElementById('dns_list');if(!l)return;l.innerHTML='';
   const v=(csv||'').split(',').map(s=>s.trim()).filter(Boolean);for(const x of (v.length?v:[''])) l.appendChild(dnsBox(x));dnsButton();}
 function getDns(){return [...document.querySelectorAll('#dns_list input.dns')].map(e=>e.value.trim()).filter(Boolean).join(',');}
-async function loadDhcp(){const c=await j('/api/dhcp');
+// DNS for healthy machines only (dns.rs).
+async function loadDnsGate(){const box=document.getElementById('dns_groups');if(!box)return;
+  let d,g;try{[d,g]=await Promise.all([j('/api/dns'),j('/api/groups')]);}catch(e){return;}
+  document.getElementById('dns_mode').value=d.mode;document.getElementById('dns_grace').value=d.grace_min;
+  document.getElementById('dns_ips').value=d.exempt_ips;
+  box.innerHTML=g.groups.map(n=>`<label class="form-check"><input class="form-check-input" type="checkbox" value="${esc(n)}"${d.exempt_groups.some(x=>x.toLowerCase()===n.toLowerCase())?' checked':''}> ${esc(n)}</label>`).join('')||'<span class="mono">no groups yet</span>';
+  document.getElementById('dnsg_state').textContent=d.active
+    ?`Running on ${d.server}:53 → ${d.upstream.join(', ')} · ${d.allowed} IPs may resolve now`+(d.dhcp_full?'':` · the DHCP server is off: set the router's DHCP DNS to ${d.server}`)
+    :'Off: clients use the DNS servers above.';}
+async function saveDnsGate(){const m=document.getElementById('dnsg_msg');
+  const body={mode:v('dns_mode'),grace_min:+v('dns_grace'),exempt_ips:document.getElementById('dns_ips').value,
+    exempt_groups:[...document.querySelectorAll('#dns_groups input:checked')].map(e=>e.value)};
+  try{const r=await j('/api/dns',mk(body));say(m,' ✓ '+(r.status||'saved'));}catch(e){say(m,' ✗ '+e.message);}loadDnsGate();}
+async function loadDhcp(){loadDnsGate();const c=await j('/api/dhcp');
   ['mode','iface','server_ip','subnet','netmask','range_start','range_end','gateway'].forEach(k=>{const e=document.getElementById('dhcp_'+k);if(e)e.value=c[k]||'';});
   for(const k of ['ipxe_signed','strict_reset','rapid_commit','ipxe_fast','authoritative','send_hostname']){const e=document.getElementById('dhcp_'+k);if(e)e.checked=!!c[k];}
   setDns(c.dns);
@@ -602,17 +616,17 @@ async function loadGames(){const [g]=await Promise.all([j('/api/games'),loadVols
       <td><select class="form-select form-select-sm d-inline-block w-auto" data-owner data-change="setGamesUpdate" data-args="${esc(JSON.stringify([d.name]))}">${opts(d.update)}</select>${d.update!=null&&!x.update_ip?' <span class="text-danger" title="no fixed IP or lease known">no IP</span>':''}${s&&s.update_connected?' <span class="text-success">'+ic('dot','')+' writable</span>':''}</td>
       <td class="mono">${s&&s.update_bytes?gbs(s.update_bytes)+` <button class="btn btn-sm btn-outline-primary" ${act('saveGamesUpdate',d.name)}>Save</button> <button class="btn btn-sm btn-outline-secondary" ${act('discardGamesUpdate',d.name)}>Discard</button>`:'—'}</td>
       <td>${volCell('games',d.name,x.volume)}</td>
-      <td data-owner><button class="btn btn-sm btn-outline-secondary" ${act('toggleGamesRam',d.name,!d.ram)} title="RAM: the disk is served from a copy in the server's RAM (loaded in the background; needs about as much free RAM as the games on it — games barely compress). Disk: read from games.img (the page cache keeps what is played most).">${d.ram?(s&&s.ram?'Cache: RAM':(s&&s.ram_loading?'Cache: RAM (loading…)':'Cache: RAM (not loaded)')):'Cache: disk'}</button> <button class="btn btn-sm btn-outline-secondary" ${act('editGames',d.name)}>Edit</button> <button class="btn btn-sm btn-outline-danger" ${act('delGames',d.name)}>Delete</button></td></tr>`;}).join('')
-    ||'<tr><td colspan="10" class="mono">no games disk yet</td></tr>';
+      <td data-owner><button class="btn btn-sm btn-outline-secondary" ${act('toggleGamesRam',d.name,!d.ram)} title="RAM: the disk is served from a copy in the server's RAM (loaded in the background; needs about as much free RAM as the data on it — games barely compress). Disk: read from its file (the page cache keeps what is read most).">${d.ram?(s&&s.ram?'Cache: RAM':(s&&s.ram_loading?'Cache: RAM (loading…)':'Cache: RAM (not loaded)')):'Cache: disk'}</button> <button class="btn btn-sm btn-outline-secondary" ${act('editGames',d.name)}>Edit</button> <button class="btn btn-sm btn-outline-danger" ${act('delGames',d.name)}>Delete</button></td></tr>`;}).join('')
+    ||'<tr><td colspan="10" class="mono">no iSCSI disk yet</td></tr>';
   const m=document.getElementById('gm_msg');if(m&&g.error)say(m,' ✗ not served: '+g.error);}
 async function gamesCall(url,body,q){if(q&&!await sure(q))return;const m=document.getElementById('gm_msg');
   try{const r=await j(url,mk(body));say(m,' ✓ '+(r.status||'saved'));}catch(e){say(m,' ✗ '+e.message);}loadGames();}
 const saveGames=()=>gamesCall('/api/games/disk',{name:v('gm_name'),letter:v('gm_letter'),size_gb:+v('gm_size'),groups:[v('gm_groups')],volume:v('gm_vol')||null});
 const setGamesUpdate=(name,el)=>gamesCall('/api/games/update',{name,id:el.value?+el.value:null});
-const toggleGamesRam=(name,ram)=>gamesCall('/api/games/cache',{name,ram},ram?'Serve games disk '+name+' from RAM? It is loaded in the background (served from the disk meanwhile) and needs about as much free RAM as the games on it; not enough RAM → it stays on the disk (see the log).':null);
+const toggleGamesRam=(name,ram)=>gamesCall('/api/games/cache',{name,ram},ram?'Serve iSCSI disk '+name+' from RAM? It is loaded in the background (served from the disk meanwhile) and needs about as much free RAM as the data on it; not enough RAM → it stays on the disk (see the log).':null);
 const saveGamesUpdate=name=>gamesCall('/api/games/save',{name},'Save the update of '+name+' as its new version? Its update machine must be shut down. Each machine gets it at its next boot.');
 const discardGamesUpdate=name=>gamesCall('/api/games/discard',{name},'Throw the update of '+name+' away?');
-const delGames=name=>gamesCall('/api/games/delete',{name},'Delete games disk '+name+' and EVERY game on it? Machines using it keep it until they reboot.');
+const delGames=name=>gamesCall('/api/games/delete',{name},'Delete iSCSI disk '+name+' and EVERYTHING on it? Machines using it keep it until they reboot.');
 function editGames(name){const d=gmDisks.find(x=>x.disk.name===name).disk;
   for(const [k,val] of [['gm_name',d.name],['gm_letter',d.letter],['gm_size',d.size_gb],['gm_groups',d.groups.join(', ')]])document.getElementById(k).value=val;}
 
@@ -655,7 +669,7 @@ async function grCall(url,body,el){const m=document.getElementById(el||'gr_msg')
 const createGroup=()=>{const n=v('gr_new');if(n)grCall('/api/groups/create',{name:n}).then(()=>{document.getElementById('gr_new').value='';});};
 async function renameGroup(n){const to=await ask('Rename group '+n,'New name (an existing name merges the two):',n);
   if(to&&to!==n){if(grCur===n)grCur=to.trim();grCall('/api/groups/rename',{from:n,to});}}
-async function deleteGroup(n){if(await sure('Delete group '+n+'? Its machines get no group; it leaves every image, games disk and driver package.'))grCall('/api/groups/delete',{name:n});}
+async function deleteGroup(n){if(await sure('Delete group '+n+'? Its machines get no group; it leaves every image, iSCSI disk and driver package.'))grCall('/api/groups/delete',{name:n});}
 
 // ---- system ----
 async function loadCafe(){
@@ -970,6 +984,7 @@ async function loadServices(){const el=document.getElementById('b_svc');if(!el)r
     ${s.dhcp.mode==='full'?row('DHCP server',s.dhcp.running,`:67 on ${s.dhcp.iface||'?'}`+(s.dhcp.running?'':' — could not bind (see Logs)')):row('DHCP server',null,'the LAN\'s own DHCP hands out addresses')}
     ${row('TFTP (iPXE)',s.tftp.running,':69')}
     ${row('iSCSI target',!!i,i?`${i.targets} targets, ${i.sessions} sessions`+(i.clients!=null?`, ${i.clients} clients`:''):'daemon not running')}
+    ${s.dns&&s.dns.on?row('DNS (healthy machines)',s.dns.running,s.dns.running?`:53 → ${s.dns.upstream.join(', ')} · ${s.dns.allowed} IPs may resolve`:'could not start (see Logs)'):''}
     ${row('Remote agents',String(s.agents),'Windows machines connected')}
     ${row('Golden downloads',String(s.golden.running),`running, ${s.golden.waiting} waiting their turn`)}
   </tbody></table>`;}
@@ -1111,7 +1126,7 @@ const ACTIONS={
   wake,manage,regMachine,loadStatus,clearMFilters,mPrev,mNext,mPageSize,setKey,rearmKey,
   loadDevices,dvOpen,dvSave,dvDelete,dvClose,dvBulk,dvRegister,dvImport,dvAdd,dvRender,dvHide,dvBroomDisk,
   volMove,volFormat,volFolder,volRemove,loadServerDisks,
-  userAdd,userRole,userPw,userDel,rekey,
+  userAdd,userRole,userPw,userDel,rekey,saveDnsGate,
   loadImages,addImage,setDefault,toggleCache,toggleBase,toggleSsd,togglePreload,editImgGroups,republish,showVersions,exportImage,editBoot,delImage,
   snapshotImage,rollbackImage,versionToImage,deleteVersion,
   loadGames,saveGames,setGamesUpdate,toggleGamesRam,saveGamesUpdate,discardGamesUpdate,editGames,delGames,

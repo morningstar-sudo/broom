@@ -92,6 +92,8 @@ async fn services(
             "clients": s.peers.map(|p| p.iter().filter(|p| p.connected).count()),
         })),
         "agents": crate::vnc::count(),
+        "dns": {"on": crate::dns::on(&st), "running": crate::dns::active(), "allowed": crate::dns::allowed_count(),
+                "upstream": crate::dns::upstream(&st)},
         "golden": {"running": golden_running, "waiting": golden_waiting},
         "uptime": STARTED.elapsed().as_secs(), "host_uptime": host_up.map(|u| u as u64),
     }))

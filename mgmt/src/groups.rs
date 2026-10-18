@@ -172,7 +172,7 @@ fn apply(
                     .filter(|d| {
                         !d.groups.is_empty() && f(&format!("d{}", d.name), &d.groups).is_empty()
                     })
-                    .map(|d| format!("games disk {}", d.name)),
+                    .map(|d| format!("iSCSI disk {}", d.name)),
             )
             .collect();
         if !to_all.is_empty() {
@@ -197,7 +197,7 @@ fn apply(
     for a in &disks {
         if let Some(b) = disks.iter().find(|b| crate::games::clash(a, b)) {
             return Err(bad(format!(
-                "games disks {} and {} would share drive {}: on the same machines",
+                "iSCSI disks {} and {} would share drive {}: on the same machines",
                 a.name, b.name, a.letter
             )));
         }
@@ -259,6 +259,8 @@ async fn rename(
         )?;
         let hide = swap(&crate::disks::hidden_groups(&st2), &f2, Some(&t2));
         crate::disks::set_hidden_groups(&st2, &hide).map_err(ise)?;
+        let dns = swap(&crate::dns::exempt_groups(&st2), &f2, Some(&t2));
+        crate::dns::set_exempt_groups(&st2, &dns).map_err(ise)?;
         save(&st2, &swap(&saved(&st2), &f2, Some(&t2)))
     })
     .await
@@ -285,6 +287,8 @@ async fn delete(
         )?;
         let hide = swap(&crate::disks::hidden_groups(&st2), &n2, None);
         crate::disks::set_hidden_groups(&st2, &hide).map_err(ise)?;
+        let dns = swap(&crate::dns::exempt_groups(&st2), &n2, None);
+        crate::dns::set_exempt_groups(&st2, &dns).map_err(ise)?;
         save(&st2, &swap(&saved(&st2), &n2, None))
     })
     .await
@@ -368,14 +372,14 @@ async fn set(
     .await
     .map_err(ise)??;
     sync_games(&st).await;
-    tracing::info!("group {name}: machines, images, games disks and drivers set");
+    tracing::info!("group {name}: machines, images, iSCSI disks and drivers set");
     Ok(ok())
 }
 
 async fn sync_games(st: &SharedState) {
     let st = st.clone();
     if let Ok(Err(e)) = tokio::task::spawn_blocking(move || crate::games::sync(&st)).await {
-        tracing::warn!("games disks: {e}");
+        tracing::warn!("iSCSI disks: {e}");
     }
 }
 

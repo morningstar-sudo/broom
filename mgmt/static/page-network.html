@@ -35,4 +35,17 @@
     </div>
     <div class="d-flex flex-wrap gap-2 align-items-center mt-3"><button class="btn btn-sm btn-primary" data-click="applyDhcp">Apply (restart DHCP/TFTP)</button> <span id="dhcp_msg" class="msg"></span></div>
   </div>
+  <div class="card card-body mb-3" data-owner>
+    <h2 class="h6 text-uppercase text-body-secondary mb-3">DNS — only for healthy machines</h2>
+    <p class="small text-body-secondary mb-2">This server becomes the clients' DNS (the DNS servers above are what it asks). A machine resolves names only while its Remote agent is connected, for a few minutes after a PXE boot, or when exempt; anything else — an agent killed, Windows started without the stage, a laptop on the LAN — gets no names, so no internet.
+      <br><b>A soft lock</b>: a guest can set another DNS server or DNS over HTTPS by hand — block DNS to the outside (ports 53 and 853) on the router for every IP but this server. This server down = no names for the clients.</p>
+    <div class="d-flex flex-wrap gap-3 align-items-start">
+      <div><label class="form-label small mb-1" for="dns_mode">DNS server</label><select class="form-select form-select-sm" id="dns_mode"><option value="off">off</option><option value="on">on</option></select></div>
+      <div><label class="form-label small mb-1" for="dns_grace">After a PXE boot</label><div class="input-group input-group-sm"><input class="form-control" id="dns_grace" type="number" min="0" max="120" style="width:70px"><span class="input-group-text">min</span></div></div>
+      <div><label class="form-label small mb-1">Exempt groups</label><div id="dns_groups" class="small"></div></div>
+      <div><label class="form-label small mb-1" for="dns_ips">Exempt IPs / ranges</label><textarea class="form-control form-control-sm mono" id="dns_ips" rows="3" cols="22" placeholder="10.0.0.5&#10;10.0.0.240/28"></textarea></div>
+    </div>
+    <div class="d-flex flex-wrap gap-2 align-items-center mt-3"><button class="btn btn-sm btn-primary" data-click="saveDnsGate">Save (restarts DHCP / DNS)</button> <span id="dnsg_msg" class="msg"></span></div>
+    <div id="dnsg_state" class="small text-body-secondary mt-2"></div>
+  </div>
 </section>

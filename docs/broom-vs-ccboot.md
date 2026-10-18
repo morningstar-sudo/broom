@@ -23,7 +23,7 @@ change between versions; check their own documentation for current details.
 | Where the client runs | from a VHDX cached on the PC's own SSD | depends on product and setup |
 | Reset | every boot | every boot |
 | Secure Boot / TPM / HVCI | yes, no MOK enrollment — [works with FACEIT](faceit-diskless.md) | check the product |
-| Games | shared games disks, versioned, updated from one PC | product-specific game update tools |
+| Games | shared iSCSI disks (games, apps), versioned, updated from one PC | product-specific game update tools |
 | Remote view / control | built in: live wall of every PC's screen, control in the browser | check the product |
 | Client health | CPU, RAM, temperatures, disk SMART / bad sectors, uptime, traffic per PC | check the product |
 | Server monitoring | live load charts, disk SMART, services up/down, logs in the browser | check the product |

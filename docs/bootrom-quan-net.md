@@ -26,7 +26,7 @@ game, phòng máy trường học**, tới khoảng 100 máy mỗi máy chủ. B
 lên máy chủ; mọi máy trạm boot qua mạng từ image đó, và mỗi lần khởi động lại, máy trạm **sạch như mới** — khách cài gì, xoá gì
 cũng mất sau khi restart.
 
-![Máy trạm Windows 11 boot qua mạng bằng Broom, có ổ game G: dùng chung](images/client-games-disk.webp){: width="1280" height="720"}
+![Máy trạm Windows 11 boot qua mạng bằng Broom, có ổ iSCSI G: dùng chung (chứa game)](images/client-games-disk.webp){: width="1280" height="720"}
 
 ## Broom có gì
 
@@ -35,7 +35,7 @@ cũng mất sau khi restart.
   TFTP hay iSCSI riêng: tất cả có sẵn trong Broom.
 - **Máy trạm chạy nhanh như ổ cứng thật** — image được lưu trên SSD của từng máy, Windows chạy trực tiếp từ đó; mạng
   chỉ dùng khi có image mới, nên cả phòng boot cùng lúc máy chủ vẫn nhẹ.
-- **Ổ game dùng chung** — game để trên ổ game riêng, không nằm trong image. Cập nhật game **trên một máy**, bấm
+- **Ổ iSCSI dùng chung** (chứa game, ứng dụng) — game để trên ổ iSCSI riêng, không nằm trong image. Cập nhật game **trên một máy**, bấm
   Save, cả phòng có bản mới ở lần boot sau; máy đang chơi vẫn dùng bản cũ đến khi restart.
 - **Bật Secure Boot không cần MOK** — cả chuỗi boot mạng đã được ký sẵn, không phải enroll khoá trên từng máy.
   Secure Boot, TPM 2.0, HVCI đều bật nên **chạy được FACEIT Anti-Cheat** ([chi tiết](faceit-diskless.md)).
@@ -46,7 +46,10 @@ cũng mất sau khi restart.
   chủ, báo đỏ khi ổ sắp hỏng hoặc máy quá nóng; máy trạm nào đã bật bao lâu, đang kéo bao nhiêu MB/s từ máy chủ;
   biểu đồ tải máy chủ 10 phút gần nhất và trạng thái từng dịch vụ (DHCP, TFTP, iSCSI).
 - **Xem log ngay trên web** — lọc lỗi, tìm theo tên máy, theo dõi trực tiếp lúc máy boot; không cần SSH vào máy chủ.
-- **Snapshot / rollback image** tức thì, **chia nhóm máy** (mỗi nhóm một menu boot, image, ổ game riêng),
+- **Máy tắt agent là mất mạng** (tuỳ chọn, trang Network → DNS) — máy chủ làm DNS cho cả phòng, chỉ phân giải tên cho
+  máy đang chạy agent, máy vừa boot, máy thu ngân / nhân viên được miễn trừ. Khách tắt agent, máy boot không qua mạng,
+  laptop lạ cắm vào LAN đều không vào được internet. Nên chặn thêm DNS ra ngoài (cổng 53, 853) trên router.
+- **Snapshot / rollback image** tức thì, **chia nhóm máy** (mỗi nhóm một menu boot, image, ổ iSCSI riêng),
   **Wake-on-LAN** và xem trạng thái máy trên web.
 - **Miễn phí, mã nguồn mở** (Apache-2.0) — không tính phí theo số máy, dùng cho quán kinh doanh được.
 
@@ -109,11 +112,11 @@ trên màn hình máy trạm). Các ổ còn lại nên để **ẩn khỏi khá
 máy): khách không thấy, không ghi được nên không có gì sót lại sau khi restart.
 
 Máy chủ **gắn thêm ổ**: trang **Server → Disks**, bấm **Format** ở ổ mới (gõ tên ổ để xác nhận). Sau đó chọn ổ này khi
-tạo image / ổ game, hoặc chuyển image / ổ game sang bằng cột **Server disk** ở trang Images / Games.
+tạo image / ổ iSCSI, hoặc chuyển image / ổ iSCSI sang bằng cột **Server disk** ở trang Images / iSCSI Disks.
 
 ## Cài game
 
-Ở trang **Games**, tạo ổ game, chọn một **máy cập nhật**. Boot máy đó, cài hoặc cập nhật game trên ổ game,
+Ở trang **iSCSI Disks**, tạo ổ iSCSI, chọn một **máy cập nhật**. Boot máy đó, cài hoặc cập nhật game trên ổ iSCSI,
 tắt máy đúng cách rồi bấm **Save**. Các máy khác nhận bản mới ở lần boot sau. Chỉ nên để máy cập nhật tải bản cập
 nhật game — launcher tự cập nhật trên máy khách sẽ làm đầy SSD và mất khi restart.
 

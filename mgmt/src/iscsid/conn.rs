@@ -314,7 +314,7 @@ async fn login(
             match super::games::attach(target.as_deref().unwrap_or_default(), peer) {
                 Ok(v) => games = Some(v),
                 Err(e) => {
-                    tracing::info!("iscsid: games disk login of {peer} refused: {e}");
+                    tracing::info!("iscsid: iSCSI disk login of {peer} refused: {e}");
                     fail = Some((0x03, 0x01)); // service unavailable: the initiator retries
                 }
             }

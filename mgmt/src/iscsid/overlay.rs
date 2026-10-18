@@ -162,10 +162,10 @@ impl Overlay {
                 .read_exact_at(&mut buf[..n], start)
                 .map_err(|e| format!("overlay read: {e}"))?;
             base.write_all_at(&buf[..n], start)
-                .map_err(|e| format!("games disk write: {e}"))?;
+                .map_err(|e| format!("iSCSI disk write: {e}"))?;
         }
         base.sync_all()
-            .map_err(|e| format!("games disk sync: {e}"))?;
+            .map_err(|e| format!("iSCSI disk sync: {e}"))?;
         Ok(v.len())
     }
 }
