@@ -104,6 +104,7 @@ public static class BroomVnc {
         try { Run(url).Wait(); err = "connection closed"; }
         catch (AggregateException e) { err = e.InnerException != null ? e.InnerException.Message : e.Message; }
         catch (Exception e) { err = e.Message; }
+        try { ReleaseAll(); } catch { }
         if (err != last) { Log("server connection: " + err + " (retrying every 5 s)"); last = err; }
         Thread.Sleep(5000);
       }
@@ -226,7 +227,7 @@ public static class BroomVnc {
         }
         string op = Field(text, "op");
         if (op == "start") { Quality = Clamp(IntField(text, "q", 60), 20, 95); MaxW = IntField(text, "w", 0); WantH264 = Field(text, "codec") == "h264" ? 1 : 0; Codec = -1; if (_h264 != null) { _h264.Dispose(); _h264 = null; } fr.Prev = null; fr.Cur = new IntPtr(-1); streaming = true; Drain(frameReady); frameReady.Release(); }
-        else if (op == "stop") { streaming = false; }
+        else if (op == "stop") { streaming = false; ReleaseAll(); }   // the viewer went: nothing stays pressed
         else if (op == "ack") { if (frameReady.CurrentCount == 0) frameReady.Release(); }
         else if (op == "mouse") { Mouse(IntField(text, "x", 0), IntField(text, "y", 0), IntField(text, "b", 0)); }
         else if (op == "wheel") { Wheel(IntField(text, "d", 0)); }
@@ -636,9 +637,18 @@ public static class BroomVnc {
     OnInputDesktop();
     SendInput(1, inp, Marshal.SizeOf(typeof(INPUT)));
   }
+  // Keys this agent pressed and not released yet: let go when the viewer's connection ends (closed tab, network
+  // drop), or the machine keeps e.g. the Windows key held for whoever sits at it.
+  static readonly HashSet<string> _held = new HashSet<string>();
+  static void ReleaseAll() {
+    foreach (var c in new List<string>(_held)) Key(c, false);
+    if (_lastButtons != 0) SendMouse(0, 0, DownUp(0, 1, 0, 0x0004) | DownUp(0, 2, 0, 0x0010) | DownUp(0, 4, 0, 0x0040), 0);
+    _lastButtons = 0;
+  }
   static void Key(string code, bool down) {
     int sc = Scancode(code);
     if (sc == 0) return;
+    if (down) _held.Add(code); else _held.Remove(code);
     bool ext = (sc & 0xE000) == 0xE000;
     uint flags = 0x0008; // SCANCODE
     if (ext) flags |= 0x0001; // EXTENDEDKEY

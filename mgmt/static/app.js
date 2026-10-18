@@ -910,8 +910,12 @@ function rmConnect(){
   canvas.onmouseup=e=>{const[x,y]=pos(e);send({op:'mouse',x,y,b:btn(e)});};
   canvas.oncontextmenu=e=>e.preventDefault();
   canvas.onwheel=e=>{e.preventDefault();send({op:'wheel',d:e.deltaY<0?1:-1});};
-  canvas.onkeydown=e=>{e.preventDefault();send({op:'key',code:e.code,down:true});};
-  canvas.onkeyup=e=>{e.preventDefault();send({op:'key',code:e.code,down:false});};
+  // Keys held now: the page losing focus (Win / Alt+Tab on this PC, another tab) never sees their keyup → released
+  // here, or the machine keeps e.g. the Windows key pressed.
+  const held=new Set();
+  canvas.onkeydown=e=>{e.preventDefault();held.add(e.code);send({op:'key',code:e.code,down:true});};
+  canvas.onkeyup=e=>{e.preventDefault();held.delete(e.code);send({op:'key',code:e.code,down:false});};
+  canvas.onblur=()=>{for(const c of held)send({op:'key',code:c,down:false});held.clear();};
 }
 function rmSend(o){if(rmWs&&rmWs.readyState===1)rmWs.send(JSON.stringify(o));}
 function rmQuality(){rmSend({op:'start',q:+document.getElementById('rm_q').value});}
