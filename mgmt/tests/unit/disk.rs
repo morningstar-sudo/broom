@@ -201,3 +201,43 @@ fn guid_roundtrip() {
     assert_eq!(guid_str(&g), BASIC_DATA);
     assert_eq!(&g[..4], &[0xA2, 0xA0, 0xD0, 0xEB]);
 }
+
+/// A GPT disk written onto a bigger one (Deploy): the backup table goes to the new end, `sfdisk --verify` is clean,
+/// the partitions stay, the free space after them becomes usable.
+#[test]
+fn backup_gpt_moves_to_the_end() {
+    let g = disk("grow", 64);
+    sfdisk(
+        &g,
+        "label: gpt\nsize=8MiB, type=U\ntype=EBD0A0A2-B9E5-4433-87C0-68B6B72699C7\n",
+    );
+    let before = mine(&g);
+    File::options()
+        .write(true)
+        .open(&g)
+        .unwrap()
+        .set_len(100 << 20)
+        .unwrap();
+    assert!(move_backup_gpt(&g).unwrap());
+    assert!(!move_backup_gpt(&g).unwrap(), "already at the end");
+    assert_eq!(mine(&g), before);
+    assert_eq!(sfdisk_json(&g), before);
+    let o = Command::new("sfdisk")
+        .args(["--verify", &g])
+        .output()
+        .unwrap();
+    let out = String::from_utf8_lossy(&o.stdout);
+    assert!(
+        o.status.success() && out.contains("No errors detected"),
+        "{out}"
+    );
+    // "A total of N free sectors": the 36 MiB added (+ the old table's tail) are usable.
+    let free: u64 = out
+        .split("A total of ")
+        .nth(1)
+        .and_then(|s| s.split_whitespace().next())
+        .and_then(|n| n.parse().ok())
+        .unwrap_or(0);
+    assert!(free * 512 >= 36 << 20, "{out}");
+    let _ = std::fs::remove_file(&g);
+}

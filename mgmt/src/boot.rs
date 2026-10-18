@@ -256,9 +256,9 @@ pub async fn start(
     })
 }
 
-/// Menu [C]: this machine's disk to the server as an image's golden. The Windows stage kernel boots with
-/// broom.capture=1: it only brings the network up and runs `bootrom-mgmt capture` (capture.rs), fetched from
-/// /broom-capture, which reads the disk and asks for an owner account on screen.
+/// Menu [C]: this machine's disk to the server as an image's golden, or an image onto it. The Windows stage kernel
+/// boots with broom.capture=1: it only brings the network up and runs `bootrom-mgmt capture` (capture.rs), fetched
+/// from /broom-capture, which asks for an owner account on screen.
 pub async fn capture(State(st): State<SharedState>, Query(q): Q) -> impl IntoResponse {
     let (mac, ip) = client_ids(&q);
     let back = "sleep 5\nchain /boot.ipxe?mac=${net0/mac}&ip=${net0/ip}\n";
@@ -346,8 +346,8 @@ fn menu_script(
             "item --key s shell [S] iPXE shell (no image yet - upload one in the web admin)\n",
         );
     }
-    // Last, never the default: reads this machine's disk into an image (owner login on its screen; nothing is written).
-    items.push_str("item --key c capture [C] Capture this PC's disk to the server (admin)\n");
+    // Last, never the default: this machine's disk to an image or back (owner login on its screen).
+    items.push_str("item --key c capture [C] Capture / deploy this PC's disk (admin)\n");
     targets
         .push_str(":capture\nchain /boot/capture?mac=${net0/mac}&ip=${net0/ip} || goto start\n\n");
     // Windows computer name (NetBIOS): letters/digits/'-', max 15 — also safe inside the iPXE script.

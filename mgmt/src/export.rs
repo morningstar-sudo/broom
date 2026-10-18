@@ -165,32 +165,10 @@ fn build(
             p
         }
     };
-    let t = table(&src)?;
     let vmdk = out.join(format!("{name}.vmdk"));
     steps.go("convert → vmdk");
-    let firmware = if os == "windows" {
-        let d = orig_dir(name);
-        let o: Orig = std::fs::read(d.join("orig.json"))
-            .ok()
-            .and_then(|b| serde_json::from_slice(&b).ok())
-            .ok_or("this Windows image was published before export existed (its boot partitions are gone) — upload the VM again, then export")?;
-        let total = std::fs::metadata(&src).map_err(|e| e.to_string())?.len();
-        if single_part(&t) != Some((o.start, o.size)) || total != o.total {
-            return Err("this version comes from another upload (different disk layout) — its boot partitions were not kept".into());
-        }
-        // One disk again: head + the Windows partition of the golden + tail, in one pass.
-        let (head, tail) = (d.join("head.raw"), d.join("tail.raw"));
-        let mut parts: Vec<(&Path, u64, Option<u64>)> =
-            vec![(&head, 0, None), (&src, o.start, Some(o.size))];
-        if o.total > o.start + o.size {
-            parts.push((&tail, 0, None));
-        }
-        crate::vmdk::write_sparse(&crate::disk::Source::new(&parts)?, &vmdk)?;
-        o.firmware
-    } else {
-        crate::vmdk::write_sparse(&crate::disk::Source::file(&src)?, &vmdk)?;
-        layout(&t).1.to_string()
-    };
+    let (disk, firmware) = full_disk(name, os, &src)?;
+    crate::vmdk::write_sparse(&disk, &vmdk)?;
     std::fs::write(out.join(format!("{name}.vmx")), vmx(name, os, &firmware))
         .map_err(|e| e.to_string())?;
     std::fs::write(out.join("version"), version.unwrap_or("current")).map_err(|e| e.to_string())?;
@@ -200,6 +178,144 @@ fn build(
         version.unwrap_or("current golden"),
         size as f64 / 1e9
     ))
+}
+
+/// The whole disk an image's golden `src` came from, + the firmware it boots with ("efi" | "bios"): a Windows golden
+/// trimmed by its publish gets its kept boot partitions back around the Windows partition (export, deploy); anything
+/// else is `src` as it is.
+pub(crate) fn full_disk(
+    name: &str,
+    os: &str,
+    src: &Path,
+) -> Result<(crate::disk::Source, String), String> {
+    let t = table(src)?;
+    let (trimmed, firmware) = layout(&t);
+    if os != "windows" || !trimmed {
+        return Ok((crate::disk::Source::file(src)?, firmware.to_string()));
+    }
+    let d = orig_dir(name);
+    let o: Orig = std::fs::read(d.join("orig.json"))
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .ok_or("this Windows image was published before its boot partitions were kept — upload the VM again")?;
+    let total = std::fs::metadata(src).map_err(|e| e.to_string())?.len();
+    if single_part(&t) != Some((o.start, o.size)) || total != o.total {
+        return Err("this version comes from another upload (different disk layout) — its boot partitions were not kept".into());
+    }
+    // One disk again: head + the Windows partition of the golden + tail.
+    let (head, tail) = (d.join("head.raw"), d.join("tail.raw"));
+    let mut parts: Vec<(&Path, u64, Option<u64>)> =
+        vec![(&head, 0, None), (src, o.start, Some(o.size))];
+    if o.total > o.start + o.size {
+        parts.push((&tail, 0, None));
+    }
+    Ok((crate::disk::Source::new(&parts)?, o.firmware))
+}
+
+/// GET /api/images/deploy-map?name= (owner) — what a client's Deploy (capture.rs) writes: the image's whole disk
+/// ({total, firmware, stamp, ranges: [[start, end]…]} — only the ranges that hold data). `stamp` names this golden:
+/// the chunks are refused once it changed (a publish / upload meanwhile), so a disk never gets two goldens mixed.
+pub(crate) async fn deploy_map(
+    axum::extract::State(st): axum::extract::State<SharedState>,
+    axum::extract::Query(q): axum::extract::Query<DeployQ>,
+    axum::Extension(w): axum::Extension<crate::auth::Who>,
+) -> Result<axum::Json<serde_json::Value>, (axum::http::StatusCode, String)> {
+    let (img, src) = deploy_image(&st, &q.name)?;
+    let name = img.name.clone();
+    let (disk, firmware) = tokio::task::spawn_blocking(move || full_disk(&name, "windows", &src))
+        .await
+        .map_err(|e| bad(500, e.to_string()))?
+        .map_err(|e| bad(409, e))?;
+    tracing::warn!("{}: deploying image {} to a client disk", w.name, img.name);
+    Ok(axum::Json(serde_json::json!({
+        "total": disk.len,
+        "firmware": firmware,
+        "stamp": stamp(&q.name),
+        "ranges": disk.data_ranges(),
+    })))
+}
+
+/// GET /api/images/deploy-chunk?name=&stamp=&offset=&len= (owner) — `len` (≤ 16 MB) bytes of that whole disk.
+pub(crate) async fn deploy_chunk(
+    axum::extract::State(st): axum::extract::State<SharedState>,
+    axum::extract::Query(q): axum::extract::Query<DeployQ>,
+) -> Result<Vec<u8>, (axum::http::StatusCode, String)> {
+    let (_, src) = deploy_image(&st, &q.name)?;
+    if q.stamp.is_empty() || q.stamp != stamp(&q.name) {
+        return Err(bad(
+            409,
+            "the image changed meanwhile (published again) — deploy again".into(),
+        ));
+    }
+    let (off, len) = (q.offset, q.len.min(crate::images::CHUNK_MAX as u64));
+    let name = q.name.clone();
+    tokio::task::spawn_blocking(move || {
+        let (disk, _) = full_disk(&name, "windows", &src)?;
+        if off.checked_add(len).is_none_or(|e| e > disk.len) {
+            return Err("past the end of the disk".to_string());
+        }
+        let mut buf = vec![0u8; len as usize];
+        disk.read_at(off, &mut buf)?;
+        Ok(buf)
+    })
+    .await
+    .map_err(|e| bad(500, e.to_string()))?
+    .map_err(|e| bad(400, e))
+}
+
+#[derive(Deserialize)]
+pub(crate) struct DeployQ {
+    name: String,
+    #[serde(default)]
+    stamp: String,
+    #[serde(default)]
+    offset: u64,
+    #[serde(default)]
+    len: u64,
+}
+
+fn bad(code: u16, msg: String) -> (axum::http::StatusCode, String) {
+    (
+        axum::http::StatusCode::from_u16(code).unwrap_or(axum::http::StatusCode::BAD_REQUEST),
+        msg,
+    )
+}
+
+/// A Windows image with a golden and no job running → (its row, image.img).
+fn deploy_image(
+    st: &SharedState,
+    name: &str,
+) -> Result<(crate::db::Image, PathBuf), (axum::http::StatusCode, String)> {
+    let img = st
+        .db
+        .image_by_name(name)
+        .map_err(|e| bad(500, e.to_string()))?
+        .filter(|i| i.os == "windows")
+        .ok_or_else(|| bad(404, format!("no Windows image {name:?}")))?;
+    if st
+        .jobs
+        .lock()
+        .get(name)
+        .is_some_and(|s| s.starts_with('⏳'))
+    {
+        return Err(bad(
+            409,
+            format!("image {name} has a running job — wait for it to finish"),
+        ));
+    }
+    let src = crate::images_dir().join(name).join("image.img");
+    if !src.is_file() {
+        return Err(bad(404, format!("image {name} has no golden yet")));
+    }
+    Ok((img, src))
+}
+
+/// Which golden image.img holds now (inode + change time): a new upload replaces the file, a publish trims it.
+fn stamp(name: &str) -> String {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::metadata(crate::images_dir().join(name).join("image.img"))
+        .map(|m| format!("{}-{}-{}", m.ino(), m.ctime(), m.ctime_nsec()))
+        .unwrap_or_default()
 }
 
 /// Export on the Images page: {version, size, created} or null.

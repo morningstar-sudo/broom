@@ -45,6 +45,8 @@ pub fn routes() -> Router<SharedState> {
         .route("/api/images/export", post(export))
         .route("/api/images/from-version", post(from_version))
         .route("/api/images/export-file", get(export_file))
+        .route("/api/images/deploy-map", get(crate::export::deploy_map)) // a client's Deploy (capture.rs)
+        .route("/api/images/deploy-chunk", get(crate::export::deploy_chunk))
 }
 
 /// Image name by id, 404 if missing.

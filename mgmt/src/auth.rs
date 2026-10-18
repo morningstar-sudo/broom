@@ -123,6 +123,8 @@ pub(crate) fn staff_may(method: &axum::http::Method, path: &str) -> bool {
     const OWNER_GET: &[&str] = &[
         "/api/machines/export.csv",
         "/api/images/export-file",
+        "/api/images/deploy-map",
+        "/api/images/deploy-chunk",
         "/api/users",
     ];
     const STAFF_POST: &[&str] = &[

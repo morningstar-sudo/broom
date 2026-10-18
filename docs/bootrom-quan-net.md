@@ -107,6 +107,9 @@ boot mạng máy đó và chọn **[C] Capture** ở cuối menu boot. Chọn �
 (không ghi gì), chỉ gửi phần Windows đang dùng (ổ 1 TB dùng 40 GB → gửi khoảng 40 GB) rồi publish image. Tắt
 BitLocker trước (`manage-bde -off C:`), và để ổ C: nhỏ thôi: máy trạm nào cũng thấy ổ C: đúng bằng cỡ đó.
 
+**Sửa image trên máy thật.** Cũng menu đó, chọn **Deploy**: Broom ghi image xuống ổ của một máy (ổ bị xoá sạch), máy
+boot thẳng vào Windows đó. Cài / sửa app, chạy lại lệnh prep, rồi Capture lên lại.
+
 ### 5. Thêm máy trạm và boot
 
 Thêm các máy ở trang **Machines** trước lần boot Windows đầu tiên — máy đã đăng ký và chỉ có một ổ trong thì Broom tự

@@ -290,6 +290,64 @@ pub fn write_single_gpt(path: &str, start: u64, size: u64) -> Result<(), String>
     f.sync_all().map_err(|e| e.to_string())
 }
 
+/// A GPT disk image written onto a bigger disk (Deploy, capture.rs): the backup header + entries go to the disk's
+/// real end, the primary header points there and may use the space up to it, the protective MBR covers it. The old
+/// backup header is zeroed. Ok(false) = no GPT, or already at the end.
+pub fn move_backup_gpt(path: &str) -> Result<bool, String> {
+    let f = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(path)
+        .map_err(|e| format!("{path}: {e}"))?;
+    let len = size(&f).map_err(|e| format!("{path}: {e}"))?;
+    let w = |off: u64, b: &[u8]| {
+        f.write_all_at(b, off)
+            .map_err(|e| format!("write {path} at {off}: {e}"))
+    };
+    for ss in [512u64, 4096] {
+        if len < ss * 2 || &rd(&f, ss, 92)?[..8] != b"EFI PART" {
+            continue;
+        }
+        let hsize = (u32le(&rd(&f, ss, 92)?, 12) as usize).clamp(92, 512);
+        let mut h = rd(&f, ss, hsize)?;
+        let (last, old) = (len / ss - 1, u64le(&h, 32));
+        if old == last {
+            return Ok(false);
+        }
+        let (n, esize) = (u32le(&h, 80) as u64, u32le(&h, 84) as u64);
+        let ent_sectors = (n * esize).div_ceil(ss);
+        if old > last || ent_sectors + 2 >= last {
+            return Err(format!("{path}: GPT does not fit this disk"));
+        }
+        let ents = rd(&f, u64le(&h, 72) * ss, (n * esize) as usize)?;
+        let seal = |h: &mut Vec<u8>| {
+            h[16..20].fill(0);
+            let c = crc32fast::hash(h);
+            h[16..20].copy_from_slice(&c.to_le_bytes());
+        };
+        h[32..40].copy_from_slice(&last.to_le_bytes()); // alternate LBA
+        h[48..56].copy_from_slice(&(last - ent_sectors - 1).to_le_bytes()); // last usable LBA
+        seal(&mut h);
+        let mut b = h.clone();
+        b[24..32].copy_from_slice(&last.to_le_bytes()); // my LBA
+        b[32..40].copy_from_slice(&1u64.to_le_bytes());
+        b[72..80].copy_from_slice(&(last - ent_sectors).to_le_bytes()); // its entries
+        seal(&mut b);
+        w((last - ent_sectors) * ss, &ents)?;
+        w(last * ss, &b)?;
+        w(ss, &h)?;
+        w(old * ss, &vec![0u8; ss as usize])?;
+        // Protective MBR (type ee): its size field covers the whole disk again (capped at 32 bits).
+        let mbr = rd(&f, 0, 512)?;
+        if mbr[450] == 0xee {
+            w(446 + 12, &(last.min(u32::MAX as u64) as u32).to_le_bytes())?;
+        }
+        f.sync_all().map_err(|e| e.to_string())?;
+        return Ok(true);
+    }
+    Ok(false)
+}
+
 /// I/O threads for image conversions: the CPU count, 2..=8 (more only queues behind the disk).
 pub fn workers() -> usize {
     std::thread::available_parallelism()

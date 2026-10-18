@@ -77,6 +77,9 @@ network-boot it and pick **[C] Capture** at the bottom of the boot menu. Choose 
 owner account: Broom reads the disk (never writes it), sends only the space Windows uses and publishes the image.
 Decrypt BitLocker first (`manage-bde -off C:`), and keep C: small: every client gets a C: that size.
 
+**Update a golden on a real PC.** The same menu, choice **Deploy**, writes an image onto a machine's disk (the disk
+is erased) so it boots that Windows natively: change the apps, run the prep command again, then Capture it back.
+
 ### 5. Register the machines and boot
 
 Add the PCs on the **Machines** page before their first Windows boot — on a registered PC with exactly one internal

@@ -1,8 +1,11 @@
 // capture.rs — `bootrom-mgmt capture <server>`: runs on a client PC (boot menu [C] → the Windows stage in capture mode
-// downloads this binary from /broom-capture) and sends its Windows disk to the server as an image's new golden,
-// through the web's own upload API, signed in with an owner account typed on the screen. The disk is only read.
-// Sent: the partition tables (first + last MiB), the clusters in use of each NTFS partition ($Bitmap), every other
-// partition whole. Everything else stays a hole in the server's upload, which converts + publishes like an .img.
+// downloads this binary from /broom-capture), signed in with an owner account typed on the screen, through the web's
+// own API. Two ways:
+// - Capture: the PC's Windows disk → an image's new golden (upload API). The disk is only read. Sent: the partition
+//   tables (first + last MiB), the clusters in use of each NTFS partition ($Bitmap), every other partition whole.
+//   Everything else stays a hole in the server's upload, which converts + publishes like an .img.
+// - Deploy: an image's whole disk (export.rs: the golden with its boot partitions) → this PC's disk, as real data
+//   (no VHDX): Windows boots natively from it — edit it, run the prep again, Capture it back.
 use parking_lot::Mutex;
 use std::fs::File;
 use std::io::{BufRead, Write};
@@ -18,6 +21,8 @@ const CHUNK: u64 = crate::images::CHUNK_MAX as u64;
 const THREADS: usize = 4;
 /// An NTFS partition above this is likely the PC's whole disk: every client would get a C: that big.
 const BIG_PART: u64 = 256 << 30;
+/// Left by a Deploy for the stage: "<disk> <ESP partition number>" → a firmware boot entry for the new Windows.
+const DEPLOYED: &str = "/run/broom-deploy";
 
 pub fn run(args: &[String]) -> ! {
     let code = match args.get(2) {
@@ -25,10 +30,10 @@ pub fn run(args: &[String]) -> ! {
             eprintln!("usage: bootrom-mgmt capture <server ip>");
             2
         }
-        Some(srv) => match capture(srv) {
+        Some(srv) => match tool(srv) {
             Ok(()) => 0,
             Err(e) => {
-                println!("\nCapture stopped: {e}");
+                println!("\nStopped: {e}");
                 1
             }
         },
@@ -36,13 +41,63 @@ pub fn run(args: &[String]) -> ! {
     std::process::exit(code)
 }
 
-fn capture(srv: &str) -> Result<(), String> {
-    println!("\nbroom Capture: this PC's disk -> a Windows image on {srv}");
-    println!("(the disk is only read, never written)\n");
-    let disks = disks();
-    if disks.is_empty() {
-        return Err("no internal disk found".into());
+fn tool(srv: &str) -> Result<(), String> {
+    println!("\nbroom: this PC's disk <-> the server {srv}\n");
+    let api = login(srv)?;
+    loop {
+        let a = ask(
+            "\n  1) Capture: this PC's disk -> an image on the server (the disk is only read)\n  \
+             2) Deploy: an image on the server -> this PC's disk (the disk is ERASED)\nChoose [1-2]: ",
+        )?;
+        match a.as_str() {
+            "1" => return capture(&api),
+            "2" => return deploy(&api),
+            _ => {}
+        }
     }
+}
+
+/// Sign in with an owner account typed here (asked again after a wrong password or a staff account).
+fn login(srv: &str) -> Result<Api, String> {
+    loop {
+        let user = ask("Owner account [admin]: ")?;
+        let user = if user.is_empty() {
+            "admin".into()
+        } else {
+            user
+        };
+        let api = Api::new(srv, user, ask_secret("Password: ")?);
+        match api.login() {
+            Ok(()) => {}
+            Err((401 | 429, m)) => {
+                println!("  {m}");
+                continue;
+            }
+            Err((_, m)) => return Err(m),
+        }
+        let st: Value = parse(&api.req("GET", "/api/auth/status", b"")?)?;
+        if st["role"] != "owner" {
+            println!("  {} is not an owner account - this needs one", api.user);
+            continue;
+        }
+        return Ok(api);
+    }
+}
+
+/// One of `n` numbered choices (Enter = the only one).
+fn pick(q: &str, n: usize) -> Result<usize, String> {
+    loop {
+        let a = ask(&format!("{q} [1-{n}]: "))?;
+        if a.is_empty() && n == 1 {
+            return Ok(0);
+        }
+        if let Some(i) = a.parse::<usize>().ok().filter(|i| (1..=n).contains(i)) {
+            return Ok(i - 1);
+        }
+    }
+}
+
+fn show_disks(disks: &[Disk]) {
     for (i, d) in disks.iter().enumerate() {
         println!(
             "  [{}] {:<14} {:>9}  {}",
@@ -52,22 +107,15 @@ fn capture(srv: &str) -> Result<(), String> {
             d.model
         );
     }
-    let disk = loop {
-        let a = ask(&format!("Disk with Windows [1-{}]: ", disks.len()))?;
-        let a = if a.is_empty() && disks.len() == 1 {
-            "1".into()
-        } else {
-            a
-        };
-        if let Some(d) = a
-            .parse::<usize>()
-            .ok()
-            .and_then(|n| n.checked_sub(1))
-            .and_then(|i| disks.get(i))
-        {
-            break d;
-        }
-    };
+}
+
+fn capture(api: &Api) -> Result<(), String> {
+    let disks = disks();
+    if disks.is_empty() {
+        return Err("no internal disk found".into());
+    }
+    show_disks(&disks);
+    let disk = &disks[pick("Disk with Windows", disks.len())?];
 
     println!("\nReading the partitions of {} ...", disk.dev);
     let plan = plan(&disk.dev)?;
@@ -94,30 +142,6 @@ fn capture(srv: &str) -> Result<(), String> {
         }
         println!("  1-64 letters, digits, _ or -");
     };
-    let api = loop {
-        let user = ask("Owner account [admin]: ")?;
-        let user = if user.is_empty() {
-            "admin".into()
-        } else {
-            user
-        };
-        let api = Api::new(srv, user, ask_secret("Password: ")?);
-        match api.login() {
-            Ok(()) => {}
-            Err((401 | 429, m)) => {
-                println!("  {m}");
-                continue;
-            }
-            Err((_, m)) => return Err(m),
-        }
-        let st: Value = parse(&api.req("GET", "/api/auth/status", b"")?)?;
-        if st["role"] != "owner" {
-            println!("  {} is not an owner account - Capture needs one", api.user);
-            continue;
-        }
-        break api;
-    };
-
     let images: Value = parse(&api.req("GET", "/api/images", b"")?)?;
     let existing = images
         .as_array()
@@ -143,10 +167,194 @@ fn capture(srv: &str) -> Result<(), String> {
     }
     let b = json!({"name": name}).to_string();
     api.req("POST", "/api/images/upload-start", b.as_bytes())?;
-    send(&api, &disk.dev, &name, plan.size, &plan.ranges)?;
+    send(api, &disk.dev, &name, plan.size, &plan.ranges)?;
     api.req("POST", "/api/images/upload-done", b.as_bytes())?;
     println!("\nAll sent. The server now converts + publishes the image (a few minutes):");
-    wait_job(&api, &name)
+    wait_job(api, &name)
+}
+
+fn deploy(api: &Api) -> Result<(), String> {
+    let images: Value = parse(&api.req("GET", "/api/images", b"")?)?;
+    let images: Vec<&Value> = images
+        .as_array()
+        .map(|v| {
+            v.iter()
+                .filter(|i| i["os"] == "windows" && i["size"].is_u64())
+                .collect()
+        })
+        .unwrap_or_default();
+    if images.is_empty() {
+        return Err("no Windows image with a golden on the server".into());
+    }
+    for (i, img) in images.iter().enumerate() {
+        println!(
+            "  [{}] {:<24} {:>9}",
+            i + 1,
+            img["name"].as_str().unwrap_or(""),
+            size_str(img["size"].as_u64().unwrap_or(0))
+        );
+    }
+    let name = images[pick("Image to deploy", images.len())?]["name"]
+        .as_str()
+        .unwrap_or("")
+        .to_string();
+    let map: Value =
+        parse(&api.req("GET", &format!("/api/images/deploy-map?name={name}"), b"")?)?;
+    let total = map["total"].as_u64().ok_or("server answer: no size")?;
+    let stamp = map["stamp"].as_str().unwrap_or("").to_string();
+    let ranges: Vec<(u64, u64)> = map["ranges"]
+        .as_array()
+        .map(|v| {
+            v.iter()
+                .filter_map(|r| Some((r[0].as_u64()?, r[1].as_u64()?)))
+                .map(|(s, e)| (s, e - s))
+                .collect()
+        })
+        .unwrap_or_default();
+    if map["firmware"] == "bios" && std::path::Path::new("/sys/firmware/efi").exists() {
+        println!(
+            "\nWARNING: {name} boots with BIOS (MBR), this PC started in UEFI mode: it won't boot it as it is."
+        );
+        if !yes("Deploy anyway?")? {
+            return Err("stopped by the user".into());
+        }
+    }
+
+    println!("\n{name} needs a disk of at least {}:", size_str(total));
+    let disks: Vec<Disk> = disks().into_iter().filter(|d| d.size >= total).collect();
+    if disks.is_empty() {
+        return Err(format!("no disk in this PC holds {}", size_str(total)));
+    }
+    show_disks(&disks);
+    let disk = &disks[pick("Disk to write it to", disks.len())?];
+    let parts = crate::disk::read(&disk.dev)
+        .ok()
+        .flatten()
+        .map_or(0, |t| t.parts.len());
+    println!(
+        "\n{} has {parts} partition(s) now - ALL of it is erased.",
+        disk.dev
+    );
+    if broom_ssd(&disk.dev) {
+        println!(
+            "It is this PC's Broom SSD: its cached images and Windows go; the stage sets it up again at a later PXE boot."
+        );
+    }
+    let short = disk.dev.rsplit('/').next().unwrap_or(&disk.dev).to_string();
+    if ask(&format!("Type {short} to erase it and write {name}: "))? != short {
+        return Err("stopped by the user".into());
+    }
+
+    let f = std::fs::OpenOptions::new()
+        .write(true)
+        .open(&disk.dev)
+        .map_err(|e| format!("{}: {e}", disk.dev))?;
+    discard(&f, disk.size);
+    let list = pieces(&ranges, CHUNK);
+    let t0 = Instant::now();
+    run_pieces(&list, |off, b| {
+        let path = format!(
+            "/api/images/deploy-chunk?name={name}&stamp={stamp}&offset={off}&len={}",
+            b.len()
+        );
+        let data = retry(|| api.call("GET", &path, b""))?;
+        if data.len() != b.len() {
+            return Err(format!("short answer at {off}"));
+        }
+        f.write_all_at(&data, off)
+            .map_err(|e| format!("write {} at {off}: {e}", disk.dev))?;
+        Ok(true)
+    })?;
+    // What the image has as holes must read back as zeros (empty FAT / $Bitmap areas, the rest of the GPT array):
+    // TRIM does not promise that, so they are zeroed for real.
+    println!("  zeroing the rest of the image's {}", size_str(total));
+    let mut at = 0;
+    for &(s, len) in ranges.iter().chain([(total, 0)].iter()) {
+        if s > at {
+            zero(&f, at, s - at).map_err(|e| format!("{}: zero at {at}: {e}", disk.dev))?;
+        }
+        at = at.max(s + len);
+    }
+    f.sync_all().map_err(|e| format!("{}: {e}", disk.dev))?;
+    drop(f);
+    if crate::disk::move_backup_gpt(&disk.dev)? {
+        println!(
+            "  partition table moved to the end of the bigger disk (extend C: in Windows if needed)"
+        );
+    }
+    println!(
+        "  written {} in {}",
+        size_str(list.iter().map(|p| p.1).sum()),
+        mins(t0.elapsed().as_secs_f64())
+    );
+    // The firmware needs a boot entry on this disk's EFI partition: the stage makes it (efibootmgr).
+    let esp = crate::disk::read(&disk.dev)?.and_then(|t| {
+        t.parts
+            .iter()
+            .position(|p| p.kind.eq_ignore_ascii_case(crate::disk::ESP) || p.kind == "ef")
+    });
+    if let (Some(i), true) = (esp, disk.dev.starts_with("/dev/")) {
+        let _ = std::fs::write(DEPLOYED, format!("{short} {}\n", i + 1));
+    }
+    println!(
+        "\n{name} is on {}. Next: it starts Windows from this disk (setup runs once).",
+        disk.dev
+    );
+    println!(
+        "Edit it, run the prep command again (it shuts down), then PXE-boot and Capture it back."
+    );
+    Ok(())
+}
+
+/// The disk holds broom's partitions (BROOMEFI / BROOMWIN, by their GPT names in sysfs).
+fn broom_ssd(dev: &str) -> bool {
+    let n = dev.rsplit('/').next().unwrap_or(dev);
+    std::fs::read_dir(format!("/sys/block/{n}"))
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|e| e.file_name().to_string_lossy().starts_with(n))
+        .any(|e| {
+            std::fs::read_to_string(e.path().join("uevent")).is_ok_and(|u| {
+                u.lines()
+                    .any(|l| l == "PARTNAME=BROOMEFI" || l == "PARTNAME=BROOMWIN")
+            })
+        })
+}
+
+/// Zeros over [off, off+len): the disk does it itself (BLKZEROOUT: write-zeroes / unmap on SSDs, fast); a file gets
+/// a hole; else written.
+fn zero(f: &File, off: u64, len: u64) -> std::io::Result<()> {
+    use std::os::fd::AsRawFd;
+    const BLKZEROOUT: libc::c_ulong = 0x127f; // _IO(0x12, 127)
+    let range = [off, len];
+    // SAFETY: BLKZEROOUT reads two u64 (start, length) from the pointer.
+    if unsafe { libc::ioctl(f.as_raw_fd(), BLKZEROOUT as _, range.as_ptr()) } == 0 {
+        return Ok(());
+    }
+    // SAFETY: fallocate on an open fd, no memory involved.
+    let punch = libc::FALLOC_FL_PUNCH_HOLE | libc::FALLOC_FL_KEEP_SIZE;
+    if unsafe { libc::fallocate(f.as_raw_fd(), punch, off as i64, len as i64) } == 0 {
+        return Ok(());
+    }
+    let buf = vec![0u8; CHUNK as usize];
+    let mut done = 0;
+    while done < len {
+        let n = (len - done).min(CHUNK) as usize;
+        f.write_all_at(&buf[..n], off + done)?;
+        done += n as u64;
+    }
+    Ok(())
+}
+
+/// TRIM the whole disk before writing: the old data is gone, and what is not written reads back as zeros (the next
+/// Capture skips it). Not a block device / no TRIM: nothing.
+fn discard(f: &File, len: u64) {
+    use std::os::fd::AsRawFd;
+    const BLKDISCARD: libc::c_ulong = 0x1277; // _IO(0x12, 119)
+    let range = [0u64, len];
+    // SAFETY: BLKDISCARD reads two u64 (start, length) from the pointer; any error is ignored.
+    unsafe { libc::ioctl(f.as_raw_fd(), BLKDISCARD as _, range.as_ptr()) };
 }
 
 /// A disk of this machine.
@@ -330,8 +538,36 @@ pub(crate) fn pieces(r: &[(u64, u64)], max: u64) -> Vec<(u64, u64)> {
 fn send(api: &Api, dev: &str, name: &str, size: u64, ranges: &[(u64, u64)]) -> Result<(), String> {
     let f = File::open(dev).map_err(|e| format!("{dev}: {e}"))?;
     let list = pieces(ranges, CHUNK);
+    let t0 = Instant::now();
+    let sent = run_pieces(&list, |off, b| {
+        f.read_exact_at(b, off)
+            .map_err(|e| format!("read {dev} at {off}: {e}"))?;
+        // All zeros: already a hole on the server.
+        if b.iter().all(|&x| x == 0) {
+            return Ok(false);
+        }
+        let path =
+            format!("/api/images/upload-chunk?name={name}&file=disk.img&offset={off}&total={size}");
+        retry(|| api.call("PUT", &path, b))?;
+        Ok(true)
+    })?;
+    println!(
+        "  read {} in {}, sent {} (the rest was zeros)",
+        size_str(list.iter().map(|p| p.1).sum()),
+        mins(t0.elapsed().as_secs_f64()),
+        size_str(sent)
+    );
+    Ok(())
+}
+
+/// `work(offset, buffer of that piece's length)` over every piece, THREADS at a time, with a progress line; the first
+/// error stops the rest. Ok(bytes of the pieces `work` said it moved).
+fn run_pieces(
+    list: &[(u64, u64)],
+    work: impl Fn(u64, &mut [u8]) -> Result<bool, String> + Sync,
+) -> Result<u64, String> {
     let total: u64 = list.iter().map(|p| p.1).sum();
-    let (next, done, sent) = (AtomicUsize::new(0), AtomicU64::new(0), AtomicU64::new(0));
+    let (next, done, moved) = (AtomicUsize::new(0), AtomicU64::new(0), AtomicU64::new(0));
     let stop = AtomicBool::new(false);
     let failed = Mutex::new(None::<String>);
     let t0 = Instant::now();
@@ -343,20 +579,11 @@ fn send(api: &Api, dev: &str, name: &str, size: u64, ranges: &[(u64, u64)]) -> R
                     let Some(&(off, len)) = list.get(next.fetch_add(1, Relaxed)) else {
                         break;
                     };
-                    let b = &mut buf[..len as usize];
-                    let r = f
-                        .read_exact_at(b, off)
-                        .map_err(|e| format!("read {dev} at {off}: {e}"))
-                        .and_then(|()| {
-                            // All zeros: already a hole on the server.
-                            if b.iter().all(|&x| x == 0) {
-                                return Ok(());
+                    match work(off, &mut buf[..len as usize]) {
+                        Ok(m) => {
+                            if m {
+                                moved.fetch_add(len, Relaxed);
                             }
-                            sent.fetch_add(len, Relaxed);
-                            put(api, name, off, size, b)
-                        });
-                    match r {
-                        Ok(()) => {
                             done.fetch_add(len, Relaxed);
                         }
                         Err(e) => {
@@ -369,8 +596,7 @@ fn send(api: &Api, dev: &str, name: &str, size: u64, ranges: &[(u64, u64)]) -> R
         }
         loop {
             let d = done.load(Relaxed);
-            let secs = t0.elapsed().as_secs_f64().max(0.1);
-            let rate = d as f64 / secs;
+            let rate = d as f64 / t0.elapsed().as_secs_f64().max(0.1);
             let left = if rate > 0.0 {
                 format!("{} left", mins((total - d) as f64 / rate))
             } else {
@@ -390,29 +616,21 @@ fn send(api: &Api, dev: &str, name: &str, size: u64, ranges: &[(u64, u64)]) -> R
         }
     });
     println!();
-    if let Some(e) = failed.into_inner() {
-        return Err(e);
+    match failed.into_inner() {
+        Some(e) => Err(e),
+        None => Ok(moved.into_inner()),
     }
-    println!(
-        "  read {} in {}, sent {} (the rest was zeros)",
-        size_str(total),
-        mins(t0.elapsed().as_secs_f64()),
-        size_str(sent.into_inner())
-    );
-    Ok(())
 }
 
-/// One chunk, tried 3 times when the network or the server fails (a refusal is final).
-fn put(api: &Api, name: &str, off: u64, total: u64, b: &[u8]) -> Result<(), String> {
-    let path =
-        format!("/api/images/upload-chunk?name={name}&file=disk.img&offset={off}&total={total}");
+/// A request tried 3 times when the network or the server fails (a refusal is final).
+fn retry<T>(f: impl Fn() -> Result<T, (u16, String)>) -> Result<T, String> {
     let mut last = String::new();
     for i in 0..3 {
         if i > 0 {
             std::thread::sleep(Duration::from_secs(3));
         }
-        match api.call("PUT", &path, b) {
-            Ok(_) => return Ok(()),
+        match f() {
+            Ok(v) => return Ok(v),
             Err((c, e)) if c == 0 || c >= 500 => last = e,
             Err((_, e)) => return Err(e),
         }
@@ -481,13 +699,13 @@ impl Api {
         }
     }
 
-    /// One request → (status, body, the session cookie it set).
+    /// One request → (status, body, the session cookie it set). Bodies up to 32 MB (a 16 MB Deploy chunk).
     fn raw(
         &self,
         method: &str,
         path: &str,
         body: &[u8],
-    ) -> Result<(u16, String, Option<String>), String> {
+    ) -> Result<(u16, Vec<u8>, Option<String>), String> {
         let url = format!("{}{path}", self.base);
         let ck = self.cookie.lock().clone();
         let r = match method {
@@ -511,8 +729,13 @@ impl Api {
             .and_then(|v| v.to_str().ok())
             .and_then(|v| v.split(';').next())
             .map(str::to_string);
-        let text = r.body_mut().read_to_string().unwrap_or_default();
-        Ok((r.status().as_u16(), text, set))
+        let body = r
+            .body_mut()
+            .with_config()
+            .limit(32 << 20)
+            .read_to_vec()
+            .map_err(|e| format!("{url}: {e}"))?;
+        Ok((r.status().as_u16(), body, set))
     }
 
     /// Start a session. Err((status, message)); status 0 = no answer.
@@ -526,12 +749,15 @@ impl Api {
                 *self.cookie.lock() = c;
                 Ok(())
             }
-            _ => Err((code, format!("login: {}", text.trim()))),
+            _ => Err((
+                code,
+                format!("login: {}", String::from_utf8_lossy(&text).trim()),
+            )),
         }
     }
 
     /// A request in the session (signed in again once when it ran out). Err((status, message)); 0 = no answer.
-    fn call(&self, method: &str, path: &str, body: &[u8]) -> Result<String, (u16, String)> {
+    fn call(&self, method: &str, path: &str, body: &[u8]) -> Result<Vec<u8>, (u16, String)> {
         let mut again = true;
         loop {
             let (code, text, _) = self.raw(method, path, body).map_err(|e| (0, e))?;
@@ -543,6 +769,7 @@ impl Api {
                 }
                 _ => {
                     let p = path.split('?').next().unwrap_or(path);
+                    let text = String::from_utf8_lossy(&text);
                     return Err((code, format!("{p}: {code} {}", text.trim())));
                 }
             }
@@ -550,7 +777,9 @@ impl Api {
     }
 
     fn req(&self, method: &str, path: &str, body: &[u8]) -> Result<String, String> {
-        self.call(method, path, body).map_err(|e| e.1)
+        self.call(method, path, body)
+            .map(|b| String::from_utf8_lossy(&b).into_owned())
+            .map_err(|e| e.1)
     }
 }
 

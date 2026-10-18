@@ -269,6 +269,13 @@ sent, in parallel 8 MB chunks with retry) — or a single `.vmdk` / `.img` / `.z
   its new golden (its saved versions stay). Then it converts + publishes like an upload. It refuses a BitLocker
   disk (`manage-bde -off C:` first) and warns about a hibernated (Fast Startup) or unclean volume. Keep C: small: a
   client gets a C: as big as the captured partition. Needs the release (static) binary and the stage installed.
+- **Edit a golden on a real PC (Deploy)** — the same **[C]** menu, choice 2: pick a Windows image and a disk at
+  least as big as the golden's VM disk; after typing the disk's name it is **erased** and the image's whole disk is
+  written onto it as real data (no VHDX) — the golden plus the boot partitions kept from its upload, same partition
+  IDs, so its own boot loader starts it. A bigger disk gets its backup GPT moved to the end (extend C: in Windows if
+  you need the room). The stage adds a firmware boot entry and restarts into it: Windows sets itself up once (as a
+  client would), then install / change apps, run the prep script again, PXE-boot and **Capture** it back. An image
+  published before its boot partitions were kept needs its VM uploaded once more.
 - **Base build on each machine:** on its first boot (and after a new golden, a rename or a driver change) every
   Windows machine specializes the golden once and saves that as its *base*; every later boot resets to it. By default
   the base is saved automatically (the machine restarts by itself after the first logon). Tick **Base mode** on an

@@ -41,9 +41,10 @@ for a in $(cat /proc/cmdline); do
     broom.host=*) HOST=${a#*=};; broom.lic=*) LIC=${a#*=};; BOOTIF=01-*) MAC=$(echo "${a#BOOTIF=01-}" | tr - :);;
     broom.reg=*) REG=${a#*=};; broom.base=*) BASE=${a#*=};; broom.strict=*) STRICT=${a#*=};; broom.lxgb=*) LX=${a#*=};; broom.wbgb=*) WB=${a#*=};; esac
 done
-# Capture (boot menu [C]): this PC's disk -> an image on the server. Nothing below runs (no disk is touched): only the
-# network, then the server's own binary, which reads the disk and asks on screen. Into /broom (the initramfs root,
-# RAM): /run is mounted noexec.
+# Capture / deploy (boot menu [C]): this PC's disk -> an image on the server, or an image -> this PC's disk. Nothing
+# below runs: only the network, then the server's own binary, which asks on screen and does the disk work. Into
+# /broom (the initramfs root, RAM): /run is mounted noexec. After a Deploy (/run/broom-deploy = "<disk> <ESP number>")
+# a firmware entry for the new Windows, booted next (BootNext; the order keeps PXE first).
 if [ "$CAPTURE" = 1 ]; then
   [ -n "$SRV" ] || die "missing broom.srv on cmdline"
   udevadm settle 2>/dev/null
@@ -53,6 +54,18 @@ if [ "$CAPTURE" = 1 ]; then
     /broom/bootrom-mgmt capture "$SRV" < /dev/console > /dev/console 2>&1
   else
     echo "broom: could not download the capture tool from $SRV" > /dev/console
+  fi
+  if read -r dd dp < /run/broom-deploy 2>/dev/null; then
+    modprobe efivarfs 2>/dev/null; mount -t efivarfs efivarfs /sys/firmware/efi/efivars 2>/dev/null
+    for s in $(efibootmgr | grep "Windows (deployed)" | sed -n 's/^Boot\([0-9A-Fa-f]\{4\}\).*/\1/p'); do efibootmgr -q -b $s -B; done
+    old=$(efibootmgr | sed -n 's/^BootOrder: //p')
+    if efibootmgr -q -c -d /dev/$dd -p $dp -L "Windows (deployed)" -l '\EFI\Microsoft\Boot\bootmgfw.efi'; then
+      n=$(efibootmgr | grep "Windows (deployed)" | sed -n 's/^Boot\([0-9A-Fa-f]\{4\}\).*/\1/p' | head -n 1)
+      [ -n "$old" ] && efibootmgr -q -o "$old,$n"
+      efibootmgr -q -n $n && echo "broom: next boot: Windows on /dev/$dd" > /dev/console
+    else
+      echo "broom: could not add a boot entry for /dev/$dd - pick its disk in the firmware boot menu" > /dev/console
+    fi
   fi
   printf 'broom: press Enter to restart ' > /dev/console; read -r ans < /dev/console
   restart "capture finished"
