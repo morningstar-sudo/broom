@@ -187,11 +187,11 @@ fn forwarder_answers() {
 async fn forwards_live() {
     let ups = [Ipv4Addr::new(1, 1, 1, 1)];
     let q = query(0x7777, "example.org", 1, true);
-    let r = parse(&answer_query(&q, &ups, false).await.unwrap()).unwrap();
+    let r = parse(&answer_query(&q, &ups).await.unwrap()).unwrap();
     assert_eq!((r.id, r.rcode()), (0x7777, 0));
     assert!(r.an.iter().any(|x| x.rtype == T_A));
     let t = Instant::now();
-    answer_query(&q, &[], false).await.unwrap();
+    answer_query(&q, &[]).await.unwrap();
     assert!(
         t.elapsed() < Duration::from_millis(5),
         "cached: no forwarder needed"

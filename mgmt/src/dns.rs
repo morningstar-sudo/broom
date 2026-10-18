@@ -1,7 +1,8 @@
 // dns.rs — the clients' DNS server (Network page, off by default). With it on, the built-in DHCP hands out this server
-// as the only DNS, and a name is resolved — asked of the resolvers listed on the DNS card (else the DHCP card's list,
-// else the gateway), or recursively from the root servers with those as the fallback; answers cached for their TTL
-// either way (dnsrec.rs) — only for a machine that is healthy: its Remote agent connected (it proved its key, agentauth.rs), or it PXE-booted
+// as the only DNS, and a name is resolved — passthrough: the query goes as it is to the DNS servers listed on the
+// DNS card (else the DHCP card's list, else the gateway); recursive: answered from this server's cache, else asked of
+// those servers and cached (dnsrec.rs) — only for a machine that is healthy: its Remote agent connected (it proved its
+// key, agentauth.rs), or it PXE-booted
 // a few minutes ago (Windows and the launchers want the network before the agent is up), or it is exempt (a group or an
 // IP / range: the cashier, staff PCs, Linux machines…). Anything else gets REFUSED: a machine whose agent was killed,
 // one that started Windows from its SSD without the stage, a laptop plugged into the LAN.
@@ -48,8 +49,8 @@ pub fn on(st: &SharedState) -> bool {
     st.db.get_config("dns_mode", "off") == "on"
 }
 
-/// How names are resolved, cached either way (dnsrec.rs): "forward" (asked of the resolvers of `upstream`) or
-/// "recursive" (from the root servers, `upstream` as the fallback).
+/// How names are resolved: "passthrough" (each query passed to the DNS servers of `upstream` as it is, nothing kept;
+/// an older "forward" too) or "recursive" (the cache, then those servers, then the root servers — dnsrec.rs).
 pub fn recursive(st: &SharedState) -> bool {
     st.db.get_config("dns_resolve", "forward") == "recursive"
 }
@@ -288,17 +289,65 @@ where
     forward(q.to_vec()).await
 }
 
-/// How names are resolved: forwarded to `ups` (they resolve), or here from the root servers with `ups` as the
-/// fallback. Either way through the cache (dnsrec.rs).
+/// How names are resolved. Passthrough: each query goes to the DNS servers `ups` as it is, nothing kept. Recursive:
+/// the cache first, then `ups` (cached), the root servers when none is listed / answers (dnsrec.rs).
 #[derive(Clone)]
 struct How {
     recursive: bool,
     ups: Vec<Ipv4Addr>,
 }
 
-/// A query resolved for a UDP client, cut to what the client takes over UDP (it asks again over TCP).
+/// What a DNS server gets to answer in passthrough mode.
+const UPSTREAM_WAIT: Duration = Duration::from_secs(2);
+
+/// Passthrough over UDP: the query as it is to each server in turn; the reply must carry the query's ID.
+async fn forward_udp(q: Vec<u8>, ups: Vec<Ipv4Addr>) -> Option<Vec<u8>> {
+    for up in ups {
+        let Ok(s) = tokio::net::UdpSocket::bind("0.0.0.0:0").await else {
+            continue;
+        };
+        if s.send_to(&q, (up, 53)).await.is_err() {
+            continue;
+        }
+        let mut buf = vec![0u8; 4096];
+        if let Ok(Ok(n)) = tokio::time::timeout(UPSTREAM_WAIT, s.recv(&mut buf)).await
+            && n >= 12
+            && buf[..2] == q[..2]
+        {
+            buf.truncate(n);
+            return Some(buf);
+        }
+    }
+    None
+}
+
+/// Same over TCP (a client retries over TCP when an answer did not fit in UDP).
+async fn forward_tcp(q: Vec<u8>, ups: Vec<Ipv4Addr>) -> Option<Vec<u8>> {
+    for up in ups {
+        let r = tokio::time::timeout(UPSTREAM_WAIT, async {
+            let mut s = tokio::net::TcpStream::connect((up, 53)).await.ok()?;
+            s.write_all(&(q.len() as u16).to_be_bytes()).await.ok()?;
+            s.write_all(&q).await.ok()?;
+            let n = s.read_u16().await.ok()? as usize;
+            let mut buf = vec![0u8; n];
+            s.read_exact(&mut buf).await.ok()?;
+            Some(buf)
+        })
+        .await;
+        if let Ok(Some(b)) = r {
+            return Some(b);
+        }
+    }
+    None
+}
+
+/// A query resolved for a UDP client. Recursive: cut to what the client takes over UDP (it asks again over TCP);
+/// passthrough: the server's own reply (it sized it for the client's own query).
 async fn resolve_udp(q: Vec<u8>, how: How) -> Option<Vec<u8>> {
-    let r = crate::dnsrec::answer_query(&q, &how.ups, how.recursive).await?;
+    if !how.recursive {
+        return forward_udp(q, how.ups).await;
+    }
+    let r = crate::dnsrec::answer_query(&q, &how.ups).await?;
     let (_, size) = crate::dnsrec::client_udp_size(&q);
     Some(if r.len() > size {
         crate::dnsrec::truncated(&r, &q)
@@ -308,7 +357,10 @@ async fn resolve_udp(q: Vec<u8>, how: How) -> Option<Vec<u8>> {
 }
 
 async fn resolve_tcp(q: Vec<u8>, how: How) -> Option<Vec<u8>> {
-    crate::dnsrec::answer_query(&q, &how.ups, how.recursive).await
+    if !how.recursive {
+        return forward_tcp(q, how.ups).await;
+    }
+    crate::dnsrec::answer_query(&q, &how.ups).await
 }
 
 async fn serve_udp(sock: tokio::net::UdpSocket, how: How) {
@@ -390,15 +442,14 @@ pub async fn restart(st: &SharedState) -> Result<String, String> {
         .trim()
         .parse()
         .map_err(|_| "DNS: the server IP is not set (Network page)".to_string())?;
-    // Forward: the resolvers that answer (required); recursive: from the root servers, the forwarders (if any) as
-    // the fallback. Cached either way.
+    // Passthrough needs DNS servers to pass to; recursive asks them on a cache miss (none listed: the root servers).
     let how = How {
         recursive: recursive(st),
         ups: upstream(st),
     };
     if !how.recursive && how.ups.is_empty() {
         return Err(
-            "DNS: no resolver to forward to — enter them on the DNS card (or a gateway), or resolve recursively".into(),
+            "DNS: passthrough needs DNS servers — enter them on the DNS card (or a gateway), or use recursive".into(),
         );
     }
     if how.ups.contains(&server) {
@@ -432,11 +483,11 @@ pub async fn restart(st: &SharedState) -> Result<String, String> {
         .collect::<Vec<_>>()
         .join(", ");
     let how = if !how.recursive {
-        format!("forwarded to {list}, cached")
+        format!("passthrough to {list}")
     } else if list.is_empty() {
-        "resolved here from the root servers, cached".to_string()
+        "recursive: cache, then the root servers".to_string()
     } else {
-        format!("resolved here from the root servers (else {list}), cached")
+        format!("recursive: cache, then {list}")
     };
     Ok(format!(
         "DNS server on {server}:53, {how} — only for healthy machines"
@@ -452,7 +503,7 @@ async fn status(State(st): State<SharedState>) -> Json<serde_json::Value> {
         "exempt_groups": exempt_groups(&st),
         "exempt_ips": st.db.get_config("dns_exempt_ips", ""),
         "grace_min": grace_min(&st),
-        "resolve": st.db.get_config("dns_resolve", "forward"),
+        "resolve": if recursive(&st) { "recursive" } else { "passthrough" },
         "upstream": upstream(&st),
         "cached": crate::dnsrec::cached(),
         "active": active(),
@@ -501,7 +552,7 @@ async fn set(
     let resolve = if b.resolve == "recursive" {
         "recursive"
     } else {
-        "forward"
+        "passthrough"
     };
     let mut ups: Vec<String> = Vec::new();
     for u in b

@@ -578,11 +578,11 @@ async function loadDnsGate(){const box=document.getElementById('dns_groups');if(
   // DNS on: the DHCP card hands out this server — its own DNS list is not used then.
   const on=d.mode==='on';document.getElementById('dhcp_dns_field').hidden=on;document.getElementById('dhcp_dns_self').hidden=!on;
   box.innerHTML=g.groups.map(n=>`<label class="form-check"><input class="form-check-input" type="checkbox" value="${esc(n)}"${d.exempt_groups.some(x=>x.toLowerCase()===n.toLowerCase())?' checked':''}> ${esc(n)}</label>`).join('')||'<span class="mono">no groups yet</span>';
-  const ups=d.upstream.join(', '),how=(d.resolve==='recursive'?'resolving from the root servers'+(ups?' (else '+ups+')':''):'forwarding to '+ups)+` · ${d.cached} answers cached`;
+  const ups=d.upstream.join(', '),how=d.resolve==='recursive'?`recursive: cache (${d.cached} answers), then ${ups||'the root servers'}`:`passthrough to ${ups}`;
   document.getElementById('dnsg_state').textContent=d.active
     ?`Running on ${d.server}:53, ${how} · ${d.allowed} IPs may resolve now`+(d.dhcp_full?'':` · the DHCP server is off: set the router's DHCP DNS to ${d.server}`)
     :'Off: clients use the DNS servers of the DHCP card.';}
-function dnsResolveShow(){const l=document.getElementById('dns_up_label');if(l)l.textContent=v('dns_resolve')==='recursive'?'Fallback (forward to)':'Forward to';}
+function dnsResolveShow(){const l=document.getElementById('dns_up_label');if(l)l.textContent=v('dns_resolve')==='recursive'?'Asked on a cache miss (empty = root servers)':'DNS servers';}
 async function saveDnsGate(){const m=document.getElementById('dnsg_msg');
   const body={mode:v('dns_mode'),resolve:v('dns_resolve'),upstream:v('dns_up').split(/[\s,]+/).filter(Boolean),
     grace_min:+v('dns_grace'),exempt_ips:document.getElementById('dns_ips').value,
@@ -990,7 +990,7 @@ async function loadServices(){const el=document.getElementById('b_svc');if(!el)r
     ${s.dhcp.mode==='full'?row('DHCP server',s.dhcp.running,`:67 on ${s.dhcp.iface||'?'}`+(s.dhcp.running?'':' — could not bind (see Logs)')):row('DHCP server',null,'the LAN\'s own DHCP hands out addresses')}
     ${row('TFTP (iPXE)',s.tftp.running,':69')}
     ${row('iSCSI target',!!i,i?`${i.targets} targets, ${i.sessions} sessions`+(i.clients!=null?`, ${i.clients} clients`:''):'daemon not running')}
-    ${s.dns&&s.dns.on?row('DNS (healthy machines)',s.dns.running,s.dns.running?`:53 ${s.dns.recursive?'recursive':'→ '+s.dns.upstream.join(', ')} · ${s.dns.cached} cached · ${s.dns.allowed} IPs may resolve`:'could not start (see Logs)'):''}
+    ${s.dns&&s.dns.on?row('DNS (healthy machines)',s.dns.running,s.dns.running?`:53 ${s.dns.recursive?'recursive, '+s.dns.cached+' cached':'passthrough → '+s.dns.upstream.join(', ')} · ${s.dns.allowed} IPs may resolve`:'could not start (see Logs)'):''}
     ${row('Remote agents',String(s.agents),'Windows machines connected')}
     ${row('Golden downloads',String(s.golden.running),`running, ${s.golden.waiting} waiting their turn`)}
   </tbody></table>`;}

@@ -1,7 +1,8 @@
-// dnsrec.rs — how the clients' DNS server (dns.rs) gets its answers, with a cache: every answer is kept for its TTL,
-// so a name the room already asked comes from here. Forward (Network page → DNS → Resolve): asked of other resolvers
-// (router, 1.1.1.1…). Recursive: resolved from the root servers down (root → TLD → the domain's own servers), the
-// forwarders as the fallback, so the room depends on no outside DNS service; delegations are cached too.
+// dnsrec.rs — the recursive mode of the clients' DNS server (dns.rs; Network page → DNS → Resolve): every answer is
+// kept for its TTL, so a name the room already asked is answered from here; a new one is asked of the DNS servers on
+// the card (router, 1.1.1.1…) and cached. With none listed, or none answering, it is resolved here from the root
+// servers down (root → TLD → the domain's own servers; delegations cached too) — no outside DNS service needed.
+// (Passthrough mode does not come here: queries go to those servers as they are, nothing cached.)
 // Kept small: IPv4 to the servers, no DNSSEC validation, records re-encoded without name compression (a large answer
 // goes over TCP). A forged reply must guess a random ID and source port and name the question asked; records are only
 // taken from servers responsible for them (in-bailiwick glue, CNAME targets outside the zone looked up separately).
@@ -591,9 +592,9 @@ async fn forward(ups: &[Ipv4Addr], name: &str, qtype: u16) -> Answer {
     servfail()
 }
 
-/// The reply to a client's query `q` (raw). From the cache when it holds the answer; else forwarded to `ups`
-/// (`recursive` false), or resolved here from the root servers — the forwarders as the fallback when that fails.
-pub(crate) async fn answer_query(q: &[u8], ups: &[Ipv4Addr], recursive: bool) -> Option<Vec<u8>> {
+/// The reply to a client's query `q` (raw), recursive mode: from the cache when it holds the answer; else asked of
+/// the DNS servers `ups` and cached — with none listed (or none answering), resolved here from the root servers.
+pub(crate) async fn answer_query(q: &[u8], ups: &[Ipv4Addr]) -> Option<Vec<u8>> {
     let m = parse(q)?;
     let (name, qtype, _) = m.q?;
     let (edns, _) = client_udp_size(q);
@@ -604,11 +605,14 @@ pub(crate) async fn answer_query(q: &[u8], ups: &[Ipv4Addr], recursive: bool) ->
         .cloned();
     let a = match cached {
         Some(a) => a,
-        None if !recursive => forward(ups, &name, qtype).await,
         None => {
-            let a = resolve(name.clone(), qtype, 0).await;
-            if a.rcode == SERVFAIL && !ups.is_empty() {
+            let a = if ups.is_empty() {
+                servfail()
+            } else {
                 forward(ups, &name, qtype).await
+            };
+            if a.rcode == SERVFAIL {
+                resolve(name.clone(), qtype, 0).await
             } else {
                 a
             }
