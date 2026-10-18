@@ -1,11 +1,14 @@
-// auth.rs — admin login for the web UI + API. The web admin controls DHCP, images and license keys and runs as
-// root on a shared LAN, so every admin route needs a session. Client/boot routes stay open (a PXE client can't log
-// in). One admin password (argon2 hash in config `admin_pw`), set on first use with a one-time setup token that is
-// printed to the server log (so only someone with access to the server can claim the install). Sessions are
-// STATELESS signed cookies: `<expiry>.<blake3-keyed-MAC>` with a per-install secret in config `session_secret`. No
-// server-side session map, so restarting the binary does not log admins out; changing the password rotates the
-// secret, which logs every session out. Password checks are throttled per client IP and run off the async workers.
-// Also a Host-header check (anti DNS-rebinding).
+// auth.rs — login for the web UI + API. The web admin controls DHCP, images and license keys and runs as root on a
+// shared LAN, so every admin route needs a session. Client/boot routes stay open (a PXE client can't log in).
+// Accounts (config `users`, argon2 hashes) with one of two roles: owner (everything) or staff (the day-to-day: look,
+// Remote, Wake, save a games update — staff_may()). The first owner is made with a one-time setup token printed to the
+// server log (so only someone with access to the server can claim the install); a DB from before accounts becomes
+// owner `admin` with its old password. Sessions are STATELESS signed cookies `<expiry>.<user>.<blake3-keyed MAC>`
+// over (expiry, user, the user's password generation) with a per-install secret in config `session_secret`: no
+// server-side session map, so restarting the binary logs nobody out; a password change ends that user's sessions,
+// a deleted user's end too, a role change applies at the next request. Every change (not a GET) is logged with who
+// made it. Password checks are throttled per client IP and run off the async workers. Also a Host-header check
+// (anti DNS-rebinding).
 use argon2::Argon2;
 use argon2::password_hash::rand_core::{OsRng, RngCore};
 use argon2::password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString};
@@ -19,7 +22,7 @@ use axum::{
     routing::{get, post},
 };
 use parking_lot::Mutex;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::{LazyLock, OnceLock};
@@ -31,6 +34,101 @@ const COOKIE: &str = "broom_session";
 const SESSION_SECS: u64 = 8 * 3600;
 
 type ApiErr = (StatusCode, String);
+
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum Role {
+    Owner,
+    Staff,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct User {
+    pub name: String,
+    pub role: Role,
+    /// argon2id PHC string.
+    pw: String,
+    /// Bumped on each password change: the user's older session cookies stop working.
+    #[serde(default)]
+    pw_gen: u64,
+}
+
+/// Who made a request (the guard puts it in the request's extensions).
+#[derive(Clone, Debug)]
+pub struct Who {
+    pub name: String,
+    pub role: Role,
+}
+
+/// Account name: letters, digits, `_`, `-` (lower case), at most 32 — it sits in the cookie between dots.
+pub(crate) fn name_ok(n: &str) -> bool {
+    (1..=32).contains(&n.len())
+        && n.chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-')
+}
+
+/// The accounts. A DB from before accounts: its admin password becomes owner `admin`.
+pub(crate) fn users(st: &SharedState) -> Vec<User> {
+    let v: Vec<User> = serde_json::from_str(&st.db.get_config("users", "[]")).unwrap_or_default();
+    if !v.is_empty() {
+        return v;
+    }
+    let old = st.db.get_config("admin_pw", "");
+    if old.is_empty() {
+        return v;
+    }
+    vec![User {
+        name: "admin".into(),
+        role: Role::Owner,
+        pw: old,
+        pw_gen: 0,
+    }]
+}
+
+pub(crate) fn save_users(st: &SharedState, v: &[User]) -> Result<(), String> {
+    st.db
+        .set_config("users", &serde_json::to_string(v).unwrap())
+}
+
+/// A user with a new password hash (its sessions end).
+pub(crate) fn with_password(mut u: User, phc: String) -> User {
+    u.pw = phc;
+    u.pw_gen += 1;
+    u
+}
+
+pub(crate) fn new_user(name: &str, role: Role, phc: String) -> User {
+    User {
+        name: name.into(),
+        role,
+        pw: phc,
+        pw_gen: 0,
+    }
+}
+
+/// What staff may do: read every page (but not the CSV with the license keys, a golden's export or the accounts) and,
+/// of the changes, only Wake, Save / Discard a games update, their own password and logging out. Remote is a GET
+/// (WebSocket).
+pub(crate) fn staff_may(method: &axum::http::Method, path: &str) -> bool {
+    use axum::http::Method;
+    const OWNER_GET: &[&str] = &[
+        "/api/machines/export.csv",
+        "/api/images/export-file",
+        "/api/users",
+    ];
+    const STAFF_POST: &[&str] = &[
+        "/api/wake",
+        "/api/games/save",
+        "/api/games/discard",
+        "/api/password",
+        "/api/auth/logout",
+    ];
+    match *method {
+        Method::GET | Method::HEAD => !OWNER_GET.contains(&path),
+        Method::POST => STAFF_POST.contains(&path),
+        _ => false,
+    }
+}
 
 pub fn routes() -> Router<SharedState> {
     Router::new()
@@ -62,7 +160,11 @@ pub(crate) fn same(a: &str, b: &str) -> bool {
     blake3::hash(a.as_bytes()) == blake3::hash(b.as_bytes())
 }
 
-/// argon2id hash (PHC string) — stored in config `admin_pw`.
+/// argon2id hash (PHC string) of a password — what the accounts keep (config `users`).
+pub(crate) fn hash_password(pw: &str) -> Result<String, String> {
+    hash_pw(pw)
+}
+
 fn hash_pw(pw: &str) -> Result<String, String> {
     let salt = SaltString::generate(&mut OsRng);
     Argon2::default()
@@ -150,7 +252,17 @@ async fn hash_blocking(pw: String) -> Result<String, ApiErr> {
 static SETUP_TOKEN: OnceLock<String> = OnceLock::new();
 
 pub fn init_setup_token(st: &SharedState) {
-    if !st.db.get_config("admin_pw", "").is_empty() {
+    let have = users(st);
+    if !have.is_empty() {
+        // A DB from before accounts: its admin password saved as owner `admin` (users() already reads it so).
+        if st.db.get_config("users", "").is_empty() {
+            match save_users(st, &have) {
+                Ok(()) => {
+                    tracing::info!("accounts: the admin password is now owner account `admin`")
+                }
+                Err(e) => tracing::error!("accounts not saved: {e}"),
+            }
+        }
         return;
     }
     let tok = random_token();
@@ -203,35 +315,40 @@ fn secret(st: &SharedState) -> [u8; 32] {
     })
 }
 
-/// Stateless session token: `<expiry-unix-secs>.<blake3 keyed MAC of the expiry>`.
-fn sign(key: &[u8; 32], exp: u64) -> String {
+/// Stateless session token: `<expiry-unix-secs>.<user>.<blake3 keyed MAC of "expiry.user.gen">`.
+fn sign(key: &[u8; 32], exp: u64, user: &str, pw_gen: u64) -> String {
     format!(
-        "{exp}.{}",
-        blake3::keyed_hash(key, exp.to_string().as_bytes()).to_hex()
+        "{exp}.{user}.{}",
+        blake3::keyed_hash(key, format!("{exp}.{user}.{pw_gen}").as_bytes()).to_hex()
     )
 }
 
-/// A valid, unexpired session cookie? Verifies the signature (constant-time via blake3::Hash eq) and expiry.
-fn logged_in(st: &SharedState, req: &Request<Body>) -> bool {
-    cookie_token(req).is_some_and(|t| token_valid(st, &t))
+/// The account `tok` belongs to, if it was signed with `key` for that account's current password generation and is
+/// not expired at `now` (signature compared in constant time: blake3::Hash eq).
+fn token_user<'a>(key: &[u8; 32], tok: &str, now: u64, users: &'a [User]) -> Option<&'a User> {
+    let mut f = tok.splitn(3, '.');
+    let (exp_s, name, sig) = (f.next()?, f.next()?, f.next()?);
+    let exp = exp_s.parse::<u64>().ok().filter(|e| *e > now)?;
+    let u = users.iter().find(|u| u.name == name)?;
+    let want = blake3::keyed_hash(key, format!("{exp}.{name}.{}", u.pw_gen).as_bytes());
+    blake3::Hash::from_hex(sig)
+        .is_ok_and(|h| h == want)
+        .then_some(u)
 }
 
-/// Is this session token still good: signed with the current secret (a password change rotates it) and not expired.
-/// Long-lived streams (SSE, Remote WebSocket) ask again every so often — the guard only checked when they opened.
+/// Who holds this session token (None = not a valid session).
+pub(crate) fn who(st: &SharedState, tok: &str) -> Option<Who> {
+    let all = users(st);
+    token_user(&secret(st), tok, now(), &all).map(|u| Who {
+        name: u.name.clone(),
+        role: u.role,
+    })
+}
+
+/// Is this session token still good (its account there, its password unchanged, not expired). Long-lived streams
+/// (SSE, Remote WebSocket) ask again every so often — the guard only checked when they opened.
 pub(crate) fn token_valid(st: &SharedState, tok: &str) -> bool {
-    token_ok(&secret(st), tok, now())
-}
-
-/// `tok` signed with `key` and not expired at `now`.
-fn token_ok(key: &[u8; 32], tok: &str, now: u64) -> bool {
-    let Some((exp_s, sig)) = tok.split_once('.') else {
-        return false;
-    };
-    let Ok(exp) = exp_s.parse::<u64>() else {
-        return false;
-    };
-    exp > now
-        && blake3::Hash::from_hex(sig).is_ok_and(|h| h == blake3::keyed_hash(key, exp_s.as_bytes()))
+    who(st, tok).is_some()
 }
 
 /// How often an open stream re-checks its session.
@@ -264,6 +381,7 @@ fn is_public(method: &axum::http::Method, path: &str) -> bool {
         "/api/client-config",
         "/api/golden-slot",
         "/api/vnc/agent",
+        "/api/agent-key",
         "/api/bench/pending",
         "/api/bench/blob",
         "/api/bench/report",
@@ -310,12 +428,34 @@ fn host_allowed(host: &str, own: &str) -> bool {
                 || name.eq_ignore_ascii_case(&format!("{own}.local"))))
 }
 
-/// Guard middleware on the whole router: Host check, then a session for everything that is not public.
-pub async fn guard(State(st): State<SharedState>, req: Request<Body>, next: Next) -> Response {
+/// Guard middleware on the whole router: Host check, then a session for everything that is not public, then the
+/// role's rights (staff_may). Who it is goes into the request (handlers that show secrets ask), and every change is
+/// logged with their name (Logs page).
+pub async fn guard(State(st): State<SharedState>, mut req: Request<Body>, next: Next) -> Response {
     if !host_ok(&req) {
         return (StatusCode::MISDIRECTED_REQUEST, "bad Host").into_response();
     }
-    if is_public(req.method(), req.uri().path()) || logged_in(&st, &req) {
+    let path = req.uri().path().to_string();
+    if is_public(req.method(), &path) {
+        return next.run(req).await;
+    }
+    if let Some(w) = cookie_token(&req).and_then(|t| who(&st, &t)) {
+        let m = req.method().clone();
+        if w.role == Role::Staff && !staff_may(&m, &path) {
+            return (
+                StatusCode::FORBIDDEN,
+                "owner only — ask the owner (staff can look, Remote, Wake and save a games update)",
+            )
+                .into_response();
+        }
+        // A golden upload is many PUTs of one chunk: its start / done are logged instead.
+        if m != axum::http::Method::GET
+            && m != axum::http::Method::HEAD
+            && path != "/api/images/upload-chunk"
+        {
+            tracing::info!("{}: {m} {path}", w.name);
+        }
+        req.extensions_mut().insert(w);
         return next.run(req).await;
     }
     // A browser navigating to a page → send it to the login page. An API/XHR/SSE call → 401 (the app's JS then
@@ -361,20 +501,29 @@ pub async fn security_headers(req: Request<Body>, next: Next) -> Response {
     res
 }
 
+/// GET /api/auth/status (public) — is there an account yet, is this browser signed in, as whom.
 async fn status(State(st): State<SharedState>, req: Request<Body>) -> Json<serde_json::Value> {
+    let w = cookie_token(&req).and_then(|t| who(&st, &t));
     Json(serde_json::json!({
-        "configured": !st.db.get_config("admin_pw", "").is_empty(),
-        "authed": logged_in(&st, &req),
+        "configured": !users(&st).is_empty(),
+        "authed": w.is_some(),
+        "user": w.as_ref().map(|w| w.name.clone()),
+        "role": w.map(|w| w.role),
     }))
 }
 
 #[derive(Deserialize)]
-struct Pw {
+struct LoginBody {
+    /// Older login pages send no name: the first owner's account.
+    #[serde(default)]
+    user: String,
     password: String,
 }
 
 #[derive(Deserialize)]
 struct SetupBody {
+    #[serde(default)]
+    user: String,
     password: String,
     #[serde(default)]
     token: String,
@@ -393,28 +542,41 @@ fn session_cookie(token: &str, max_age: u64) -> [(header::HeaderName, String); 1
     )]
 }
 
-fn new_session(st: &SharedState) -> String {
-    sign(&secret(st), now() + SESSION_SECS)
+fn new_session(st: &SharedState, u: &User) -> String {
+    sign(&secret(st), now() + SESSION_SECS, &u.name, u.pw_gen)
 }
 
-/// POST /api/auth/setup {password, token} — set the admin password the FIRST time only (no password stored yet),
-/// with the setup token printed to the server log at startup. Logs the caller.
+/// A hash to check a password against when the account does not exist: as slow as a real one, so the answer time
+/// does not tell which names exist.
+fn dummy_hash() -> &'static str {
+    static H: OnceLock<String> = OnceLock::new();
+    H.get_or_init(|| hash_pw("not-an-account").unwrap_or_default())
+}
+
+/// POST /api/auth/setup {user, password, token} — the FIRST owner account (none exists yet), with the setup token
+/// printed to the server log at startup. Logs the caller.
 async fn setup(
     State(st): State<SharedState>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
     Json(b): Json<SetupBody>,
 ) -> Result<impl IntoResponse, ApiErr> {
-    if !st.db.get_config("admin_pw", "").is_empty() {
-        return Err((
-            StatusCode::CONFLICT,
-            "admin password already set — log in".into(),
-        ));
+    if !users(&st).is_empty() {
+        return Err((StatusCode::CONFLICT, "already set up — log in".into()));
     }
     if !SETUP_TOKEN.get().is_some_and(|t| same(t, b.token.trim())) {
-        tracing::warn!("admin setup with a wrong setup token from {}", peer.ip());
+        tracing::warn!("setup with a wrong setup token from {}", peer.ip());
         return Err((
             StatusCode::FORBIDDEN,
             "wrong setup token — copy it from the server log".into(),
+        ));
+    }
+    let name = Some(b.user.trim().to_lowercase())
+        .filter(|n| !n.is_empty())
+        .unwrap_or_else(|| "admin".into());
+    if !name_ok(&name) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "user name: a-z, 0-9, _ or -, at most 32".into(),
         ));
     }
     if b.password.len() < 8 {
@@ -423,44 +585,52 @@ async fn setup(
             "password must be at least 8 characters".into(),
         ));
     }
-    let hash = hash_blocking(b.password).await?;
-    st.db
-        .set_config("admin_pw", &hash)
+    let u = new_user(&name, Role::Owner, hash_blocking(b.password).await?);
+    save_users(&st, std::slice::from_ref(&u))
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
-    tracing::warn!("admin password set from {}", peer.ip());
-    let token = new_session(&st);
+    tracing::warn!("owner account {name} created from {}", peer.ip());
     Ok((
-        session_cookie(&token, SESSION_SECS),
+        session_cookie(&new_session(&st, &u), SESSION_SECS),
         Json(serde_json::json!({"ok": true})),
     ))
 }
 
-/// POST /api/auth/login — check the password (throttled per IP), start a session. A wrong try is logged.
+/// POST /api/auth/login {user, password} — check the password (throttled per IP), start a session. A wrong try is
+/// logged; the answer does not say whether the name exists.
 async fn login(
     State(st): State<SharedState>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
-    Json(b): Json<Pw>,
+    Json(b): Json<LoginBody>,
 ) -> Result<impl IntoResponse, ApiErr> {
-    let stored = st.db.get_config("admin_pw", "");
-    if stored.is_empty() {
-        return Err((StatusCode::CONFLICT, "no admin password set yet".into()));
+    let all = users(&st);
+    if all.is_empty() {
+        return Err((StatusCode::CONFLICT, "not set up yet".into()));
     }
-    if !check_pw(peer.ip(), b.password, stored).await? {
-        tracing::warn!("failed admin login from {}", peer.ip());
-        return Err((StatusCode::UNAUTHORIZED, "wrong password".into()));
+    let name = b.user.trim().to_lowercase();
+    let u = if name.is_empty() {
+        all.iter().find(|u| u.role == Role::Owner)
+    } else {
+        all.iter().find(|u| u.name == name)
+    };
+    let phc = u.map_or_else(|| dummy_hash().to_string(), |u| u.pw.clone());
+    if !check_pw(peer.ip(), b.password, phc).await? || u.is_none() {
+        tracing::warn!("failed login as {name:?} from {}", peer.ip());
+        return Err((StatusCode::UNAUTHORIZED, "wrong user or password".into()));
     }
-    let token = new_session(&st);
+    let u = u.unwrap();
+    tracing::info!("{} logged in from {}", u.name, peer.ip());
     Ok((
-        session_cookie(&token, SESSION_SECS),
+        session_cookie(&new_session(&st, u), SESSION_SECS),
         Json(serde_json::json!({"ok": true})),
     ))
 }
 
-/// POST /api/password {current, new} — change the admin password (session required). Rotates the session secret,
-/// so every other signed-in browser is logged out; the caller gets a fresh cookie and stays in.
+/// POST /api/password {current, new} — change your own password. Your other sessions end; this browser gets a
+/// fresh cookie and stays in.
 async fn change_pw(
     State(st): State<SharedState>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    axum::Extension(w): axum::Extension<Who>,
     Json(b): Json<NewPw>,
 ) -> Result<impl IntoResponse, ApiErr> {
     let ise = |e: String| (StatusCode::INTERNAL_SERVER_ERROR, e);
@@ -470,29 +640,35 @@ async fn change_pw(
             "new password must be at least 8 characters".into(),
         ));
     }
-    if !check_pw(peer.ip(), b.current, st.db.get_config("admin_pw", "")).await? {
+    let mut all = users(&st);
+    let Some(i) = all.iter().position(|u| u.name == w.name) else {
+        return Err((StatusCode::FORBIDDEN, "account gone".into()));
+    };
+    if !check_pw(peer.ip(), b.current, all[i].pw.clone()).await? {
         tracing::warn!(
-            "password change with a wrong current password from {}",
+            "{}: password change with a wrong current password from {}",
+            w.name,
             peer.ip()
         );
         // 403, not 401: the web app treats 401 as "session expired" and jumps to the login page.
         return Err((StatusCode::FORBIDDEN, "wrong current password".into()));
     }
-    let hash = hash_blocking(b.new).await?;
-    st.db.set_config("admin_pw", &hash).map_err(ise)?;
-    let key = rotate_secret(&st).map_err(ise)?;
+    let phc = hash_blocking(b.new).await?;
+    all[i] = with_password(all[i].clone(), phc);
+    save_users(&st, &all).map_err(ise)?;
     tracing::warn!(
-        "admin password changed from {} — all other sessions logged out",
+        "{}: password changed from {} — their other sessions logged out",
+        w.name,
         peer.ip()
     );
     Ok((
-        session_cookie(&sign(&key, now() + SESSION_SECS), SESSION_SECS),
+        session_cookie(&new_session(&st, &all[i]), SESSION_SECS),
         Json(serde_json::json!({"ok": true})),
     ))
 }
 
-/// POST /api/auth/logout — clear the cookie. Stateless tokens can't be revoked one by one; changing the password
-/// (rotates the signing secret) revokes them all.
+/// POST /api/auth/logout — clear the cookie. Stateless tokens can't be revoked one by one; changing the password ends
+/// every session of that account.
 async fn logout() -> impl IntoResponse {
     (session_cookie("", 0), Json(serde_json::json!({"ok": true})))
 }

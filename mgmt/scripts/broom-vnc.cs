@@ -83,7 +83,7 @@ public static class BroomVnc {
       // broom-watch calls us every 15 s: an agent already running (its mutex exists) -> nothing to start.
       Mutex running;
       if (Mutex.TryOpenExisting("Global\\broom-vnc-agent", out running)) { running.Dispose(); return; }
-      RelaunchInSession(console, args[0]);
+      RelaunchInSession(console, args[0], args.Length > 1 ? args[1] : "");
       return;
     }
 
@@ -92,6 +92,8 @@ public static class BroomVnc {
     using (var mutex = new Mutex(true, "Global\\broom-vnc-agent", out fresh)) {
       if (!fresh) { Log("another agent already runs - exiting"); return; }
       Log("agent started in session " + mine + ", server " + args[0]);
+      AgentKey = Unhex(args.Length > 1 ? args[1] : "");
+      if (AgentKey == null) Log("no agent key yet - the stage hands it over at the next boot");
       try { SetProcessDPIAware(); } catch { }
       string url = "ws://" + args[0] + "/api/vnc/agent";
       // Reconnect for ever: the admin may open the viewer at any time, the server restarts, the network blips.
@@ -135,7 +137,7 @@ public static class BroomVnc {
   }
 
   // Start broom-vnc.exe again in `session` with our own (SYSTEM) token: same rights, a desktop to work on.
-  static void RelaunchInSession(uint session, string srv) {
+  static void RelaunchInSession(uint session, string srv, string key) {
     IntPtr tok = IntPtr.Zero, dup = IntPtr.Zero;
     try {
       EnablePrivileges();
@@ -148,12 +150,12 @@ public static class BroomVnc {
       // broom-watch is a Task Scheduler task: we sit in its job object, and a child in another session left in that job
       // can be ended at once. Break away from it (CREATE_BREAKAWAY_FROM_JOB); a job that forbids it -> as before.
       const uint NO_WINDOW = 0x08000000, BREAKAWAY = 0x01000000;
-      bool ok = CreateProcessAsUser(dup, exe, "\"" + exe + "\" " + srv, IntPtr.Zero, IntPtr.Zero, false, NO_WINDOW | BREAKAWAY, IntPtr.Zero, null, ref si, out pi);
+      bool ok = CreateProcessAsUser(dup, exe, "\"" + exe + "\" " + srv + " " + key, IntPtr.Zero, IntPtr.Zero, false, NO_WINDOW | BREAKAWAY, IntPtr.Zero, null, ref si, out pi);
       string how = "out of the task's job";
       if (!ok) {
         int e = Marshal.GetLastWin32Error();
         how = "inside the task's job (breakaway refused: error " + e + ")";
-        ok = CreateProcessAsUser(dup, exe, "\"" + exe + "\" " + srv, IntPtr.Zero, IntPtr.Zero, false, NO_WINDOW, IntPtr.Zero, null, ref si, out pi);
+        ok = CreateProcessAsUser(dup, exe, "\"" + exe + "\" " + srv + " " + key, IntPtr.Zero, IntPtr.Zero, false, NO_WINDOW, IntPtr.Zero, null, ref si, out pi);
       }
       if (ok) {
         Log("relaunched into session " + session + " (pid " + pi.pid + ", " + how + ")");
@@ -165,13 +167,32 @@ public static class BroomVnc {
     }
   }
 
+  // This machine's key (agentauth.rs on the server), from broom-watch; null = none yet.
+  static byte[] AgentKey;
+
   static async Task Run(string url) {
+    if (AgentKey == null) throw new Exception("no agent key yet (the stage hands it over at the next boot)");
     using (var ws = new ClientWebSocket()) {
       var cts = new CancellationTokenSource();
       await ws.ConnectAsync(new Uri(url), cts.Token);
       bool streaming = false;
       var frameReady = new SemaphoreSlim(1); // one in flight: refilled by the viewer's "ack"
       var sendLock = new SemaphoreSlim(1);
+      // Handshake: prove our key to the server, check the server proves it back (a host pretending to be the server
+      // can't), and derive the session key every command from the server is signed with. The key itself is never sent.
+      string ch = await ReceiveText(ws, 10000);
+      if (ch == null || !ch.StartsWith("auth ")) throw new Exception("no challenge from the server (an older server?)");
+      string ns = ch.Substring(5).Trim();
+      var nb = new byte[16];
+      using (var rng = new System.Security.Cryptography.RNGCryptoServiceProvider()) rng.GetBytes(nb);
+      string na = Hex(nb);
+      await SendText(ws, sendLock, "proof " + na + " " + Hex(Hmac(AgentKey, "agent:" + ns + ":" + na)));
+      string okMsg = await ReceiveText(ws, 10000);
+      if (okMsg == null || !okMsg.StartsWith("ok ") || !Same(okMsg.Substring(3).Trim(), Hex(Hmac(AgentKey, "server:" + ns + ":" + na))))
+        throw new Exception("the server did not prove our key - refused (wrong key, or not our server)");
+      byte[] session = Hmac(AgentKey, "session:" + ns + ":" + na);
+      long lastN = 0;
+      bool warned = false;
       var fr = new FrameState();
       var capture = Task.Run(async () => {
         while (ws.State == WebSocketState.Open) {
@@ -196,8 +217,12 @@ public static class BroomVnc {
         if (r.MessageType == WebSocketMessageType.Close) break;
         msg.AddRange(new ArraySegment<byte>(buf, 0, r.Count));
         if (!r.EndOfMessage) continue;
-        string text = System.Text.Encoding.UTF8.GetString(msg.ToArray());
+        string text = Verify(session, System.Text.Encoding.UTF8.GetString(msg.ToArray()), ref lastN);
         msg.Clear();
+        if (text == null) {   // not signed by our server, or replayed: dropped
+          if (!warned) { Log("dropped a command that was not signed by the server"); warned = true; }
+          continue;
+        }
         string op = Field(text, "op");
         if (op == "start") { Quality = Clamp(IntField(text, "q", 60), 20, 95); MaxW = IntField(text, "w", 0); WantH264 = Field(text, "codec") == "h264" ? 1 : 0; Codec = -1; if (_h264 != null) { _h264.Dispose(); _h264 = null; } fr.Prev = null; fr.Cur = new IntPtr(-1); streaming = true; Drain(frameReady); frameReady.Release(); }
         else if (op == "stop") { streaming = false; }
@@ -213,6 +238,60 @@ public static class BroomVnc {
       try { await capture; } catch { }
       try { await health; } catch { }
     }
+  }
+
+  // One whole text message within `ms`; null = none (closed, binary, timeout).
+  static async Task<string> ReceiveText(ClientWebSocket ws, int ms) {
+    var buf = new byte[4096];
+    var all = new List<byte>();
+    using (var cts = new CancellationTokenSource(ms)) {
+      try {
+        while (true) {
+          var r = await ws.ReceiveAsync(new ArraySegment<byte>(buf), cts.Token);
+          if (r.MessageType != WebSocketMessageType.Text) return null;
+          all.AddRange(new ArraySegment<byte>(buf, 0, r.Count));
+          if (r.EndOfMessage) return System.Text.Encoding.UTF8.GetString(all.ToArray());
+          if (all.Count > 65536) return null;
+        }
+      } catch { return null; }
+    }
+  }
+
+  static byte[] Hmac(byte[] key, string msg) {
+    using (var h = new System.Security.Cryptography.HMACSHA256(key)) return h.ComputeHash(System.Text.Encoding.UTF8.GetBytes(msg));
+  }
+  static string Hex(byte[] b) {
+    var sb = new System.Text.StringBuilder(b.Length * 2);
+    foreach (byte x in b) sb.Append(x.ToString("x2"));
+    return sb.ToString();
+  }
+  static byte[] Unhex(string h) {
+    if (h == null || h.Length != 64) return null;
+    var b = new byte[32];
+    for (int i = 0; i < 32; i++) {
+      int v;
+      if (!int.TryParse(h.Substring(i * 2, 2), System.Globalization.NumberStyles.HexNumber, null, out v)) return null;
+      b[i] = (byte)v;
+    }
+    return b;
+  }
+  // Equal strings, compared in time that does not depend on where they differ.
+  static bool Same(string a, string b) {
+    if (a.Length != b.Length) return false;
+    int d = 0;
+    for (int i = 0; i < a.Length; i++) d |= a[i] ^ b[i];
+    return d == 0;
+  }
+  // A command from the server: "<n> <HMAC(session, n + ' ' + json)> <json>", n above the last one. The json, or null.
+  static string Verify(byte[] session, string m, ref long last) {
+    int a = m.IndexOf(' '); if (a <= 0) return null;
+    int b = m.IndexOf(' ', a + 1); if (b < 0) return null;
+    long n;
+    if (!long.TryParse(m.Substring(0, a), out n) || n <= last) return null;
+    string json = m.Substring(b + 1);
+    if (!Same(m.Substring(a + 1, b - a - 1), Hex(Hmac(session, n + " " + json)))) return null;
+    last = n;
+    return json;
   }
 
   static async Task SendText(ClientWebSocket ws, SemaphoreSlim sendLock, string s) {

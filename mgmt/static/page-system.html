@@ -1,7 +1,7 @@
 <section id="page-system">
   <div class="d-flex flex-wrap align-items-baseline gap-3 mb-4"><h1 class="h4 mb-0">Settings</h1></div>
   <div class="card card-body mb-3">
-    <h2 class="h6 text-uppercase text-body-secondary mb-3">Admin password</h2>
+    <h2 class="h6 text-uppercase text-body-secondary mb-3">Your password</h2>
     <div class="d-flex flex-wrap gap-2 align-items-end">
       <div><label class="form-label small mb-1" for="pw_cur">Current</label><input class="form-control form-control-sm" id="pw_cur" type="password" size="10" autocomplete="current-password"></div>
       <div><label class="form-label small mb-1" for="pw_new">New</label><input class="form-control form-control-sm" id="pw_new" type="password" size="10" autocomplete="new-password"></div>
@@ -10,7 +10,19 @@
       <span id="pw_msg" class="msg align-self-center"></span>
     </div>
   </div>
-  <div class="card card-body mb-3">
+  <div class="card card-body mb-3" data-owner>
+    <h2 class="h6 text-uppercase text-body-secondary mb-3">Users</h2>
+    <p class="small text-body-secondary mb-2"><b>Owner</b>: everything. <b>Staff</b>: sees every page, uses Remote, wakes machines and saves / discards a games update — cannot delete or change images, disks, machines or settings, nor see license keys. Every change is logged with who made it (Logs).</p>
+    <div class="table-responsive"><table class="table table-sm align-middle w-auto mb-2" id="users"><thead><tr><th>User</th><th>Role</th><th></th></tr></thead><tbody></tbody></table></div>
+    <div class="d-flex flex-wrap gap-2 align-items-end">
+      <div><label class="form-label small mb-1" for="us_name">User</label><input class="form-control form-control-sm" id="us_name" size="12" placeholder="thu-ngan" autocapitalize="none" spellcheck="false"></div>
+      <div><label class="form-label small mb-1" for="us_role">Role</label><select class="form-select form-select-sm" id="us_role"><option value="staff">staff</option><option value="owner">owner</option></select></div>
+      <div><label class="form-label small mb-1" for="us_pw">Password</label><input class="form-control form-control-sm" id="us_pw" type="password" size="12" autocomplete="new-password"></div>
+      <button class="btn btn-sm btn-primary" data-click="userAdd">Add</button>
+      <span id="us_msg" class="msg align-self-center"></span>
+    </div>
+  </div>
+  <div class="card card-body mb-3" data-owner>
     <h2 class="h6 text-uppercase text-body-secondary mb-3">Countdown boot menu</h2>
     <div class="d-flex flex-wrap gap-2 align-items-center"><input class="form-control form-control-sm" id="timeout" type="number" min="0" max="3600" style="width:90px"> seconds
       <button class="btn btn-sm btn-outline-primary" data-click="setTimeout_">Save</button> <span id="to_msg" class="msg"></span></div>

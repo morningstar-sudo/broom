@@ -71,7 +71,11 @@ function StartAgent {
     ForEach-Object { try { $_.Kill(); $_.WaitForExit(5000) | Out-Null } catch { } }
   Get-ChildItem "$env:SystemRoot\Temp\broom-vnc*.exe" -ErrorAction SilentlyContinue | Where-Object { $_.FullName -ne $agentExe } |
     ForEach-Object { Remove-Item -LiteralPath $_.FullName -Force -ErrorAction SilentlyContinue }
-  try { Start-Process $agentExe -ArgumentList $Srv -WindowStyle Hidden } catch { }
+  # Its key (agentauth.rs), left on BROOMWIN by the stage: read here (PowerShell reads the volume path the agent's
+  # .NET 4 file API can't), handed over on its command line. No key yet = the agent waits for the next boot.
+  $key = ''
+  try { if ($Vol) { $key = ([IO.File]::ReadAllText("$Vol\broom\agent.key")).Trim() } } catch { }
+  try { Start-Process $agentExe -ArgumentList $Srv, $key -WindowStyle Hidden } catch { }
 }
 StartAgent
 # Other disks hidden from the guest (Devices / Groups page; the stage leaves broom\hide-disks): every internal disk but

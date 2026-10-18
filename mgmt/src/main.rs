@@ -1,6 +1,7 @@
 // main.rs — bootrom mgmt app (Rust/axum). One binary, runs on the Linux server.
 // Modules: boot (iPXE menu), dhcp/tftp/iscsi (network boot), images + golden/hash/versions/export (images), publish
 // (Linux) + winstage (Windows), machines/devices/license/settings (web API), auth, disk/archive/vmdk/vhdx (formats).
+mod agentauth;
 mod api;
 mod archive;
 mod assets;
@@ -36,6 +37,7 @@ mod settings;
 mod setup;
 mod sysmon;
 mod tftp;
+mod users;
 mod versions;
 mod vhdx;
 mod vmdk;
@@ -610,11 +612,13 @@ async fn main() {
         .merge(monitor::routes()) // online status, Wake-on-LAN
         .merge(bench::routes()) // Benchmark page + client measurements
         .merge(vnc::routes()) // Remote page: screen + mouse/keys of a Windows machine
+        .merge(agentauth::routes()) // Remote: agent keys (handed to the stage, re-issued)
         .merge(logbuf::routes()) // Logs page: the newest log lines
         .merge(sysmon::routes()) // Server page: services up or down
         .merge(disks::routes()) // client disks: inventory, Broom disk, hide the others
         .merge(volumes::routes()) // server disks: format, mount, images / games disks on them
         .merge(auth::routes()) // admin login
+        .merge(users::routes()) // accounts (owners)
         // Serve boot assets over HTTP (kernel/initrd much faster than TFTP).
         // /tftp/... -> <home>/tftp/... (e.g. http://SERVER/tftp/broom-stage/vmlinuz); a Windows golden set to RAM
         // from its RAM copy.

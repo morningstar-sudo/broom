@@ -39,6 +39,9 @@ pub struct Config {
     /// IP of the disk's update machine (None = no update running).
     #[serde(default)]
     pub update_ip: Option<String>,
+    /// Its MAC: the update session needs both (an IP alone is set by anyone on the LAN). None = IP only.
+    #[serde(default)]
+    pub update_mac: Option<String>,
     /// Serve games.img from a copy in RAM.
     #[serde(default)]
     pub ram: bool,
@@ -393,6 +396,32 @@ pub fn owns(iqn: &str) -> bool {
     })
 }
 
+/// `peer` is the disk's update machine: its IP, and its MAC as the kernel sees it (ARP) when the disk names one — an
+/// IP alone is taken by anyone who sets it while the update machine is off, and its writes would reach every machine
+/// at the next Save. Another MAC on that IP gets a read-only session (logged).
+pub(crate) fn update_allowed(
+    cfg: &Config,
+    peer: &str,
+    arp: impl FnOnce() -> Option<String>,
+    name: &str,
+) -> bool {
+    if cfg.update_ip.as_deref() != Some(peer) {
+        return false;
+    }
+    let Some(want) = &cfg.update_mac else {
+        return true;
+    };
+    let got = arp();
+    if got.as_deref().is_some_and(|m| m.eq_ignore_ascii_case(want)) {
+        return true;
+    }
+    tracing::warn!(
+        "games disk {name}: {peer} is the update machine's IP but its MAC is {} (expected {want}) — read-only",
+        got.as_deref().unwrap_or("unknown")
+    );
+    false
+}
+
 /// A session of `iqn` from `peer` logs in. The disk's update machine on the newest gen gets the update overlay
 /// (writable). Every Ok is paired with a `detach`.
 pub fn attach(iqn: &str, peer: &str) -> Result<View, String> {
@@ -405,7 +434,9 @@ pub fn attach(iqn: &str, peer: &str) -> Result<View, String> {
             .map(|l| l.ov.clone())
             .collect();
         let mut ov = None;
-        if ver == s.ver && s.cfg.update_ip.as_deref() == Some(peer) {
+        let writer = ver == s.ver
+            && update_allowed(&s.cfg, peer, || crate::license::arp_mac(peer), &s.cfg.name);
+        if writer {
             if s.update.is_none() {
                 let (ovl, list) = update_files(&s.dir);
                 s.update = Some(Arc::new(Overlay::open(&ovl, &list, s.lun.size)?));

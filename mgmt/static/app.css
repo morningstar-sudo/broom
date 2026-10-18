@@ -28,3 +28,6 @@ tr.filters .form-control,tr.filters .form-select{min-width:72px}
 /* Icons: symbols of /icons.svg (ic() in app.js), sized + coloured like the text around them. */
 .ic{width:1.05em;height:1.05em;vertical-align:-.17em;fill:none;stroke:currentColor;stroke-width:2.2;stroke-linecap:round;stroke-linejoin:round}
 .ic.ok{color:var(--bs-success)} .ic.err{color:var(--bs-danger)} .ic.wait,.ic.warn{color:var(--bs-warning)}
+
+/* Staff accounts (auth.rs): what only an owner may do is not shown (the server refuses it anyway). */
+body[data-role="staff"] [data-owner]{display:none!important}

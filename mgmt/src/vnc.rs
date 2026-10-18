@@ -3,7 +3,8 @@
 // /api/vnc/agent: the machine dials out, nothing listens on it, so no guest or other LAN host can reach its screen.
 // A signed-in admin opens /api/vnc/view?host=<hostname>: the server tells that agent to start, then passes its screen
 // updates to the viewer and the viewer's mouse / keys to the agent. One viewer per machine (a new one replaces the
-// old). The agent is known by its IP (machines::machine_at), like the other client endpoints.
+// old). The agent is known by its IP (machines::machine_at) and must prove its machine's key, the server proves it
+// back, and every text sent to the agent is signed (agentauth.rs).
 //
 // Agent → viewer (binary, passed as is): 1 x y w h <jpeg> a changed area, 2 w h the screen size (u16 LE).
 // Viewer → agent (text JSON, passed as is): {"op":"ack"} once an update is drawn (the agent sends the next one only
@@ -213,21 +214,38 @@ async fn agent(
         crate::machines::who(&m),
         m.grp.clone(),
     );
+    // The key it must prove (agentauth.rs): none yet = its next boot's stage gets one.
+    let Some(key) = crate::agentauth::key_of(&st, &mac) else {
+        tracing::info!("remote: agent of {host} waits for its key (handed over at its next boot)");
+        return (StatusCode::FORBIDDEN, "no agent key yet").into_response();
+    };
     ws.max_message_size(16 << 20)
-        .on_upgrade(move |s| run_agent(s, mac, host, grp))
+        .on_upgrade(move |s| run_agent(s, mac, host, grp, key))
 }
 
-async fn run_agent(ws: WebSocket, mac: String, host: String, grp: Option<String>) {
+async fn run_agent(ws: WebSocket, mac: String, host: String, grp: Option<String>, key: [u8; 32]) {
     let (mut tx, mut rx) = ws.split();
+    // Both sides proven before anything else; every text to the agent from here on is signed.
+    let Some(session) = crate::agentauth::handshake(&mut tx, &mut rx, &key, &host).await else {
+        return;
+    };
     let (to_agent, mut queue) = mpsc::channel::<Message>(QUEUE);
     let id = register(&mac, &host, grp, to_agent);
     tracing::info!("remote: agent of {host} connected");
     let writer = async {
         let mut ping = tokio::time::interval(PING);
+        let mut n: u64 = 0;
         loop {
             let m = tokio::select! {
                 m = queue.recv() => match m { Some(m) => m, None => break },
                 _ = ping.tick() => Message::Ping(Default::default()),
+            };
+            let m = match m {
+                Message::Text(t) => {
+                    n += 1;
+                    Message::Text(crate::agentauth::signed(&session, n, t.as_str()).into())
+                }
+                other => other,
             };
             if tx.send(m).await.is_err() {
                 break;

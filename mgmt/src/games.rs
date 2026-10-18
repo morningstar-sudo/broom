@@ -83,6 +83,10 @@ fn configs(st: &SharedState) -> Vec<Config> {
             iqn: format!("{base}:games-{}", d.name),
             path: img(&d.name).to_string_lossy().into(),
             update_ip: d.update.and_then(|id| ip_of(st, id)),
+            update_mac: d
+                .update
+                .and_then(|id| machine_by_id(st, id).ok())
+                .map(|m| m.mac.to_lowercase()),
             ram: d.ram,
             reserve: crate::publish::ram_reserve(st),
             name: d.name,

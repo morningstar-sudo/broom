@@ -159,7 +159,7 @@ dependencies = [
 
 [[package]]
 name = "bootrom-mgmt"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "argon2",
  "axum",

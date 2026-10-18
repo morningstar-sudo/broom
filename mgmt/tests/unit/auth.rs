@@ -39,27 +39,6 @@ fn hash_and_verify() {
 }
 
 #[test]
-fn stateless_token_roundtrip() {
-    let key = [7u8; 32];
-    let tok = sign(&key, 1_800_000_000);
-    let (exp_s, sig) = tok.split_once('.').unwrap();
-    assert_eq!(exp_s, "1800000000");
-    let sig = blake3::Hash::from_hex(sig).unwrap();
-    assert!(
-        sig == blake3::keyed_hash(&key, exp_s.as_bytes()),
-        "valid signature verifies"
-    );
-    assert!(
-        sig != blake3::keyed_hash(&[8u8; 32], exp_s.as_bytes()),
-        "wrong key rejected"
-    );
-    assert!(
-        sig != blake3::keyed_hash(&key, b"1900000000"),
-        "tampered expiry rejected"
-    );
-}
-
-#[test]
 fn public_paths() {
     let pub_get = |p| is_public(&Method::GET, p);
     let pub_post = |p| is_public(&Method::POST, p);
@@ -121,17 +100,91 @@ fn setup_token_compare() {
     assert!(same("abc", "abc") && !same("abc", "abd") && !same("abc", ""));
 }
 
-/// What open streams re-check every 30 s: a token stays good only with the current secret and before its expiry.
+/// A session token names its account and is bound to that account's password generation: it stops working when it
+/// expires, the account's password changes, the account is deleted, the secret changes or it is tampered with.
 #[test]
-fn token_recheck() {
+fn session_tokens() {
     let key = [7u8; 32];
-    let tok = sign(&key, 2_000);
-    assert!(token_ok(&key, &tok, 1_000), "valid");
-    assert!(!token_ok(&key, &tok, 2_000), "expired");
-    assert!(
-        !token_ok(&[8u8; 32], &tok, 1_000),
-        "secret rotated (password changed)"
+    let users = vec![
+        new_user("admin", Role::Owner, "h".into()),
+        new_user("thu-ngan", Role::Staff, "h".into()),
+    ];
+    let tok = sign(&key, 2_000, "thu-ngan", 0);
+    assert_eq!(
+        token_user(&key, &tok, 1_000, &users).map(|u| u.role),
+        Some(Role::Staff)
     );
-    assert!(!token_ok(&key, "garbage", 1_000));
-    assert!(!token_ok(&key, "2000.nothex", 1_000));
+    assert!(token_user(&key, &tok, 2_000, &users).is_none(), "expired");
+    assert!(
+        token_user(&[8u8; 32], &tok, 1_000, &users).is_none(),
+        "other secret"
+    );
+    let changed: Vec<User> = users
+        .iter()
+        .map(|u| {
+            if u.name == "thu-ngan" {
+                with_password(u.clone(), "h2".into())
+            } else {
+                u.clone()
+            }
+        })
+        .collect();
+    assert!(
+        token_user(&key, &tok, 1_000, &changed).is_none(),
+        "password changed"
+    );
+    assert!(
+        token_user(&key, &tok, 1_000, &users[..1]).is_none(),
+        "account deleted"
+    );
+    let forged = tok.replacen("thu-ngan", "admin", 1);
+    assert!(
+        token_user(&key, &forged, 1_000, &users).is_none(),
+        "another name, same signature"
+    );
+    assert!(token_user(&key, "garbage", 1_000, &users).is_none());
+    assert!(token_user(&key, "2000.admin.nothex", 1_000, &users).is_none());
+}
+
+/// Staff: every page, but of the changes only Wake / games Save, Discard / their own password / logout.
+#[test]
+fn staff_rights() {
+    for p in [
+        "/api/status",
+        "/api/machines/detail",
+        "/api/vnc/view",
+        "/api/logs",
+        "/api/games",
+    ] {
+        assert!(staff_may(&Method::GET, p), "GET {p}");
+    }
+    for p in [
+        "/api/machines/export.csv",
+        "/api/images/export-file",
+        "/api/users",
+    ] {
+        assert!(!staff_may(&Method::GET, p), "GET {p}");
+    }
+    for p in [
+        "/api/wake",
+        "/api/games/save",
+        "/api/games/discard",
+        "/api/password",
+        "/api/auth/logout",
+    ] {
+        assert!(staff_may(&Method::POST, p), "POST {p}");
+    }
+    for p in [
+        "/api/images/delete",
+        "/api/volumes/format",
+        "/api/dhcp",
+        "/api/users",
+        "/api/disks/broom",
+        "/api/machines/update",
+    ] {
+        assert!(!staff_may(&Method::POST, p), "POST {p}");
+    }
+    assert!(!staff_may(&Method::PUT, "/api/images/upload-chunk"));
+    assert!(name_ok("thu-ngan") && name_ok("admin_2"));
+    assert!(!name_ok("Admin") && !name_ok("a.b") && !name_ok("") && !name_ok(&"x".repeat(33)));
 }

@@ -199,6 +199,13 @@ else die "mount ntfs3 $(part $disk 2)"; fi
 mkdir -p $B
 # The other disks hidden from the guest (Devices / Groups page): broom-watch takes them offline in Windows.
 if [ "$HIDE" = 1 ]; then echo 1 > $B/hide-disks; else rm -f $B/hide-disks; fi
+# The Remote agent's key (agentauth.rs): the server hands it over once — on the first boot, again after Re-issue on
+# the Devices page — and answers empty (204) otherwise; kept here on BROOMWIN across resets, broom-watch gives it to
+# the agent. The agent proves it to the server and checks the server's proof back: no other LAN host can drive it.
+if wget -q -T 10 -O /run/broom-agent.key "http://$SRV/api/agent-key" 2>/dev/null && [ -s /run/broom-agent.key ]; then
+  cp /run/broom-agent.key $B/agent.key && log "Remote agent key received"
+fi
+rm -f /run/broom-agent.key
 
 # 0. Every Windows image this machine boots keeps its files on BROOMWIN: the one booting now at the top of broom\ —
 #    where the boot loader (\broom\child.vhdx) and broom-done look — the others parked in broom\img.<image>\ (image

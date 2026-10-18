@@ -27,30 +27,31 @@
             <a class="nav-link" href="/remote" data-page="remote">Remote</a>
             <a class="nav-link" href="/server" data-page="server">Server</a>
           </div></details>
-        <details class="nav-group" data-group="manage"><summary class="small text-uppercase text-body-secondary px-2 py-1">Manage</summary>
+        <details class="nav-group" data-group="manage" data-owner><summary class="small text-uppercase text-body-secondary px-2 py-1">Manage</summary>
           <div class="d-flex flex-column gap-1 mt-1">
             <a class="nav-link" href="/devices" data-page="devices">Devices</a>
             <a class="nav-link" href="/groups" data-page="groups">Groups</a>
           </div></details>
         <details class="nav-group" data-group="content"><summary class="small text-uppercase text-body-secondary px-2 py-1">Content</summary>
           <div class="d-flex flex-column gap-1 mt-1">
-            <a class="nav-link" href="/images" data-page="images">Images</a>
+            <a class="nav-link" href="/images" data-page="images" data-owner>Images</a>
             <a class="nav-link" href="/games" data-page="games">Games</a>
-            <a class="nav-link" href="/drivers" data-page="drivers">Drivers</a>
+            <a class="nav-link" href="/drivers" data-page="drivers" data-owner>Drivers</a>
           </div></details>
         <details class="nav-group" data-group="config"><summary class="small text-uppercase text-body-secondary px-2 py-1">Config</summary>
           <div class="d-flex flex-column gap-1 mt-1">
-            <a class="nav-link" href="/network" data-page="network">Network</a>
-            <a class="nav-link" href="/windows" data-page="windows">Windows</a>
+            <a class="nav-link" href="/network" data-page="network" data-owner>Network</a>
+            <a class="nav-link" href="/windows" data-page="windows" data-owner>Windows</a>
             <a class="nav-link" href="/system" data-page="system">Settings</a>
           </div></details>
         <details class="nav-group" data-group="tools"><summary class="small text-uppercase text-body-secondary px-2 py-1">Tools</summary>
           <div class="d-flex flex-column gap-1 mt-1">
-            <a class="nav-link" href="/benchmark" data-page="benchmark">Benchmark</a>
+            <a class="nav-link" href="/benchmark" data-page="benchmark" data-owner>Benchmark</a>
             <a class="nav-link" href="/logs" data-page="logs">Logs</a>
           </div></details>
       </nav>
       <div class="border-top pt-3 px-2 mono"><span class="dot" id="srvdot" title="connecting..."></span>server · <span id="onlinecount">—</span></div>
+      <div class="small text-body-secondary px-2 mt-2" id="whoami"></div>
       <button class="btn btn-sm btn-outline-secondary mt-2" data-click="logout">Log out</button>
     </div>
   </aside>

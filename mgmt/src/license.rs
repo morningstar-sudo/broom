@@ -173,7 +173,7 @@ fn machine_by_ip<'a>(ip: &str, machines: &'a [Machine], arp: Option<&str>) -> Op
 
 /// The MAC the kernel has for `ip` in the ARP cache (/proc/net/arp), lower-case `aa:bb:…`. None = no entry
 /// (not on this LAN, or not talked to the server — machine_by_ip refuses then).
-fn arp_mac(ip: &str) -> Option<String> {
+pub(crate) fn arp_mac(ip: &str) -> Option<String> {
     let arp = std::fs::read_to_string("/proc/net/arp").ok()?;
     for line in arp.lines().skip(1) {
         let f: Vec<&str> = line.split_whitespace().collect();

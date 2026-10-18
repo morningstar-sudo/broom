@@ -236,7 +236,7 @@ The menu is grouped (each group folds; the one holding the open page stays open)
 | | **Drivers** | driver packages installed into each Windows machine's base |
 | Config | **Network** | DHCP server, Secure Boot clients, strict reset |
 | | **Windows** | guest user, SSD room, golden downloads at once |
-| | **Settings** | admin password, boot menu countdown |
+| | **Settings** | your password; users (owner / staff); boot menu countdown |
 | Tools | **Benchmark** | server disk speed; per machine boot time and disk / network read speed |
 | | **Logs** | the server's newest log lines: level filter, search, follow live |
 
@@ -429,12 +429,18 @@ rebuilt at startup. `bootrom.db` holds license keys and the shared guest passwor
 
 ## Security
 
-The web admin and every `/api/*` route sit behind a login (argon2 password, signed session cookie) plus
-a `Host`-header check. The first password needs the setup token from the server log. Wrong passwords are
-throttled per client IP (after 5 failures: locked 1 s, doubling up to 5 min). **Settings → Admin password**
-changes it and signs out every other session — open streams (live updates, Remote) re-check the session every 30 s and
-close once it is gone. A few properties are inherent to diskless boot on a shared LAN and are handled by
-**network setup**, not the binary:
+The web admin and every `/api/*` route sit behind a login (argon2 passwords, signed session cookie) plus
+a `Host`-header check. The first owner account needs the setup token from the server log (a server from before
+accounts keeps its admin password as owner `admin`). Wrong passwords are throttled per client IP (after 5 failures:
+locked 1 s, doubling up to 5 min).
+
+**Accounts** (Settings → Users, owners): **owner** = everything; **staff** = every page, Remote, Wake, Save / Discard a
+games update and their own password — no deleting or changing images, disks, machines or settings, no license keys,
+no golden export. The server enforces it (a staff request for anything else gets 403); the pages just hide those
+buttons. Every change is logged with who made it (Logs page). Changing a password signs that account's other sessions
+out; open streams (live updates, Remote) re-check the session every 30 s and close once it is gone.
+
+A few properties are inherent to diskless boot on a shared LAN and are handled by **network setup**, not the binary:
 
 - **Segment the boot LAN.** The iSCSI portal (`:3260`) and the golden over HTTP are readable by any host
   on that segment — that is how diskless clients read their root. Put the workstations on their own VLAN,
@@ -444,11 +450,19 @@ close once it is gone. A few properties are inherent to diskless boot on a share
 - **Update `disk`-cache images off-hours.** A `disk` image serves one shared golden file and refuses to
   publish or roll back while clients are connected (they would read changed bytes). Use the RAM (`zram`) cache to
   update live: each publish gets a fresh RAM copy + target, and the old one is kept until its clients drop.
-- **Games disk writes** are allowed from that disk's update machine IP only (iSCSI has no other proof of who is
-  connecting): a host faking that IP could write into the pending update. Check before saving; segment the LAN.
-- **Remote**: watching or controlling a machine needs the admin login (the browser's connection is also checked to
-  come from this web admin's own pages). The agents dial out and open no port; the server knows each one by its IP —
-  like the license, a host faking a registered machine's IP could pose as it (it would only feed a fake screen).
+- **Games disk writes** are allowed only from that disk's update machine: its IP *and* its MAC as the server's ARP
+  table sees it (another MAC on that IP gets a read-only session, logged). A host that also fakes the MAC could still
+  write into the pending update — check before saving.
+- **Remote**: watching or controlling a machine needs a login (the browser's connection is also checked to come from
+  this web admin's own pages). The agents dial out and open no port. Each machine has its own key, handed to its stage
+  once (first boot; again after **Devices → Re-issue**) and kept on its SSD; the agent and the server prove the key to
+  each other at every connection (the key itself is not sent) and every command to the agent is signed and numbered
+  — another LAN host can neither pose as the server to drive a machine nor pose as a machine's agent. Limits: the
+  handover at the first boot is plain HTTP, and what the admin types is signed, not encrypted.
+- **Admin on a separate port.** The web admin is plain HTTP: anyone who can redirect traffic on the same segment
+  (ARP spoofing from a guest PC) could read a password typed there. Keep the cashier / admin PC off the guests'
+  segment, or turn on port isolation (client isolation) on the switch so guest PCs only reach the server and the
+  gateway — it also stops the ARP tricks above.
 
 ## Build
 

@@ -9,9 +9,10 @@
   <form id="f" class="card card-body shadow-sm d-flex flex-column gap-2 w-100" style="max-width:360px" autocomplete="on">
     <div class="fs-5 fw-bold">Broom Console</div>
     <h1 class="h6 mb-0" id="title">Sign in</h1>
-    <p class="form-text mt-0" id="hint">Enter the admin password.</p>
+    <p class="form-text mt-0" id="hint">Sign in with your account.</p>
     <input class="form-control" id="tok" placeholder="Setup token (from the server log)" autocomplete="off" spellcheck="false" hidden>
-    <input class="form-control" id="pw" type="password" placeholder="Admin password" autocomplete="current-password" required>
+    <input class="form-control" id="user" placeholder="User" value="admin" autocomplete="username" autocapitalize="none" spellcheck="false" required>
+    <input class="form-control" id="pw" type="password" placeholder="Password" autocomplete="current-password" required>
     <input class="form-control" id="pw2" type="password" placeholder="Confirm password" autocomplete="new-password" hidden>
     <button class="btn btn-primary w-100" id="go" type="submit">Continue</button>
     <span class="msg text-danger" id="msg" style="min-height:1.2rem"></span>

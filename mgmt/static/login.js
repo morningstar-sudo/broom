@@ -13,8 +13,8 @@ function fail(t){const m=$('msg');m.innerHTML='<svg class="ic" role="img" aria-l
     if(s.authed){location.replace('/');return;}
     if(!s.configured){
       setup=true;
-      $('title').textContent='Set the admin password';
-      $('hint').textContent='First run — enter the setup token printed in the server log (journalctl -u bootrom-mgmt, or the terminal running it), then choose the admin password (min 8 characters).';
+      $('title').textContent='Create the owner account';
+      $('hint').textContent='First run — enter the setup token printed in the server log (journalctl -u bootrom-mgmt, or the terminal running it), then choose the owner account name and its password (min 8 characters).';
       $('pw').autocomplete='new-password';$('pw2').hidden=false;$('tok').hidden=false;$('tok').focus();
     }
   }catch(e){/* offline — let the submit surface the error */}
@@ -30,7 +30,7 @@ $('f').onsubmit=async e=>{
   $('go').disabled=true;msg.textContent='';
   let r;
   try{r=await fetch(setup?'/api/auth/setup':'/api/auth/login',
-    {method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(setup?{password:pw,token:$('tok').value.trim()}:{password:pw})});}
+    {method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({user:$('user').value.trim().toLowerCase(),password:pw,...(setup?{token:$('tok').value.trim()}:{})})});}
   catch(err){fail(err.message);return;}
   if(!r.ok){fail((await r.text())||('HTTP '+r.status));return;}
   location.replace('/');   // session cookie set → the app is now reachable

@@ -26,7 +26,7 @@ for(const ev of ['click','change','input'])document.addEventListener(ev,e=>{
 });
 
 // ---- tabs: load HTML fragments on demand (/ui/<page>) + only load data for the tab being viewed ----
-const loaders={machines:loadStatus,remote:loadRemote,server:loadServer,devices:loadDevices,groups:loadGroups,images:loadImages,games:loadGames,drivers:loadDrivers,network:loadDhcp,windows:loadCafe,system:loadCafe,benchmark:loadBench,logs:loadLogs};
+const loaders={machines:loadStatus,remote:loadRemote,server:loadServer,devices:loadDevices,groups:loadGroups,images:loadImages,games:loadGames,drivers:loadDrivers,network:loadDhcp,windows:loadCafe,system:()=>{loadCafe();loadUsers();},benchmark:loadBench,logs:loadLogs};
 const fragCache={};
 let curPage=null;
 async function showPage(p){
@@ -102,9 +102,9 @@ function renderMachines(){
        <td class="mono" title="${esc(m.license_result||'')}">${licCell(m)}</td>
        <td><div class="d-flex gap-1">${m.registered
           ? `<button class="btn btn-sm btn-outline-secondary" ${act('wake',m.mac)}>Wake</button>
-             <button class="btn btn-sm btn-outline-secondary" ${act('manage',m.id)}>Manage</button>
+             <button class="btn btn-sm btn-outline-secondary" ${act('manage',m.id)} data-owner>Manage</button>
              ${m.remote?`<button class="btn btn-sm btn-outline-primary" ${act('remoteTo',m.hostname)} title="See and control this machine">Remote</button>`:''}`
-          : `<button class="btn btn-sm btn-outline-primary" ${act('regMachine',m.mac,m.ip,m.hostname)}>Register</button>`}</div></td>
+          : `<button class="btn btn-sm btn-outline-primary" ${act('regMachine',m.mac,m.ip,m.hostname)} data-owner>Register</button>`}</div></td>
      </tr>`).join('') || '<tr><td colspan=7 class="mono">no matching machines</td></tr>';
   document.getElementById('m_count').textContent=rows.length+' machines';
   document.getElementById('m_page').textContent='Page '+mPage+'/'+pages;
@@ -253,6 +253,9 @@ async function dvOpen(id){
       ${st.agent_since?`<tr><td class="mono">Up</td><td class="mono">${upFor(st.agent_since)} (agent connected ${new Date(st.agent_since*1000).toLocaleString()})</td></tr>`:''}
       ${st.traffic?`<tr><td class="mono">Traffic</td><td class="mono">${esc(trText(st.traffic))}</td></tr>`:''}
       <tr><td class="mono">License</td><td class="mono" style="white-space:normal">${licCell(m,true)}</td></tr>
+      <tr><td class="mono">Remote key</td><td class="mono" style="white-space:normal">${!d.agent_key?'— none yet: its next Windows boot gets one'
+        :d.agent_key.delivered?'handed over '+new Date(d.agent_key.delivered*1000).toLocaleString():'new key waiting for its next boot'}
+        <button class="btn btn-sm btn-outline-secondary ms-2" ${act('rekey',m.mac,name)} data-owner title="a new key, handed to the machine at its next boot — when it lost its key (new disk) or the old one may have leaked">Re-issue</button></td></tr>
       <tr><td class="mono">Driver packages</td><td class="mono">${d.drivers.length?esc(d.drivers.join(', ')):'—'}</td></tr>
       <tr><td class="mono">Hardware (${d.hwids.length})</td><td class="mono" style="white-space:normal">${d.hwids.length
         ?`<details><summary>IDs its stage reported at the last boot</summary>${d.hwids.map(esc).join('<br>')}</details>`
@@ -281,6 +284,9 @@ async function dvDisks(mac,name){const el=document.getElementById('dd_disks');if
     ${rows?`<table class="table table-sm align-middle mb-0"><thead><tr><th>Disk</th><th>Size</th><th>Model</th><th>Id</th><th></th></tr></thead><tbody>${rows}</tbody></table>
       <div class="small text-body-secondary mt-1">reported ${new Date(k.seen*1000).toLocaleString()} (Windows boots)</div>`
       :'<span class="mono">— not reported yet (boot Windows on it once)</span>'}`;}
+async function rekey(mac,name){
+  if(!await sure(`New Remote key for ${name}? Its agent is refused until its next boot brings the new key.`))return;
+  try{await j('/api/vnc/rekey',mk({mac}));toast('New key: '+name+' gets it at its next boot');if(dvOpenId)dvOpen(dvOpenId);}catch(e){toast(e.message,true);}}
 async function dvHide(mac,el){const m=document.getElementById('dk_msg');
   try{await j('/api/disks/hide',mk({mac,hide:el.value===''?null:el.value==='1'}));say(m,' ✓ saved');}catch(e){say(m,' ✗ '+e.message);}}
 async function dvBroomDisk(mac,id,label,name){
@@ -483,7 +489,7 @@ async function loadVols(){try{vols=await j('/api/volumes');}catch(e){return;}
 function volCell(kind,name,cur){
   if(!vols.volumes.length&&!cur)return '<span class="mono">broom folder</span>';
   const o=(id,label,dis)=>`<option value="${esc(id)}"${(cur||'')===id?' selected':''}${dis?' disabled':''}>${esc(label)}</option>`;
-  return `<select class="form-select form-select-sm w-auto" data-change="volMove" data-args="${esc(JSON.stringify([kind,name,cur||'']))}">`
+  return `<select class="form-select form-select-sm w-auto" data-owner data-change="volMove" data-args="${esc(JSON.stringify([kind,name,cur||'']))}">`
     +o('','broom folder')+vols.volumes.map(x=>o(x.id,x.id+(x.mounted?'':' (missing)'),!x.mounted&&x.id!==cur)).join('')+'</select>';}
 async function volMove(kind,name,cur,el){const to=el.value,what=(kind==='image'?'image ':'games disk ')+name;
   if(!await sure(`Move ${what} to ${to||'the broom folder'}? Its files are copied (a while for a big one), then the old copy is deleted. Machines using it must be shut down first.`)){el.value=cur;return;}
@@ -499,16 +505,16 @@ async function loadServerDisks(){const el=document.getElementById('b_disks');if(
   const vrows=`<tr><td><b>broom folder</b></td><td class="mono">${esc(r.home.path)}</td><td class="mono">${sp(r.home.space)}</td><td>everything not on another disk</td><td></td></tr>`
     +r.volumes.map(x=>`<tr><td><b>${esc(x.id)}</b>${x.mounted?'':' <span class="badge text-bg-danger" title="not mounted: unplugged? what is on it is not served">missing</span>'}</td>
       <td class="mono">${esc(x.path)}${x.fstype?' ('+esc(x.fstype)+')':''}</td><td class="mono">${sp(x.space)}</td><td>${esc(on(x))||'—'}</td>
-      <td>${on(x)?'':`<button class="btn btn-sm btn-outline-secondary" ${act('volRemove',x.id)} title="stop using it (its files stay)">Remove</button>`}</td></tr>`).join('');
+      <td data-owner>${on(x)?'':`<button class="btn btn-sm btn-outline-secondary" ${act('volRemove',x.id)} title="stop using it (its files stay)">Remove</button>`}</td></tr>`).join('');
   const badge={system:'text-bg-secondary','in use':'text-bg-secondary',broom:'text-bg-primary',free:'text-bg-success'};
   const drows=r.disks.map(d=>`<tr><td class="mono">${esc(d.name)}</td><td class="mono">${gbs(d.size)}</td><td>${esc(d.model||'—')}${d.rotational?' <span class="small text-body-secondary">HDD</span>':''}</td>
       <td class="mono small">${esc([d.mount||'',...d.parts.map(p=>p.name+(p.mount?' → '+p.mount:'')),...d.holders.map(h=>'held by '+h)].filter(Boolean).join(', '))||'—'}</td>
       <td class="small">${d.health?`<span class="${srvDiskBad(d.health)?'text-danger':''}">${esc(srvDiskHealth(d.health))}</span>`:'—'}</td>
       <td><span class="badge ${badge[d.state]}">${d.state}</span></td>
-      <td>${d.state==='free'?`<button class="btn btn-sm btn-outline-danger" ${act('volFormat',d.name,d.model,d.size,d.old_data)}>Format</button>`:''}</td></tr>`).join('');
+      <td data-owner>${d.state==='free'?`<button class="btn btn-sm btn-outline-danger" ${act('volFormat',d.name,d.model,d.size,d.old_data)}>Format</button>`:''}</td></tr>`).join('');
   el.innerHTML=`<table class="table table-sm align-middle mb-3"><thead><tr><th>Broom disk</th><th>Path</th><th>Space</th><th>On it</th><th></th></tr></thead><tbody>${vrows}</tbody></table>
     <table class="table table-sm align-middle mb-2"><thead><tr><th>Disk</th><th>Size</th><th>Model</th><th>Partitions / mounts</th><th>Health</th><th>State</th><th></th></tr></thead><tbody>${drows}</tbody></table>
-    <div class="d-flex flex-wrap gap-2 align-items-end"><div><label class="form-label small mb-1" for="vol_folder">Or a folder you mounted yourself (LVM, RAID…)</label><input class="form-control form-control-sm" id="vol_folder" size="28" placeholder="/mnt/data/broom"></div>
+    <div class="d-flex flex-wrap gap-2 align-items-end" data-owner><div><label class="form-label small mb-1" for="vol_folder">Or a folder you mounted yourself (LVM, RAID…)</label><input class="form-control form-control-sm" id="vol_folder" size="28" placeholder="/mnt/data/broom"></div>
       <button class="btn btn-sm btn-outline-primary" data-click="volFolder">Add folder</button><span id="vol_msg" class="msg align-self-center"></span></div>`;}
 async function volFormat(name,model,size,old){
   const t=await ask('Format '+name,`ERASES everything on ${name} (${model||'disk'} ${gbs(size)})${old?' — it has partitions / a filesystem now':''} and makes it a broom disk for images and games disks. Type ${name} to confirm.`,'');
@@ -593,10 +599,10 @@ async function loadGames(){const [g]=await Promise.all([j('/api/games'),loadVols
       <td>${d.groups.length?esc(d.groups.join(', ')):'<span class="mono">all</span>'}</td>
       <td class="mono">${s?'g'+s.ver+(s.layers?` <span title="versions not merged into the disk yet (${gbs(s.layer_bytes)})">+${s.layers} ${s.merging?'merging…':'to merge'}</span>`:''):'<span class="text-danger">not served</span>'}</td>
       <td class="mono">${s?s.sessions+(s.old_sessions?` <span title="still on an older version until they reboot">(${s.old_sessions} older)</span>`:''):''}</td>
-      <td><select class="form-select form-select-sm d-inline-block w-auto" data-change="setGamesUpdate" data-args="${esc(JSON.stringify([d.name]))}">${opts(d.update)}</select>${d.update!=null&&!x.update_ip?' <span class="text-danger" title="no fixed IP or lease known">no IP</span>':''}${s&&s.update_connected?' <span class="text-success">'+ic('dot','')+' writable</span>':''}</td>
+      <td><select class="form-select form-select-sm d-inline-block w-auto" data-owner data-change="setGamesUpdate" data-args="${esc(JSON.stringify([d.name]))}">${opts(d.update)}</select>${d.update!=null&&!x.update_ip?' <span class="text-danger" title="no fixed IP or lease known">no IP</span>':''}${s&&s.update_connected?' <span class="text-success">'+ic('dot','')+' writable</span>':''}</td>
       <td class="mono">${s&&s.update_bytes?gbs(s.update_bytes)+` <button class="btn btn-sm btn-outline-primary" ${act('saveGamesUpdate',d.name)}>Save</button> <button class="btn btn-sm btn-outline-secondary" ${act('discardGamesUpdate',d.name)}>Discard</button>`:'—'}</td>
       <td>${volCell('games',d.name,x.volume)}</td>
-      <td><button class="btn btn-sm btn-outline-secondary" ${act('toggleGamesRam',d.name,!d.ram)} title="RAM: the disk is served from a copy in the server's RAM (loaded in the background; needs about as much free RAM as the games on it — games barely compress). Disk: read from games.img (the page cache keeps what is played most).">${d.ram?(s&&s.ram?'Cache: RAM':(s&&s.ram_loading?'Cache: RAM (loading…)':'Cache: RAM (not loaded)')):'Cache: disk'}</button> <button class="btn btn-sm btn-outline-secondary" ${act('editGames',d.name)}>Edit</button> <button class="btn btn-sm btn-outline-danger" ${act('delGames',d.name)}>Delete</button></td></tr>`;}).join('')
+      <td data-owner><button class="btn btn-sm btn-outline-secondary" ${act('toggleGamesRam',d.name,!d.ram)} title="RAM: the disk is served from a copy in the server's RAM (loaded in the background; needs about as much free RAM as the games on it — games barely compress). Disk: read from games.img (the page cache keeps what is played most).">${d.ram?(s&&s.ram?'Cache: RAM':(s&&s.ram_loading?'Cache: RAM (loading…)':'Cache: RAM (not loaded)')):'Cache: disk'}</button> <button class="btn btn-sm btn-outline-secondary" ${act('editGames',d.name)}>Edit</button> <button class="btn btn-sm btn-outline-danger" ${act('delGames',d.name)}>Delete</button></td></tr>`;}).join('')
     ||'<tr><td colspan="10" class="mono">no games disk yet</td></tr>';
   const m=document.getElementById('gm_msg');if(m&&g.error)say(m,' ✗ not served: '+g.error);}
 async function gamesCall(url,body,q){if(q&&!await sure(q))return;const m=document.getElementById('gm_msg');
@@ -669,9 +675,28 @@ async function saveCafe(){const m=document.getElementById('cafe_msg');
 async function savePw(){const m=document.getElementById('pw_msg'),g=id=>document.getElementById(id).value;
   if(g('pw_new').length<8){say(m,' ✗ at least 8 characters');return;}
   if(g('pw_new')!==g('pw_new2')){say(m,' ✗ passwords do not match');return;}
-  try{await j('/api/password',mk({current:g('pw_cur'),new:g('pw_new')}));say(m,' ✓ changed, other sessions signed out');
+  try{await j('/api/password',mk({current:g('pw_cur'),new:g('pw_new')}));say(m,' ✓ changed, your other sessions signed out');
     for(const id of ['pw_cur','pw_new','pw_new2'])document.getElementById(id).value='';}
   catch(e){say(m,' ✗ '+e.message);}}
+// ---- accounts (users.rs; owners): who is signed in decides what the page shows (body[data-role]) ----
+let me={};
+async function loadMe(){try{me=await j('/api/auth/status');}catch(e){return;}
+  document.body.dataset.role=me.role||'';
+  const w=document.getElementById('whoami');if(w)w.textContent=me.user?`${me.user} · ${me.role}`:'';}
+async function loadUsers(){if(!me.role)await loadMe();
+  const tb=document.querySelector('#users tbody');if(!tb||me.role!=='owner')return;
+  const u=await j('/api/users');
+  tb.innerHTML=u.map(x=>`<tr><td class="mono">${esc(x.name)}${x.name===me.user?' <span class="badge text-bg-secondary">you</span>':''}</td>
+    <td><select class="form-select form-select-sm w-auto" data-change="userRole" data-args="${esc(JSON.stringify([x.name]))}">${['owner','staff'].map(r=>`<option${r===x.role?' selected':''}>${r}</option>`).join('')}</select></td>
+    <td><div class="d-flex gap-1"><button class="btn btn-sm btn-outline-secondary" ${act('userPw',x.name,x.role)}>New password</button>${x.name===me.user?'':` <button class="btn btn-sm btn-outline-danger" ${act('userDel',x.name)}>Delete</button>`}</div></td></tr>`).join('');}
+async function userCall(url,body,done){const m=document.getElementById('us_msg');
+  try{await j(url,mk(body));say(m,' ✓ '+done);}catch(e){say(m,' ✗ '+e.message);}loadUsers();}
+async function userAdd(){const name=v('us_name').toLowerCase(),p=document.getElementById('us_pw');
+  await userCall('/api/users',{name,role:document.getElementById('us_role').value,password:p.value},name+' saved');p.value='';}
+const userRole=(name,el)=>userCall('/api/users',{name,role:el.value},name+' is now '+el.value);
+async function userPw(name,role){const p=await ask('New password for '+name,'At least 8 characters. Their open sessions end.','');
+  if(p!=null)userCall('/api/users',{name,role,password:p},'password of '+name+' changed');}
+async function userDel(name){if(await sure('Delete account '+name+'? Their open sessions end.'))userCall('/api/users/delete',{name},name+' deleted');}
 async function setTimeout_(){await j('/api/config/timeout',mk({seconds:+document.getElementById('timeout').value}));say(document.getElementById('to_msg'),' ✓ saved');}
 async function setSsd(){const m=document.getElementById('ssd_msg');
   try{await j('/api/config/ssd',mk({room_gb:+v('ssd_room'),warn_gb:+v('ssd_warn'),reboot_gb:+v('ssd_reboot')}));say(m,' ✓ saved');}
@@ -1086,6 +1111,7 @@ const ACTIONS={
   wake,manage,regMachine,loadStatus,clearMFilters,mPrev,mNext,mPageSize,setKey,rearmKey,
   loadDevices,dvOpen,dvSave,dvDelete,dvClose,dvBulk,dvRegister,dvImport,dvAdd,dvRender,dvHide,dvBroomDisk,
   volMove,volFormat,volFolder,volRemove,loadServerDisks,
+  userAdd,userRole,userPw,userDel,rekey,
   loadImages,addImage,setDefault,toggleCache,toggleBase,toggleSsd,togglePreload,editImgGroups,republish,showVersions,exportImage,editBoot,delImage,
   snapshotImage,rollbackImage,versionToImage,deleteVersion,
   loadGames,saveGames,setGamesUpdate,toggleGamesRam,saveGamesUpdate,discardGamesUpdate,editGames,delGames,
@@ -1099,6 +1125,7 @@ const ACTIONS={
 let started=false;
 function startApp(){
   if(started)return; started=true;
+  loadMe();
   const srvEvents=new EventSource('/api/events');
   srvEvents.addEventListener('ping',alive);
   srvEvents.addEventListener('job',e=>{alive();const d=JSON.parse(e.data);showJob(d.name,d.status);});

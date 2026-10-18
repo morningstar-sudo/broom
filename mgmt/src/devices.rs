@@ -647,6 +647,7 @@ struct IdQuery {
 /// GET /api/machines/detail?id= — machine + lease + hardware its stage reported + driver packages it gets.
 async fn detail(
     State(st): State<SharedState>,
+    axum::Extension(w): axum::Extension<crate::auth::Who>,
     Query(q): Query<IdQuery>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let m = by_id(&st.db.machines().map_err(ise)?, q.id)?;
@@ -673,7 +674,11 @@ async fn detail(
         .image_id
         .and_then(|i| st.db.image(i).ok().flatten())
         .map(|i| i.name);
-    let license_key = m.license_key.clone(); // skip-serialized on Machine; the logged-in operator sees it here
+    // Skip-serialized on Machine; an owner sees it here, staff do not.
+    let license_key = m
+        .license_key
+        .clone()
+        .filter(|_| w.role == crate::auth::Role::Owner);
     Ok(ok_json(serde_json::json!({
         "machine": m,
         "license_key": license_key,
@@ -681,6 +686,7 @@ async fn detail(
         "lease": lease.map(|l| serde_json::json!({"ip": l.ip, "expires_in": l.expires - crate::now_secs() as i64, "source": l.source})),
         "hwids": hw,
         "drivers": got,
+        "agent_key": crate::agentauth::info(&st, &m.mac),
     })))
 }
 

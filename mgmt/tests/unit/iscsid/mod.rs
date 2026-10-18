@@ -375,3 +375,38 @@ fn requests_roundtrip() {
         (2, None, "")
     );
 }
+
+/// The update session needs the update machine's IP and, when the disk names it, its MAC as ARP sees it.
+#[test]
+fn games_update_needs_ip_and_mac() {
+    let c = |mac: Option<&str>| games::Config {
+        name: "t".into(),
+        update_ip: Some("10.0.0.20".into()),
+        update_mac: mac.map(Into::into),
+        ..Default::default()
+    };
+    let arp = |m: Option<&'static str>| move || m.map(String::from);
+    let mac = Some("aa:bb:cc:dd:ee:01");
+    assert!(games::update_allowed(
+        &c(mac),
+        "10.0.0.20",
+        arp(Some("AA:BB:CC:DD:EE:01")),
+        "t"
+    ));
+    assert!(
+        !games::update_allowed(&c(mac), "10.0.0.20", arp(Some("aa:bb:cc:dd:ee:99")), "t"),
+        "same IP, other MAC"
+    );
+    assert!(
+        !games::update_allowed(&c(mac), "10.0.0.20", arp(None), "t"),
+        "no ARP entry"
+    );
+    assert!(
+        !games::update_allowed(&c(mac), "10.0.0.21", arp(Some("aa:bb:cc:dd:ee:01")), "t"),
+        "other IP"
+    );
+    assert!(
+        games::update_allowed(&c(None), "10.0.0.20", arp(None), "t"),
+        "no MAC named: IP only"
+    );
+}
