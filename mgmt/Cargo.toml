@@ -19,7 +19,7 @@ futures-util = "0.3.34"   # SSE stream
 socket2 = { version = "0.6.5", features = ["all"] }   # DHCP/TFTP sockets (bind to interface, broadcast)
 libc = "0.2.189"   # fallocate punch-hole, geteuid
 sha2 = "0.11.0"   # golden sha256 (replaces sha256sum)
-hmac = "0.13"   # HMAC-SHA256 of the Remote agent handshake (agentauth.rs; the agent is .NET HMACSHA256)
+hmac = "0.13"   # HMAC-SHA256: the Remote agent handshake (agentauth.rs; .NET HMACSHA256) and the sign-in (pwproof.rs)
 blake3 = "1.8.7"   # session MACs (auth.rs), agent keys (agentauth.rs), stable disk GUIDs (disk.rs)
 tracing = "0.1.44"   # logging (events → stdout, warnings/errors → stderr)
 tracing-subscriber = "0.3.23"   # log output (RUST_LOG=level)
@@ -28,7 +28,7 @@ zip = { version = "9.0.4", default-features = false, features = ["deflate"] }   
 flate2 = { version = "1.1.10", default-features = false, features = ["zlib-rs"] }   # gzip for initrd cpio + tar.gz (archive.rs)
 crc32fast = "1.5.2"   # GPT checksums (disk.rs)
 ureq = "3"   # HTTPS download of the Windows stage bundle (rustls + built-in CA roots, static-friendly)
-argon2 = { version = "0.5.3", features = ["std"] }   # admin password hashing (auth.rs)
+pbkdf2 = { version = "0.13", default-features = false, features = ["hmac"] }   # password verifiers of the sign-in handshake (pwproof.rs)
 # Read the Windows golden's NTFS in process (ntfsread.rs; no loop + ntfs3 on the server). Pinned to upstream master:
 # the 0.4.0 release pulls binrw 0.11, which a future Rust rejects; master replaced it with zerocopy. Back to a
 # crates.io version once one after 0.4.0 is out.

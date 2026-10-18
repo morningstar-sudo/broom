@@ -1,6 +1,6 @@
 // images.rs — images API: create / delete / default, chunked golden upload → convert + publish jobs, versions
 // (versions.rs: snapshot / rollback / new image from a version), export as a VMware VM, and the golden
-// prep scripts (Linux /broom-prep, Windows one-time link).
+// prep scripts (Linux /broom-prep, Windows /broom-prep-win: both open, run inside the VM).
 use axum::{
     Json, Router,
     body::Body,
@@ -905,7 +905,7 @@ async fn set_use_ssd(
     Ok(crate::api::ok())
 }
 
-/// Script that prepares a Windows golden (tweaks + EFI + unattend + sysprep), run INSIDE the Windows VM.
+/// Script that prepares a Windows golden (tweaks + EFI + unattend + sysprep), run INSIDE the Windows VM or PC.
 /// GET /broom-prep-win  →  irm http://<server>/broom-prep-win | iex. Open on purpose (same command every time): it
 /// carries the guest user + password, readable by anyone on the boot LAN — like the golden itself.
 async fn broom_prep_win(State(st): State<SharedState>) -> impl IntoResponse {

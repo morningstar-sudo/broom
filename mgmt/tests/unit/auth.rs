@@ -30,15 +30,6 @@ fn host_header() {
 }
 
 #[test]
-fn hash_and_verify() {
-    let h = hash_pw("correct horse").unwrap();
-    assert!(h.starts_with("$argon2"));
-    assert!(verify_pw("correct horse", &h));
-    assert!(!verify_pw("wrong", &h));
-    assert_ne!(hash_pw("x").unwrap(), hash_pw("x").unwrap(), "random salt");
-}
-
-#[test]
 fn public_paths() {
     let pub_get = |p| is_public(&Method::GET, p);
     let pub_post = |p| is_public(&Method::POST, p);

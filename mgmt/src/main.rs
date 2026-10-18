@@ -39,6 +39,7 @@ mod ntfsread;
 mod overlay;
 mod preflight;
 mod publish;
+mod pwproof;
 mod settings;
 mod setup;
 mod sysmon;
@@ -542,6 +543,7 @@ async fn main() {
     let app = Router::new()
         .route("/login", get(login_page)) // standalone sign-in page (auth.rs); public
         .route("/login.js", get(asset))
+        .route("/crypto.js", get(asset))
         .route("/", get(index)) // web admin shell (embedded in the binary)
         .route("/app.js", get(asset))
         .route("/app.css", get(asset)) // public: the login page uses it too

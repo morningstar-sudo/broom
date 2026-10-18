@@ -87,14 +87,21 @@ Use a **fixed directory**: the images and the database live next to the binary.
 ```bash
 sudo mkdir -p /opt/bootrom && cd /opt/bootrom
 sudo curl -fLO https://github.com/morningstar-sudo/broom/releases/latest/download/bootrom-mgmt
+sudo curl -fLO https://github.com/morningstar-sudo/broom/releases/latest/download/SHA256SUMS
+sha256sum --ignore-missing -c SHA256SUMS   # must say: bootrom-mgmt: OK
 sudo chmod +x bootrom-mgmt
 sudo ./bootrom-mgmt install-service      # systemd unit; flags after it (e.g. --port 8080) go into the unit
 journalctl -u bootrom-mgmt -f            # shows the one-time setup token
 ```
 
+**Who built it:** the checksum only proves the download is whole. Every release file also carries a signed build
+provenance (GitHub artifact attestation, Sigstore): `gh attestation verify bootrom-mgmt --repo morningstar-sudo/broom`
+(GitHub CLI, on any machine) checks that it was built by this repository's CI from a commit of `main`.
+
 The first start detects the network and downloads the release's `broom-assets.zip` (web UI, iPXE, scripts); the first
-Windows publish fetches `broom-stage.tar.gz` (client stage). **Offline server:** copy both files of the same release
-next to the binary. To upgrade: stop the service, replace the binary, start it.
+Windows publish fetches `broom-stage.tar.gz` (client stage). The binary takes them only with the sha256 built into it.
+**Offline server:** copy both files of the same release next to the binary. To upgrade: stop the service, replace the
+binary (checked the same way), start it.
 
 Open `http://<server-ip>/`, enter the setup token and set the owner password. Then the network boot:
 
@@ -124,6 +131,9 @@ Upload the powered-off VM folder (only `.vmx` / `.vmdk` are sent, in parallel ch
   ```
   It syspreps and powers off; upload (OS = Windows). The script holds the guest password and is readable on the boot
   LAN, like the golden itself.
+- Both scripts come from your own Broom server over the LAN. To read one before it runs: `curl -fsSLo prep.sh
+  http://<server>/broom-prep`, then `less prep.sh` and `sudo bash prep.sh` (Windows: `irm … -OutFile prep.ps1`,
+  read it, then `.\prep.ps1`).
 - **Capture a real PC:** run the same prep on the PC, then PXE-boot it and pick **[C] Capture / deploy → Capture**.
   Sign in with an owner account, pick the disk, name the image. Only what NTFS uses is sent (40 GB of Windows on a
   1 TB disk sends ~40 GB). BitLocker must be off; keep C: small, since every client gets a C: that size.
@@ -200,13 +210,20 @@ every account), start it: a new setup token is printed.
 
 ## Security
 
-Every admin page and `/api/*` route needs a login (argon2, signed session cookie, `Host` check, throttled after 5
-failures). Boot endpoints stay open, since a PXE client can't log in. What the network must do:
+Every admin page and `/api/*` route needs a login (session in the database, `Host` check, throttled after 5
+failures). Boot endpoints stay open, since a PXE client can't log in.
+
+**Passwords never cross the network.** Signing in (web page and Capture) is a handshake like WPA2's: hello → the
+account's salt and a server nonce → a proof made from the password (PBKDF2-SHA256, 600 000 rounds, in the browser) →
+the server's own proof back. The server keeps only a verifier per account, so a copied database logs nobody in, and a
+sniffed sign-in gives neither the password nor a reusable proof. A new password (first owner, change, reset by an
+owner) travels as its verifier sealed with the session's key (the first one with the setup token, never typed
+anywhere but the page). The session cookie itself still travels in the clear. What the network must do:
 
 - **Segment the boot LAN.** The goldens (HTTP) and iSCSI (`:3260`) are readable by any host on it. Keep guest Wi-Fi
   and unknown laptops off it, and keep real secrets out of goldens.
-- **Isolate the admin PC** or turn on port isolation: the web admin is plain HTTP, and port isolation also stops ARP
-  spoofing from guest PCs.
+- **Isolate the admin PC** or turn on port isolation: the web admin is plain HTTP, so a host that can redirect its
+  traffic (ARP spoofing from a guest PC) could take over a session or change the pages; port isolation stops that.
 - License keys go to a PC once, over plain HTTP, while its base is built.
 - iSCSI writes are accepted only from a disk's update machine (IP + MAC).
 - Remote agents dial out; each PC has its own key, both sides prove it at every connection and every command is signed.

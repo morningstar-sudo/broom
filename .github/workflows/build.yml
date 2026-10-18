@@ -234,6 +234,8 @@ jobs:
     runs-on: ubuntu-24.04
     permissions:
       contents: write # tag + release on pushes to main
+      id-token: write # the attestations below are signed with this run's OIDC identity (Sigstore, no key to keep)
+      attestations: write
     steps:
       - uses: actions/download-artifact@v4
         with:
@@ -300,6 +302,18 @@ jobs:
             mgmt/dist/broom-assets.zip
             mgmt/SHA256SUMS
           if-no-files-found: error
+
+      # Build provenance (SLSA) for every release file, signed by this workflow: a server checks a download with
+      # `gh attestation verify bootrom-mgmt --repo morningstar-sudo/broom` (README → Quick start).
+      - name: Attest
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: |
+            mgmt/dist/bootrom-mgmt
+            mgmt/ipxe/snponly.efi
+            mgmt/dist/broom-stage.tar.gz
+            mgmt/dist/broom-assets.zip
 
       # Pushes to main only (not pull requests). The action creates the tag on this commit; a tag made with
       # GITHUB_TOKEN does not start another workflow run.

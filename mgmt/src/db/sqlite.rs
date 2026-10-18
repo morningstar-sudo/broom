@@ -94,6 +94,7 @@ const SCHEMA: &str = r#"
     CREATE TABLE IF NOT EXISTS sessions(
         id      TEXT PRIMARY KEY,
         user    TEXT NOT NULL,
+        key     TEXT NOT NULL,           -- the handshake's session key (hex): new passwords come sealed with it
         expires INTEGER NOT NULL
     );
 
@@ -630,18 +631,21 @@ impl Db for Sqlite {
             .map_err(e)
     }
 
-    fn put_session(&self, id: &str, user: &str, expires: i64, now: i64) -> DbResult<()> {
+    fn put_session(&self, id: &str, user: &str, key: &str, expires: i64, now: i64) -> DbResult<()> {
         self.run("DELETE FROM sessions WHERE expires <= ?1", [now])?;
         self.run(
-            "INSERT INTO sessions(id,user,expires) VALUES(?1,?2,?3)",
-            params![id, user, expires],
+            "INSERT INTO sessions(id,user,key,expires) VALUES(?1,?2,?3,?4)",
+            params![id, user, key, expires],
         )
     }
 
-    fn session_user(&self, id: &str, now: i64) -> DbResult<Option<String>> {
+    fn session(&self, id: &str, now: i64) -> DbResult<Option<(String, String)>> {
         self.c()
-            .prepare_cached("SELECT user FROM sessions WHERE id=?1 AND expires > ?2")
-            .and_then(|mut s| s.query_row(params![id, now], |r| r.get(0)).optional())
+            .prepare_cached("SELECT user,key FROM sessions WHERE id=?1 AND expires > ?2")
+            .and_then(|mut s| {
+                s.query_row(params![id, now], |r| Ok((r.get(0)?, r.get(1)?)))
+                    .optional()
+            })
             .map_err(e)
     }
 

@@ -190,9 +190,9 @@ pub trait Db: Send + Sync {
 
     // --- web admin sessions (id = hash of the cookie's token) ---
     /// A new session; expired ones are dropped first.
-    fn put_session(&self, id: &str, user: &str, expires: i64, now: i64) -> DbResult<()>;
-    /// The account of a session not expired at `now`.
-    fn session_user(&self, id: &str, now: i64) -> DbResult<Option<String>>;
+    fn put_session(&self, id: &str, user: &str, key: &str, expires: i64, now: i64) -> DbResult<()>;
+    /// (account, session key) of a session not expired at `now`.
+    fn session(&self, id: &str, now: i64) -> DbResult<Option<(String, String)>>;
     fn delete_session(&self, id: &str) -> DbResult<()>;
     /// Every session of an account (password changed, account deleted).
     fn delete_sessions(&self, user: &str) -> DbResult<()>;

@@ -27,11 +27,13 @@ $('f').onsubmit=async e=>{
     if(pw!==$('pw2').value){msg.textContent='passwords do not match';return;}
     if(!$('tok').value.trim()){msg.textContent='enter the setup token';return;}
   }
-  $('go').disabled=true;msg.textContent='';
-  let r;
-  try{r=await fetch(setup?'/api/auth/setup':'/api/auth/login',
-    {method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({user:$('user').value.trim().toLowerCase(),password:pw,...(setup?{token:$('tok').value.trim()}:{})})});}
-  catch(err){fail(err.message);return;}
-  if(!r.ok){fail((await r.text())||('HTTP '+r.status));return;}
+  $('go').disabled=true;msg.textContent=setup?'creating the account…':'signing in…';
+  // Neither the password nor the setup token is sent (crypto.js): setup sends the password's verifier sealed with the
+  // token, signing in is the handshake.
+  const user=$('user').value.trim().toLowerCase()||'admin';
+  try{
+    if(setup)await authPost('/api/auth/setup',{user,cred:sealPw(setupKey($('tok').value),user,pw)});
+    await signIn(user,pw);
+  }catch(err){msg.textContent='';fail(err.message);return;}
   location.replace('/');   // session cookie set → the app is now reachable
 };

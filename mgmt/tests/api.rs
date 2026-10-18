@@ -22,14 +22,17 @@ fn api_contract() {
         assert_eq!(
             anon.post(
                 "/api/auth/setup",
-                &json!({"password": PASSWORD, "token": "nope"})
+                &json!({"user": "admin", "cred": pw::seal(&pw::setup_key("nope"), "admin", PASSWORD)})
             )
             .status,
             403
         );
         assert_eq!(
-            anon.post("/api/auth/login", &json!({"password": PASSWORD}))
-                .status,
+            anon.post(
+                "/api/auth/hello",
+                &json!({"user": "admin", "cnonce": "00112233445566778899aabbccddeeff"})
+            )
+            .status,
             409,
             "nothing to log in to"
         );
@@ -37,7 +40,7 @@ fn api_contract() {
         assert_eq!(
             anon.post(
                 "/api/auth/setup",
-                &json!({"password": "x".repeat(12), "token": "x"})
+                &json!({"user": "admin", "cred": pw::seal(&pw::setup_key("x"), "admin", PASSWORD)})
             )
             .status,
             409
@@ -52,6 +55,7 @@ fn api_contract() {
         assert_eq!((nav.status, nav.header("location")), (303, Some("/login")));
         let forged = Http {
             cookie: Some("broom_session=99999999999.00ff".into()),
+            ..Http::new()
         };
         assert_eq!(
             forged.get("/api/status").status,
@@ -148,41 +152,51 @@ fn api_contract() {
         );
 
         // Accounts (users.rs) and sessions (auth.rs): staff rights, an owner always left, a session ends on logout (a
-        // copy of its cookie too), on a password reset and with its account; a role change applies at once.
-        let as_user = |u: &str, pw: &str| {
-            let mut c = Http::new();
-            let r = c.post("/api/auth/login", &json!({"user": u, "password": pw}));
-            assert_eq!(r.status, 200, "login {u}: {}", r.text());
-            c.take_cookie(&r);
-            c
-        };
+        // copy of its cookie too), on a password reset and with its account; a role change applies at once. Passwords
+        // never cross the network: a new one comes sealed with the owner's session key, signing in is the handshake.
+        let as_user =
+            |u: &str, p: &str| pw::sign_in(u, p).unwrap_or_else(|s| panic!("login {u}: {s}"));
+        let sk = h.sk.unwrap();
         let set = |v: serde_json::Value| h.post("/api/users", &v).status;
+        let cred = |name: &str, p: &str| pw::seal(&sk, name, p);
         assert_eq!(
             set(json!({"name": "staff1", "role": "staff"})),
             400,
             "a new account needs a password"
         );
         assert_eq!(
-            set(json!({"name": "staff1", "role": "staff", "password": "short"})),
+            set(
+                json!({"name": "staff1", "role": "staff", "cred": pw::seal(&[9u8; 32], "staff1", "x-x-x-x-x")})
+            ),
+            400,
+            "sealed with another key"
+        );
+        assert_eq!(
+            set(json!({"name": "staff1", "role": "staff", "cred": cred("staff2", "staff-pass-1")})),
+            400,
+            "sealed for another account"
+        );
+        assert_eq!(
+            set(
+                json!({"name": "Bad Name", "role": "staff", "cred": cred("bad name", "long-enough")})
+            ),
             400
         );
         assert_eq!(
-            set(json!({"name": "Bad Name", "role": "staff", "password": "long-enough"})),
-            400
-        );
-        assert_eq!(
-            set(json!({"name": "staff1", "role": "staff", "password": "staff-pass-1"})),
+            set(json!({"name": "staff1", "role": "staff", "cred": cred("staff1", "staff-pass-1")})),
             200
+        );
+        assert_eq!(
+            pw::sign_in("staff1", "wrong-pass").err(),
+            Some(401),
+            "wrong password"
         );
         let s = as_user("staff1", "staff-pass-1");
         assert_eq!(s.get("/api/status").status, 200, "staff can look");
         assert_eq!(s.get("/api/users").status, 403, "not at the accounts");
         assert_eq!(
-            s.post(
-                "/api/users",
-                &json!({"name": "x", "role": "owner", "password": "long-enough"})
-            )
-            .status,
+            s.post("/api/users", &json!({"name": "x", "role": "owner"}))
+                .status,
             403
         );
         assert_eq!(
@@ -192,12 +206,42 @@ fn api_contract() {
         );
         let copy = Http {
             cookie: s.cookie.clone(),
+            ..Http::new()
         };
         assert_eq!(s.post("/api/auth/logout", &json!({})).status, 200);
         assert_eq!(copy.get("/api/status").status, 401, "ended on the server");
         let s = as_user("staff1", "staff-pass-1");
+        // Their own password: a fresh handshake with the current one, the new one sealed with its key.
+        let a = s
+            .post(
+                "/api/auth/hello",
+                &json!({"user": "staff1", "cnonce": "0123456789abcdef0123456789abcdef"}),
+            )
+            .json();
+        let (c, st, _) = pw::keys(
+            "staff-pass-1",
+            &pw::unhex(a["salt"].as_str().unwrap()),
+            a["iter"].as_u64().unwrap() as u32,
+        );
+        let t = format!(
+            "broom-login|staff1|0123456789abcdef0123456789abcdef|{}",
+            a["snonce"].as_str().unwrap()
+        );
+        let proof = pw::hex(&std::array::from_fn::<u8, 32, _>(|i| {
+            c[i] ^ pw::mac(&st, t.as_bytes())[i]
+        }));
+        let hsk = pw::mac(&c, format!("session|{t}").as_bytes());
         assert_eq!(
-            set(json!({"name": "staff1", "role": "staff", "password": "staff-pass-2"})),
+            s.post(
+                "/api/password",
+                &json!({"hs": a["hs"], "proof": proof, "cred": pw::seal(&hsk, "staff1", "staff-pass-own")})
+            )
+            .status,
+            200
+        );
+        let s = as_user("staff1", "staff-pass-own");
+        assert_eq!(
+            set(json!({"name": "staff1", "role": "staff", "cred": cred("staff1", "staff-pass-2")})),
             200
         );
         assert_eq!(s.get("/api/status").status, 401, "password reset");
@@ -223,16 +267,13 @@ fn api_contract() {
         assert_eq!(s.get("/api/status").status, 401, "account deleted");
         assert_eq!(h.get("/api/status").status, 200);
 
-        // Login throttle: 5 free wrong tries, then this IP is locked out (1 s, doubling) → 429.
-        let wrong = || {
-            anon.post("/api/auth/login", &json!({"password": "wrong-pass"}))
-                .status
-        };
-        for _ in 0..5 {
-            assert_eq!(wrong(), 401);
+        // Login throttle: 5 free wrong proofs, then this IP is locked out (1 s, doubling) → 429.
+        let wrong = || pw::sign_in("admin", "wrong-pass").err();
+        for _ in 0..4 {
+            assert_eq!(wrong(), Some(401));
         }
         assert!(
-            (0..3).any(|_| wrong() == 429),
+            (0..4).any(|_| wrong() == Some(429)),
             "locked out after 5 wrong passwords"
         );
     });

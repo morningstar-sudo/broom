@@ -1,16 +1,15 @@
 // auth.rs — login for the web UI + API. The web admin controls DHCP, images and license keys and runs as root on a
 // shared LAN, so every admin route needs a session. Client/boot routes stay open (a PXE client can't log in).
-// Accounts (config `users`, argon2 hashes) with one of two roles: owner (everything) or staff (the day-to-day: look,
-// Remote, Wake, save a games update — staff_may()). The first owner is made with a one-time setup token printed to the
-// server log (so only someone with access to the server can claim the install). Sessions live in the database
+// Accounts (config `users`: a password verifier each, no password) with one of two roles: owner (everything) or staff
+// (the day-to-day: look, Remote, Wake, save a games update — staff_may()). Signing in is a handshake that never sends
+// the password (pwproof.rs: hello → salt + nonce → proof → the server's proof). The first owner is made with a
+// one-time setup token printed to the server log (so only someone with access to the server can claim the install);
+// it seals that account's verifier, it is never sent either. Sessions live in the database
 // (table `sessions`): the cookie holds a random token, the table only its blake3 hash, so a copied database opens no
 // session. Logout deletes the session; a password change or a deleted account ends all of that account's sessions; a
 // role change applies at the next request; a restart logs nobody out. Every change (not a GET) is logged with who
-// made it. Password checks are throttled per client IP and run off the async workers. Also a Host-header check
+// made it. Wrong proofs are throttled per client IP. Also a Host-header check
 // (anti DNS-rebinding).
-use argon2::Argon2;
-use argon2::password_hash::rand_core::{OsRng, RngCore};
-use argon2::password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString};
 use axum::{
     Json, Router,
     body::Body,
@@ -44,8 +43,8 @@ pub enum Role {
 pub struct User {
     pub name: String,
     pub role: Role,
-    /// argon2id PHC string.
-    pw: String,
+    /// The password's verifier (pwproof.rs).
+    pw: crate::pwproof::Verifier,
 }
 
 /// Who made a request (the guard puts it in the request's extensions).
@@ -76,17 +75,17 @@ pub(crate) fn edit_users<R>(
     crate::db::edit_json(&*st.db, "users", f).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?
 }
 
-/// A user with a new password hash (the caller ends its sessions: end_sessions).
-pub(crate) fn with_password(mut u: User, phc: String) -> User {
-    u.pw = phc;
+/// A user with a new password verifier (the caller ends its sessions: end_sessions).
+pub(crate) fn with_password(mut u: User, v: crate::pwproof::Verifier) -> User {
+    u.pw = v;
     u
 }
 
-pub(crate) fn new_user(name: &str, role: Role, phc: String) -> User {
+pub(crate) fn new_user(name: &str, role: Role, v: crate::pwproof::Verifier) -> User {
     User {
         name: name.into(),
         role,
-        pw: phc,
+        pw: v,
     }
 }
 
@@ -120,23 +119,25 @@ pub fn routes() -> Router<SharedState> {
     Router::new()
         .route("/api/auth/status", get(status))
         .route("/api/auth/setup", post(setup))
+        .route("/api/auth/hello", post(hello))
         .route("/api/auth/login", post(login))
         .route("/api/auth/logout", post(logout))
         // Not under /api/auth/ (public prefix): the guard requires a session for it.
         .route("/api/password", post(change_pw))
 }
 
-pub(crate) fn hex(b: &[u8]) -> String {
-    b.iter().map(|x| format!("{x:02x}")).collect()
-}
+pub(crate) use crate::pwproof::hex;
 
+/// 32 random bytes from the kernel (getrandom(2): waits only until the pool is first ready, at boot).
 pub(crate) fn random32() -> [u8; 32] {
     let mut k = [0u8; 32];
-    OsRng.fill_bytes(&mut k);
+    // SAFETY: k is a valid buffer of k.len() bytes.
+    let n = unsafe { libc::getrandom(k.as_mut_ptr().cast(), k.len(), 0) };
+    assert_eq!(n, 32, "getrandom: {}", std::io::Error::last_os_error());
     k
 }
 
-/// 128-bit random token, hex (setup token, one-time prep links).
+/// 128-bit random token, hex (the first-run setup token, agent challenges).
 pub(crate) fn random_token() -> String {
     hex(&random32()[..16])
 }
@@ -145,24 +146,6 @@ pub(crate) fn random_token() -> String {
 pub(crate) fn same(a: &str, b: &str) -> bool {
     blake3::hash(a.as_bytes()) == blake3::hash(b.as_bytes())
 }
-
-/// argon2id hash (PHC string) of a password — what the accounts keep (config `users`).
-fn hash_pw(pw: &str) -> Result<String, String> {
-    let salt = SaltString::generate(&mut OsRng);
-    Argon2::default()
-        .hash_password(pw.as_bytes(), &salt)
-        .map(|h| h.to_string())
-        .map_err(|e| e.to_string())
-}
-
-fn verify_pw(pw: &str, phc: &str) -> bool {
-    PasswordHash::new(phc)
-        .is_ok_and(|p| Argon2::default().verify_password(pw.as_bytes(), &p).is_ok())
-}
-
-/// argon2 costs ~tens of ms of CPU: at most 2 run at once, on blocking threads, so a login flood (even from many
-/// IPs) can neither stall the async workers nor take over the blocking pool other handlers need.
-static ARGON: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(2);
 
 /// Failed password tries per client IP: (failures, locked until unix secs).
 type Fails = HashMap<IpAddr, (u32, u64)>;
@@ -201,32 +184,6 @@ fn too_many(wait: u64) -> ApiError {
     )
 }
 
-/// Throttled password check: 429 while `ip` is locked out, else argon2-verify on a blocking thread and record it.
-async fn check_pw(ip: IpAddr, pw: String, phc: String) -> Result<bool, ApiError> {
-    let wait = || locked_for(&FAILS.lock(), ip, now());
-    if wait() > 0 {
-        return Err(too_many(wait()));
-    }
-    let _permit = ARGON.acquire().await.map_err(ise)?;
-    if wait() > 0 {
-        return Err(too_many(wait())); // locked while queued behind other checks
-    }
-    let ok = tokio::task::spawn_blocking(move || verify_pw(&pw, &phc))
-        .await
-        .map_err(ise)?;
-    record(&mut FAILS.lock(), ip, ok, now());
-    Ok(ok)
-}
-
-/// hash_pw on a blocking thread (same limit as checks).
-pub(crate) async fn hash_blocking(pw: String) -> Result<String, ApiError> {
-    let _permit = ARGON.acquire().await.map_err(ise)?;
-    tokio::task::spawn_blocking(move || hash_pw(&pw))
-        .await
-        .map_err(ise)?
-        .map_err(ise)
-}
-
 /// One-time setup token, made at startup when no admin password exists and printed to the server log. Setting the
 /// first password needs it, so a random LAN host that opens the web first cannot claim the install.
 static SETUP_TOKEN: OnceLock<String> = OnceLock::new();
@@ -260,15 +217,26 @@ fn session_id(tok: &str) -> String {
 
 /// Who holds this session token (None = no such session, expired, or its account is gone).
 pub(crate) fn who(st: &SharedState, tok: &str) -> Option<Who> {
-    let name = st
+    let (name, _) = st
         .db
-        .session_user(&session_id(tok), now() as i64)
+        .session(&session_id(tok), now() as i64)
         .ok()
         .flatten()?;
     users(st).into_iter().find(|u| u.name == name).map(|u| Who {
         name: u.name,
         role: u.role,
     })
+}
+
+/// The session key of the request's session (what a new password for an account comes sealed with).
+pub(crate) fn session_key(st: &SharedState, h: &axum::http::HeaderMap) -> Option<[u8; 32]> {
+    let tok = session_token(h)?;
+    let (_, key) = st
+        .db
+        .session(&session_id(&tok), now() as i64)
+        .ok()
+        .flatten()?;
+    crate::pwproof::unhex32(&key)
 }
 
 /// End every session of an account (password changed, account deleted).
@@ -325,6 +293,7 @@ fn is_public(method: &axum::http::Method, path: &str) -> bool {
     method == Method::GET
         && (path == "/login"
             || path == "/login.js"
+            || path == "/crypto.js"
             || path == "/icons.svg"
             || path == "/app.css"
             || path == "/bootstrap.min.css")
@@ -441,29 +410,6 @@ async fn status(State(st): State<SharedState>, req: Request<Body>) -> Json<serde
     }))
 }
 
-#[derive(Deserialize)]
-struct LoginBody {
-    /// Older login pages send no name: the first owner's account.
-    #[serde(default)]
-    user: String,
-    password: String,
-}
-
-#[derive(Deserialize)]
-struct SetupBody {
-    #[serde(default)]
-    user: String,
-    password: String,
-    #[serde(default)]
-    token: String,
-}
-
-#[derive(Deserialize)]
-struct NewPw {
-    current: String,
-    new: String,
-}
-
 fn session_cookie(token: &str, max_age: u64) -> [(header::HeaderName, String); 1] {
     [(
         header::SET_COOKIE,
@@ -471,39 +417,173 @@ fn session_cookie(token: &str, max_age: u64) -> [(header::HeaderName, String); 1
     )]
 }
 
-/// A new session for `u`: a random token for the cookie, its hash stored.
-fn new_session(st: &SharedState, u: &User) -> Result<String, ApiError> {
+/// A new session for `u`: a random token for the cookie (its hash stored) + the handshake's session key `sk`.
+fn new_session(st: &SharedState, u: &User, sk: &[u8; 32]) -> Result<String, ApiError> {
     let tok = hex(&random32());
     let t = now() as i64;
     st.db
-        .put_session(&session_id(&tok), &u.name, t + SESSION_SECS as i64, t)
+        .put_session(
+            &session_id(&tok),
+            &u.name,
+            &hex(sk),
+            t + SESSION_SECS as i64,
+            t,
+        )
         .map_err(ise)?;
     Ok(tok)
 }
 
-/// A hash to check a password against when the account does not exist: as slow as a real one, so the answer time
-/// does not tell which names exist.
-fn dummy_hash() -> &'static str {
-    static H: OnceLock<String> = OnceLock::new();
-    H.get_or_init(|| hash_pw("not-an-account").unwrap_or_default())
+#[derive(Deserialize)]
+struct HelloBody {
+    user: String,
+    cnonce: String,
 }
 
-/// POST /api/auth/setup {user, password, token} — the FIRST owner account (none exists yet), with the setup token
-/// printed to the server log at startup. Logs the caller.
+/// A handshake between its hello and its proof: the account, both nonces, until when.
+struct Pending {
+    user: String,
+    cnonce: String,
+    snonce: String,
+    until: u64,
+}
+
+/// Open handshakes by id (RAM; at most HS_MAX, each one used once, HS_SECS to answer).
+static HANDSHAKES: LazyLock<Mutex<HashMap<String, Pending>>> = LazyLock::new(Default::default);
+const HS_SECS: u64 = 60;
+const HS_MAX: usize = 4096;
+
+/// The salt shown for an account that does not exist: stable per name for this run, so the answer does not tell
+/// which names exist.
+fn fake_salt(user: &str) -> String {
+    static K: LazyLock<[u8; 32]> = LazyLock::new(random32);
+    hex(&blake3::keyed_hash(&K, user.as_bytes()).as_bytes()[..16])
+}
+
+/// POST /api/auth/hello {user, cnonce} (public) — handshake step 1 → 2: {hs, salt, iter, snonce} for that account.
+async fn hello(
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    State(st): State<SharedState>,
+    Json(b): Json<HelloBody>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let wait = locked_for(&FAILS.lock(), peer.ip(), now());
+    if wait > 0 {
+        return Err(too_many(wait));
+    }
+    let all = users(&st);
+    if all.is_empty() {
+        return Err((StatusCode::CONFLICT, "not set up yet".into()));
+    }
+    let user = b.user.trim().to_lowercase();
+    if !name_ok(&user)
+        || !(16..=128).contains(&b.cnonce.len())
+        || !b.cnonce.chars().all(|c| c.is_ascii_hexdigit())
+    {
+        return Err(crate::api::bad("bad hello"));
+    }
+    let (salt, iter) = all.into_iter().find(|u| u.name == user).map_or_else(
+        || (fake_salt(&user), crate::pwproof::ITER),
+        |u| (u.pw.salt, u.pw.iter),
+    );
+    let (hs, snonce, t) = (random_token(), random_token(), now());
+    let mut m = HANDSHAKES.lock();
+    m.retain(|_, p| p.until > t);
+    if m.len() >= HS_MAX {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            "too many sign-ins at once — retry".into(),
+        ));
+    }
+    m.insert(
+        hs.clone(),
+        Pending {
+            user,
+            cnonce: b.cnonce,
+            snonce: snonce.clone(),
+            until: t + HS_SECS,
+        },
+    );
+    Ok(Json(
+        serde_json::json!({"hs": hs, "salt": salt, "iter": iter, "snonce": snonce}),
+    ))
+}
+
+#[derive(Deserialize)]
+struct ProofBody {
+    hs: String,
+    proof: String,
+}
+
+/// Handshake step 3 → 4: the account whose password made `b.proof` (throttled per IP, the handshake used up),
+/// with the server's proof and the session key. Err 401 on a wrong password / unknown account / stale handshake.
+fn finish(
+    st: &SharedState,
+    ip: IpAddr,
+    b: &ProofBody,
+) -> Result<(User, String, [u8; 32]), ApiError> {
+    let wait = locked_for(&FAILS.lock(), ip, now());
+    if wait > 0 {
+        return Err(too_many(wait));
+    }
+    let p = HANDSHAKES.lock().remove(&b.hs).filter(|p| p.until > now());
+    let t = p
+        .as_ref()
+        .map(|p| crate::pwproof::transcript(&p.user, &p.cnonce, &p.snonce));
+    let got = p.as_ref().zip(t.as_ref()).and_then(|(p, t)| {
+        let u = users(st).into_iter().find(|u| u.name == p.user)?;
+        let stored = crate::pwproof::unhex32(&u.pw.stored)?;
+        let client = crate::pwproof::check(&stored, t, &crate::pwproof::unhex32(&b.proof)?)?;
+        let server = crate::pwproof::unhex32(&u.pw.server)?;
+        Some((
+            u,
+            hex(&crate::pwproof::mac(&server, t)),
+            crate::pwproof::session_key(&client, t),
+        ))
+    });
+    record(&mut FAILS.lock(), ip, got.is_some(), now());
+    got.ok_or_else(|| {
+        tracing::warn!(
+            "failed login as {:?} from {ip}",
+            p.map(|p| p.user).unwrap_or_default()
+        );
+        (
+            StatusCode::UNAUTHORIZED,
+            "wrong user or password".to_string(),
+        )
+    })
+}
+
+/// POST /api/auth/login {hs, proof} (public) — handshake step 3 → 4: {server_proof} + a session cookie.
+async fn login(
+    State(st): State<SharedState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    Json(b): Json<ProofBody>,
+) -> Result<impl IntoResponse, ApiError> {
+    let (u, server_proof, sk) = finish(&st, peer.ip(), &b)?;
+    tracing::info!("{} logged in from {}", u.name, peer.ip());
+    Ok((
+        session_cookie(&new_session(&st, &u, &sk)?, SESSION_SECS),
+        Json(serde_json::json!({"server_proof": server_proof})),
+    ))
+}
+
+#[derive(Deserialize)]
+struct SetupBody {
+    #[serde(default)]
+    user: String,
+    /// The owner's password verifier, sealed with the setup token (pwproof::setup_key).
+    cred: crate::pwproof::Sealed,
+}
+
+/// POST /api/auth/setup {user, cred} — the FIRST owner account (none exists yet). Its verifier comes sealed with the
+/// setup token printed to the server log at startup: neither the token nor the password crosses the network. Logs the
+/// caller. The page then signs in with the new password.
 async fn setup(
     State(st): State<SharedState>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
     Json(b): Json<SetupBody>,
-) -> Result<impl IntoResponse, ApiError> {
+) -> Result<Json<serde_json::Value>, ApiError> {
     if !users(&st).is_empty() {
         return Err((StatusCode::CONFLICT, "already set up — log in".into()));
-    }
-    if !SETUP_TOKEN.get().is_some_and(|t| same(t, b.token.trim())) {
-        tracing::warn!("setup with a wrong setup token from {}", peer.ip());
-        return Err((
-            StatusCode::FORBIDDEN,
-            "wrong setup token — copy it from the server log".into(),
-        ));
     }
     let name = Some(b.user.trim().to_lowercase())
         .filter(|n| !n.is_empty())
@@ -511,84 +591,72 @@ async fn setup(
     if !name_ok(&name) {
         return Err(crate::api::bad("user name: a-z, 0-9, _ or -, at most 32"));
     }
-    if b.password.len() < 8 {
-        return Err(crate::api::bad("password must be at least 8 characters"));
-    }
-    let u = new_user(&name, Role::Owner, hash_blocking(b.password).await?);
+    let Some(v) = SETUP_TOKEN
+        .get()
+        .and_then(|t| crate::pwproof::open(&crate::pwproof::setup_key(t), &name, &b.cred))
+    else {
+        tracing::warn!("setup with a wrong setup token from {}", peer.ip());
+        return Err((
+            StatusCode::FORBIDDEN,
+            "wrong setup token — copy it from the server log".into(),
+        ));
+    };
     // Still no account (two setups at once: only the first one).
-    edit_users(&st, |v| {
-        if !v.is_empty() {
+    edit_users(&st, |all| {
+        if !all.is_empty() {
             return Err((StatusCode::CONFLICT, "already set up — log in".into()));
         }
-        v.push(u.clone());
+        all.push(new_user(&name, Role::Owner, v));
         Ok(())
     })?;
     tracing::warn!("owner account {name} created from {}", peer.ip());
-    Ok((
-        session_cookie(&new_session(&st, &u)?, SESSION_SECS),
-        crate::api::ok(),
-    ))
+    Ok(crate::api::ok())
 }
 
-/// POST /api/auth/login {user, password} — check the password (throttled per IP), start a session. A wrong try is
-/// logged; the answer does not say whether the name exists.
-async fn login(
-    State(st): State<SharedState>,
-    ConnectInfo(peer): ConnectInfo<SocketAddr>,
-    Json(b): Json<LoginBody>,
-) -> Result<impl IntoResponse, ApiError> {
-    let all = users(&st);
-    if all.is_empty() {
-        return Err((StatusCode::CONFLICT, "not set up yet".into()));
-    }
-    let name = b.user.trim().to_lowercase();
-    let u = if name.is_empty() {
-        all.iter().find(|u| u.role == Role::Owner)
-    } else {
-        all.iter().find(|u| u.name == name)
-    };
-    let phc = u.map_or_else(|| dummy_hash().to_string(), |u| u.pw.clone());
-    if !check_pw(peer.ip(), b.password, phc).await? || u.is_none() {
-        tracing::warn!("failed login as {name:?} from {}", peer.ip());
-        return Err((StatusCode::UNAUTHORIZED, "wrong user or password".into()));
-    }
-    let u = u.unwrap();
-    tracing::info!("{} logged in from {}", u.name, peer.ip());
-    Ok((
-        session_cookie(&new_session(&st, u)?, SESSION_SECS),
-        crate::api::ok(),
-    ))
+#[derive(Deserialize)]
+struct NewPw {
+    /// A fresh handshake with the CURRENT password (hello first)…
+    hs: String,
+    proof: String,
+    /// …and the new password's verifier, sealed with that handshake's session key.
+    cred: crate::pwproof::Sealed,
 }
 
-/// POST /api/password {current, new} — change your own password. Your other sessions end; this browser gets a
-/// fresh cookie and stays in.
+/// POST /api/password {hs, proof, cred} — change your own password. Your other sessions end; this browser gets a
+/// fresh cookie (the handshake's session key) and stays in. → {server_proof}
 async fn change_pw(
     State(st): State<SharedState>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
     axum::Extension(w): axum::Extension<Who>,
     Json(b): Json<NewPw>,
 ) -> Result<impl IntoResponse, ApiError> {
-    if b.new.len() < 8 {
-        return Err(crate::api::bad(
-            "new password must be at least 8 characters",
-        ));
-    }
-    let Some(was) = users(&st).into_iter().find(|u| u.name == w.name) else {
-        return Err((StatusCode::FORBIDDEN, "account gone".into()));
-    };
-    if !check_pw(peer.ip(), b.current, was.pw.clone()).await? {
-        tracing::warn!(
-            "{}: password change with a wrong current password from {}",
-            w.name,
-            peer.ip()
-        );
+    let (was, server_proof, sk) = finish(
+        &st,
+        peer.ip(),
+        &ProofBody {
+            hs: b.hs,
+            proof: b.proof,
+        },
+    )
+    .map_err(|e| {
         // 403, not 401: the web app treats 401 as "session expired" and jumps to the login page.
-        return Err((StatusCode::FORBIDDEN, "wrong current password".into()));
+        (
+            StatusCode::FORBIDDEN,
+            if e.0 == StatusCode::UNAUTHORIZED {
+                "wrong current password".into()
+            } else {
+                e.1
+            },
+        )
+    })?;
+    if was.name != w.name {
+        return Err((StatusCode::FORBIDDEN, "that is another account".into()));
     }
-    let phc = hash_blocking(b.new).await?;
+    let v = crate::pwproof::open(&sk, &w.name, &b.cred)
+        .ok_or_else(|| crate::api::bad("new password: bad seal"))?;
     // As one step, and only over the password just checked (another change in between: try again).
-    let u = edit_users(&st, |v| {
-        let u = v
+    let u = edit_users(&st, |all| {
+        let u = all
             .iter_mut()
             .find(|u| u.name == w.name)
             .ok_or((StatusCode::FORBIDDEN, "account gone".to_string()))?;
@@ -598,7 +666,7 @@ async fn change_pw(
                 "the password was changed meanwhile — try again".to_string(),
             ));
         }
-        *u = with_password(u.clone(), phc);
+        *u = with_password(u.clone(), v);
         Ok(u.clone())
     })?;
     end_sessions(&st, &u.name);
@@ -608,8 +676,8 @@ async fn change_pw(
         peer.ip()
     );
     Ok((
-        session_cookie(&new_session(&st, &u)?, SESSION_SECS),
-        crate::api::ok(),
+        session_cookie(&new_session(&st, &u, &sk)?, SESSION_SECS),
+        Json(serde_json::json!({"server_proof": server_proof})),
     ))
 }
 

@@ -1,6 +1,6 @@
 // winstage/mod.rs — Windows diskless, design B: native VHDX boot from the client SSD.
 //
-// Flow: golden = Windows Pro VM that ran the Windows prep script (one-time link from the Images page: tweaks + EFI
+// Flow: golden = Windows Pro VM that ran the Windows prep script (irm …/broom-prep-win | iex, Images page: tweaks + EFI
 // bundle + unattend + boot-start disk drivers), sysprepped → upload → publish(): extract the Windows partition →
 // golden.vhdx + efi.tar.gz + 2 empty child VHDX (vhdx.rs) → make sure the stage bundle is installed (stage.rs) → boot_script.
 //

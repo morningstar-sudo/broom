@@ -18,6 +18,7 @@ assets!(
     "static/index.html",
     "static/login.html",
     "static/login.js",
+    "static/crypto.js",
     "static/app.js",
     "static/app.css",
     "static/bootstrap.min.css",

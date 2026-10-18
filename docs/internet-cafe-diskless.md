@@ -63,6 +63,8 @@ installed or deleted is gone.
 ```bash
 sudo mkdir -p /opt/bootrom && cd /opt/bootrom
 sudo curl -fLO https://github.com/morningstar-sudo/broom/releases/latest/download/bootrom-mgmt
+sudo curl -fLO https://github.com/morningstar-sudo/broom/releases/latest/download/SHA256SUMS
+sha256sum --ignore-missing -c SHA256SUMS   # must say: bootrom-mgmt: OK
 sudo chmod +x bootrom-mgmt
 sudo ./bootrom-mgmt install-service
 journalctl -u bootrom-mgmt -f      # shows the one-time setup token

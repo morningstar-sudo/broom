@@ -2,6 +2,8 @@
 # Run INSIDE the golden VM (Ubuntu) once: installs packages for iSCSI-root + overlay.
 # SSD reset hook (broom-wb) + overlayroot.conf are injected into the initrd by the SERVER → tune without a golden rebuild.
 set -euo pipefail
+# All in one function, called on the last line: piped from curl, a download cut short runs nothing at all.
+main() {
 [ "$(id -u)" = 0 ] || { echo "Run with sudo"; exit 1; }
 
 export DEBIAN_FRONTEND=noninteractive
@@ -102,3 +104,5 @@ echo " DONE. The golden now has the iSCSI + overlay packages."
 echo " -> Power off the VM, take this VM's .vmdk file, UPLOAD it via the web admin:"
 echo "      http://__IP__/   (section 'Golden (.vmdk)')"
 echo "==================================================================="
+}
+main "$@"

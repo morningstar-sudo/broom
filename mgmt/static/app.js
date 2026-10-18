@@ -708,9 +708,19 @@ async function saveCafe(){const m=document.getElementById('cafe_msg');
 async function savePw(){const m=document.getElementById('pw_msg'),g=id=>document.getElementById(id).value;
   if(g('pw_new').length<8){say(m,' ✗ at least 8 characters');return;}
   if(g('pw_new')!==g('pw_new2')){say(m,' ✗ passwords do not match');return;}
-  try{await j('/api/password',mk({current:g('pw_cur'),new:g('pw_new')}));say(m,' ✓ changed, your other sessions signed out');
+  // A fresh handshake with the current password; the new one goes as its verifier sealed with that handshake's key.
+  say(m,' …');
+  try{if(!me.user)await loadMe();
+    const h=await handshake(me.user,g('pw_cur'));
+    const r=await j('/api/password',mk({hs:h.hs,proof:h.proof,cred:sealPw(h.sk,me.user,g('pw_new'))}));
+    if(!h.serverOk(r.server_proof))throw new Error('the server could not prove it holds this account');
+    keepSk(h.sk);say(m,' ✓ changed, your other sessions signed out');
     for(const id of ['pw_cur','pw_new','pw_new2'])document.getElementById(id).value='';}
   catch(e){say(m,' ✗ '+e.message);}}
+// Another account's new password, sealed with this session's key (crypto.js): it never crosses the network.
+function sealFor(name,pw){if(pw.length<8)throw new Error('password: at least 8 characters');
+  const sk=sessionSk();if(!sk)throw new Error('sign out and in again: this browser has no key to seal passwords with');
+  return sealPw(sk,name,pw);}
 // ---- accounts (users.rs; owners): who is signed in decides what the page shows (body[data-role]) ----
 let me={};
 async function loadMe(){try{me=await j('/api/auth/status');}catch(e){return;}
@@ -723,11 +733,14 @@ async function loadUsers(){if(!me.role)await loadMe();
     <td><select class="form-select form-select-sm w-auto" data-change="userRole" data-args="${esc(JSON.stringify([x.name]))}">${['owner','staff'].map(r=>`<option${r===x.role?' selected':''}>${esc(r)}</option>`).join('')}</select></td>
     <td><div class="d-flex gap-1"><button class="btn btn-sm btn-outline-secondary" ${act('userPw',x.name,x.role)}>New password</button>${x.name===me.user?'':` <button class="btn btn-sm btn-outline-danger" ${act('userDel',x.name)}>Delete</button>`}</div></td></tr>`).join('');}
 const userCall=(url,body,done)=>post(url,body,'us_msg',done,loadUsers);
-async function userAdd(){const name=v('us_name').toLowerCase(),p=document.getElementById('us_pw');
-  await userCall('/api/users',{name,role:document.getElementById('us_role').value,password:p.value},name+' saved');p.value='';}
+async function userAdd(){const name=v('us_name').toLowerCase(),p=document.getElementById('us_pw');let cred;
+  try{cred=sealFor(name,p.value);}catch(e){say(document.getElementById('us_msg'),' ✗ '+e.message);return;}
+  await userCall('/api/users',{name,role:document.getElementById('us_role').value,cred},name+' saved');p.value='';}
 const userRole=(name,el)=>userCall('/api/users',{name,role:el.value},name+' is now '+el.value);
 async function userPw(name,role){const p=await ask('New password for '+name,'At least 8 characters. Their open sessions end.','');
-  if(p!=null)userCall('/api/users',{name,role,password:p},'password of '+name+' changed');}
+  if(p==null)return;let cred;
+  try{cred=sealFor(name,p);}catch(e){say(document.getElementById('us_msg'),' ✗ '+e.message);return;}
+  userCall('/api/users',{name,role,cred},'password of '+name+' changed');}
 async function userDel(name){if(await sure('Delete account '+name+'? Their open sessions end.'))userCall('/api/users/delete',{name},name+' deleted');}
 async function setTimeout_(){await j('/api/config/timeout',mk({seconds:+document.getElementById('timeout').value}));say(document.getElementById('to_msg'),' ✓ saved');}
 async function setSsd(){const m=document.getElementById('ssd_msg');
@@ -1139,7 +1152,8 @@ const sure=text=>dialog('Confirm',text);
 // ---- admin login (auth.rs) ----
 // Login lives on its own page (/login). This page is only served to a signed-in admin: the server redirects an
 // unauthenticated browser here → /login. A 401 on any API call (session expired) sends us back to /login.
-async function logout(){try{await fetch('/api/auth/logout',{method:'POST'});}catch(e){}location.replace('/login');}
+async function logout(){try{await fetch('/api/auth/logout',{method:'POST'});}catch(e){}
+  try{localStorage.removeItem(SK_KEY);}catch(e){}location.replace('/login');}
 
 // Everything an element may name in data-click / data-change / data-input (see act()). Called as f(...args, el, event).
 const ACTIONS={

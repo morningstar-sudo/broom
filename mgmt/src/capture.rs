@@ -736,21 +736,56 @@ impl Api {
         Ok((r.status().as_u16(), body, set))
     }
 
-    /// Start a session. Err((status, message)); status 0 = no answer.
+    /// Start a session with the sign-in handshake (pwproof.rs): the password never leaves this machine, and the
+    /// server must prove it holds the account. Err((status, message)); status 0 = no answer / not our server.
     fn login(&self) -> Result<(), (u16, String)> {
-        let b = json!({"user": self.user, "password": self.pass}).to_string();
+        use crate::pwproof as pp;
+        let fail = |code: u16, text: &[u8]| {
+            (
+                code,
+                format!("login: {}", String::from_utf8_lossy(text).trim()),
+            )
+        };
+        let user = self.user.trim().to_lowercase();
+        let cnonce = crate::auth::random_token();
+        let hello = json!({"user": user, "cnonce": cnonce}).to_string();
+        let (code, text, _) = self
+            .raw("POST", "/api/auth/hello", hello.as_bytes())
+            .map_err(|e| (0, e))?;
+        if code != 200 {
+            return Err(fail(code, &text));
+        }
+        let h: Value = serde_json::from_slice(&text).map_err(|e| (0, format!("login: {e}")))?;
+        let (Some(hs), Some(salt), Some(iter), Some(snonce)) = (
+            h["hs"].as_str(),
+            h["salt"].as_str().and_then(pp::unhex),
+            h["iter"]
+                .as_u64()
+                .and_then(|i| u32::try_from(i).ok())
+                .filter(|i| pp::ITER_RANGE.contains(i)),
+            h["snonce"].as_str(),
+        ) else {
+            return Err((0, "login: unexpected answer from the server".into()));
+        };
+        let (client, stored, server) = pp::keys(&self.pass, &salt, iter);
+        let t = pp::transcript(&user, &cnonce, snonce);
+        let b = json!({"hs": hs, "proof": pp::hex(&pp::proof(&client, &stored, &t))}).to_string();
         let (code, text, set) = self
             .raw("POST", "/api/auth/login", b.as_bytes())
             .map_err(|e| (0, e))?;
         match (code, set) {
             (200, Some(c)) => {
+                let r: Value = serde_json::from_slice(&text).unwrap_or_default();
+                if r["server_proof"].as_str() != Some(pp::hex(&pp::mac(&server, &t)).as_str()) {
+                    return Err((
+                        0,
+                        "login: the server could not prove it holds this account — is it the Broom server?".into(),
+                    ));
+                }
                 *self.cookie.lock() = c;
                 Ok(())
             }
-            _ => Err((
-                code,
-                format!("login: {}", String::from_utf8_lossy(&text).trim()),
-            )),
+            _ => Err(fail(code, &text)),
         }
     }
 

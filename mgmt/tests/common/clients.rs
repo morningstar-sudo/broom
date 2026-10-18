@@ -37,11 +37,13 @@ impl Resp {
 #[derive(Default)]
 pub struct Http {
     pub cookie: Option<String>,
+    /// The session key of the sign-in handshake (new passwords are sealed with it).
+    pub sk: Option<[u8; 32]>,
 }
 
 impl Http {
     pub fn new() -> Http {
-        Http { cookie: None }
+        Http::default()
     }
 
     pub fn get(&self, path: &str) -> Resp {

@@ -198,7 +198,91 @@ impl Drop for Server {
     }
 }
 
-/// The admin password set with the setup token from the log → a signed-in client.
+/// The sign-in handshake, written from its description (pwproof.rs header), not from broom's code.
+pub mod pw {
+    use hmac::{KeyInit, Mac};
+    use sha2::{Digest, Sha256};
+
+    pub fn mac(k: &[u8], m: &[u8]) -> [u8; 32] {
+        let mut h = hmac::Hmac::<Sha256>::new_from_slice(k).unwrap();
+        h.update(m);
+        h.finalize().into_bytes().into()
+    }
+    pub fn hex(b: &[u8]) -> String {
+        b.iter().map(|x| format!("{x:02x}")).collect()
+    }
+    pub fn unhex(s: &str) -> Vec<u8> {
+        (0..s.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap())
+            .collect()
+    }
+    fn x(a: &[u8; 32], b: &[u8; 32]) -> [u8; 32] {
+        std::array::from_fn(|i| a[i] ^ b[i])
+    }
+    /// (ClientKey, stored, server) of a password.
+    pub fn keys(pw: &str, salt: &[u8], iter: u32) -> ([u8; 32], [u8; 32], [u8; 32]) {
+        let mut k = [0u8; 32];
+        pbkdf2::pbkdf2_hmac::<Sha256>(pw.as_bytes(), salt, iter, &mut k);
+        let c = mac(&k, b"client");
+        (c, Sha256::digest(c).into(), mac(&k, b"server"))
+    }
+    pub fn setup_key(token: &str) -> [u8; 32] {
+        mac(token.trim().as_bytes(), b"broom-setup")
+    }
+    /// A new password's verifier for `user`, sealed with `key` (the fewest rounds the server takes: quick tests).
+    pub fn seal(key: &[u8; 32], user: &str, pw: &str) -> serde_json::Value {
+        let (salt, iter) = (hex(&Sha256::digest(user.as_bytes())[..16]), 100_000u32);
+        let (_, st, sv) = keys(pw, &unhex(&salt), iter);
+        let l = format!("{user}|{salt}|{iter}");
+        let stored = hex(&x(&st, &mac(key, format!("stored|{l}").as_bytes())));
+        let server = hex(&x(&sv, &mac(key, format!("server|{l}").as_bytes())));
+        let tag = hex(&mac(key, format!("cred|{l}|{stored}|{server}").as_bytes()));
+        serde_json::json!({"salt": salt, "iter": iter, "stored": stored, "server": server, "tag": tag})
+    }
+    /// hello → proof: (status of the failing step or 200, the client signed in, the server's proof checked).
+    pub fn sign_in(user: &str, pw: &str) -> Result<super::Http, u16> {
+        let mut h = super::Http::new();
+        let cnonce =
+            hex(&Sha256::digest(format!("{user}{pw}{:?}", std::time::Instant::now()))[..16]);
+        let r = h.post(
+            "/api/auth/hello",
+            &serde_json::json!({"user": user, "cnonce": cnonce}),
+        );
+        if r.status != 200 {
+            return Err(r.status);
+        }
+        let a = r.json();
+        let (salt, iter, snonce) = (
+            unhex(a["salt"].as_str().unwrap()),
+            a["iter"].as_u64().unwrap() as u32,
+            a["snonce"].as_str().unwrap().to_string(),
+        );
+        let (c, st, sv) = keys(pw, &salt, iter);
+        let t = format!("broom-login|{user}|{cnonce}|{snonce}");
+        let proof = hex(&x(&c, &mac(&st, t.as_bytes())));
+        let r = h.post(
+            "/api/auth/login",
+            &serde_json::json!({"hs": a["hs"], "proof": proof}),
+        );
+        if r.status != 200 {
+            return Err(r.status);
+        }
+        assert_eq!(
+            r.json()["server_proof"],
+            hex(&mac(&sv, t.as_bytes())),
+            "the server proves it holds the account"
+        );
+        h.take_cookie(&r);
+        h.sk = Some(mac(
+            &c,
+            [b"session|".as_slice(), t.as_bytes()].concat().as_slice(),
+        ));
+        Ok(h)
+    }
+}
+
+/// The owner account `admin` made with the setup token from the log (it seals the verifier) → a signed-in client.
 pub fn admin(home: &Home) -> Http {
     let log = home.log();
     let token = log
@@ -208,26 +292,17 @@ pub fn admin(home: &Home) -> Http {
         .unwrap_or_else(|| panic!("no setup token in the log:\n{log}"))
         .trim()
         .to_string();
-    let mut h = Http::new();
-    let r = h.post(
+    let r = Http::new().post(
         "/api/auth/setup",
-        &serde_json::json!({"password": PASSWORD, "token": token}),
+        &serde_json::json!({"user": "admin", "cred": pw::seal(&pw::setup_key(&token), "admin", PASSWORD)}),
     );
     assert_eq!(r.status, 200, "setup: {}", r.text());
-    h.take_cookie(&r);
-    h
+    login()
 }
 
-/// Sign in with PASSWORD (admin set up earlier).
+/// Sign in as admin with PASSWORD (set up earlier).
 pub fn login() -> Http {
-    let mut h = Http::new();
-    let r = h.post(
-        "/api/auth/login",
-        &serde_json::json!({"password": PASSWORD}),
-    );
-    assert_eq!(r.status, 200, "login: {}", r.text());
-    h.take_cookie(&r);
-    h
+    pw::sign_in("admin", PASSWORD).unwrap_or_else(|s| panic!("login: {s}"))
 }
 
 /// DHCP server on srv0 for 10.99.0.0/24 (pool .100-.120), server IP = SRV.

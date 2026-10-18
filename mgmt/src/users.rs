@@ -31,9 +31,10 @@ async fn list(State(st): State<SharedState>) -> Json<serde_json::Value> {
 struct SetBody {
     name: String,
     role: Role,
-    /// New account: required. Existing one: a new password (its sessions end); empty = unchanged.
+    /// The password's verifier, sealed with the caller's session key (pwproof.rs; the password never crosses the
+    /// network). New account: required. Existing one: a new password (its sessions end); absent = unchanged.
     #[serde(default)]
-    password: String,
+    cred: Option<crate::pwproof::Sealed>,
 }
 
 /// No owner left after this change.
@@ -41,23 +42,25 @@ fn no_owner(v: &[User]) -> bool {
     !v.iter().any(|u| u.role == Role::Owner)
 }
 
-/// POST /api/users {name, role, password} — add an account, or change one's role / password.
+/// POST /api/users {name, role, cred?} — add an account, or change one's role / password.
 async fn set(
     State(st): State<SharedState>,
     Extension(w): Extension<Who>,
+    headers: axum::http::HeaderMap,
     Json(b): Json<SetBody>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let name = b.name.trim().to_lowercase();
     if !name_ok(&name) {
         return Err(bad("user name: a-z, 0-9, _ or -, at most 32"));
     }
-    if !b.password.is_empty() && b.password.len() < 8 {
-        return Err(bad("password: at least 8 characters"));
-    }
-    let phc = if b.password.is_empty() {
-        None
-    } else {
-        Some(crate::auth::hash_blocking(b.password.clone()).await?)
+    let new_pw = b.cred.is_some();
+    let phc = match &b.cred {
+        None => None,
+        Some(c) => Some(
+            crate::auth::session_key(&st, &headers)
+                .and_then(|k| crate::pwproof::open(&k, &name, c))
+                .ok_or_else(|| bad("password: bad seal — sign in again"))?,
+        ),
     };
     // As one step: the "an owner is left" rule holds even when two owners edit at once.
     let added = crate::auth::edit_users(&st, |all| {
@@ -84,7 +87,7 @@ async fn set(
         }
         Ok(added)
     })?;
-    if !added && !b.password.is_empty() {
+    if !added && new_pw {
         crate::auth::end_sessions(&st, &name); // a new password ends its sessions
     }
     if added {
@@ -94,11 +97,7 @@ async fn set(
             "{}: account {name} set to {:?}{}",
             w.name,
             b.role,
-            if b.password.is_empty() {
-                ""
-            } else {
-                ", new password"
-            }
+            if !new_pw { "" } else { ", new password" }
         );
     }
     Ok(ok())

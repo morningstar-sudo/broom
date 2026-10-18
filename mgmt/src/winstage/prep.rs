@@ -54,7 +54,7 @@ fn xml(s: &str) -> String {
 }
 
 /// Script run INSIDE the golden Windows VM (PowerShell Admin, preferably in Audit Mode: Ctrl+Shift+F3 at OOBE).
-/// Usage: irm "http://<server>/broom-prep-win?t=<one-time token>" | iex (Images page → Windows prep command).
+/// Usage: irm http://<server>/broom-prep-win | iex (Images page).
 /// Diskless tweaks → EFI bundle C:\broom\efi → unattend (guest user + autologon + skip OOBE) +
 /// stubs broom-done.ps1 / broom-bootorder.ps1 → sysprep /generalize /quit → boot-start disk drivers (Start=0) →
 /// power off the VM.
