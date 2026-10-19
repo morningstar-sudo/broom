@@ -167,8 +167,10 @@ async fn index() -> Html<String> {
     Html(assets::text("static/index.html").replace("__VERSION__", VERSION))
 }
 /// The web admin's files: `/app.js` → static/app.js, … Bootstrap 5.3.8 and Chart.js 4.4.7 (MIT) are vendored as released:
-/// no CDN (offline servers, CSP 'self').
+/// no CDN (offline servers, CSP 'self'). `no-cache`: after an upgrade a browser never runs an old file, also where it
+/// is loaded without `?v=` (the login page).
 async fn asset(uri: axum::http::Uri) -> impl axum::response::IntoResponse {
+    use axum::http::header;
     let name = uri.path().trim_start_matches('/');
     let ctype = match name.rsplit('.').next() {
         Some("js") => "text/javascript; charset=utf-8",
@@ -176,7 +178,10 @@ async fn asset(uri: axum::http::Uri) -> impl axum::response::IntoResponse {
         _ => "image/svg+xml",
     };
     (
-        [(axum::http::header::CONTENT_TYPE, ctype)],
+        [
+            (header::CONTENT_TYPE, ctype),
+            (header::CACHE_CONTROL, "no-cache"),
+        ],
         assets::text(&format!("static/{name}")),
     )
 }

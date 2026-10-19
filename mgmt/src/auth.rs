@@ -61,9 +61,12 @@ pub(crate) fn name_ok(n: &str) -> bool {
             .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-')
 }
 
-/// The accounts.
+/// The accounts. Unreadable = none (nobody signs in; edit_users refuses to overwrite it, so setup can't claim it).
 pub(crate) fn users(st: &SharedState) -> Vec<User> {
-    serde_json::from_str(&st.db.get_config("users", "[]")).unwrap_or_default()
+    serde_json::from_str(&st.db.get_config("users", "[]")).unwrap_or_else(|e| {
+        tracing::error!("users: stored value unreadable: {e}");
+        Vec::new()
+    })
 }
 
 /// The accounts changed as one step: two owners editing at once both land. An Err of `f` changes nothing; `f` must
@@ -301,8 +304,15 @@ fn is_public(method: &axum::http::Method, path: &str) -> bool {
 
 /// Host header check against DNS rebinding (a page on some domain re-pointing that domain at this server). A rebinding
 /// request always carries the attacker's domain name, so any IP literal is fine (the server IP, a second NIC, after
-/// an IP change), plus localhost and this machine's own hostname. Port is ignored.
+/// an IP change), plus localhost and this machine's own hostname (read once: a new hostname counts after a restart).
+/// Port is ignored.
 fn host_ok(req: &Request<Body>) -> bool {
+    static OWN: LazyLock<String> = LazyLock::new(|| {
+        std::fs::read_to_string("/proc/sys/kernel/hostname")
+            .unwrap_or_default()
+            .trim()
+            .to_string()
+    });
     let Some(host) = req
         .headers()
         .get(header::HOST)
@@ -310,8 +320,7 @@ fn host_ok(req: &Request<Body>) -> bool {
     else {
         return true; // HTTP/1.0 / no Host: leave it, path guard still applies
     };
-    let own = std::fs::read_to_string("/proc/sys/kernel/hostname").unwrap_or_default();
-    host_allowed(host, own.trim())
+    host_allowed(host, &OWN)
 }
 
 fn host_allowed(host: &str, own: &str) -> bool {
@@ -439,18 +448,52 @@ struct HelloBody {
     cnonce: String,
 }
 
-/// A handshake between its hello and its proof: the account, both nonces, until when.
+/// A handshake between its hello and its proof: the account, both nonces, until when, from where (hs_source).
 struct Pending {
     user: String,
     cnonce: String,
     snonce: String,
     until: u64,
+    from: IpAddr,
 }
 
-/// Open handshakes by id (RAM; at most HS_MAX, each one used once, HS_SECS to answer).
+/// Open handshakes by id (RAM; at most HS_MAX, HS_PER_SOURCE per client, each one used once, HS_SECS to answer).
 static HANDSHAKES: LazyLock<Mutex<HashMap<String, Pending>>> = LazyLock::new(Default::default);
 const HS_SECS: u64 = 60;
 const HS_MAX: usize = 4096;
+const HS_PER_SOURCE: usize = 8;
+
+/// Which client a handshake counts against: its IPv4 address, or its IPv6 /64 (one machine gets a whole /64 by
+/// SLAAC). IPv4-mapped IPv6 is the IPv4 address, not one /64 for every IPv4 client.
+fn hs_source(ip: IpAddr) -> IpAddr {
+    match ip.to_canonical() {
+        IpAddr::V6(v6) => IpAddr::V6((u128::from(v6) & !0u128 << 64).into()),
+        v4 => v4,
+    }
+}
+
+/// Add an open handshake. A client at its HS_PER_SOURCE loses its own oldest one (its retries still work, it can't
+/// fill the table); a full table loses the oldest of all instead of refusing everyone. Ceiling: a host faking many
+/// LAN addresses can still push others' handshakes out — it then needs a per-port or switch-level answer.
+fn admit(m: &mut HashMap<String, Pending>, hs: String, p: Pending) {
+    let oldest = |m: &HashMap<String, Pending>, from: Option<IpAddr>| {
+        m.iter()
+            .filter(|(_, q)| from.is_none_or(|f| q.from == f))
+            .min_by_key(|(_, q)| q.until)
+            .map(|(k, _)| k.clone())
+    };
+    let gone = if m.values().filter(|q| q.from == p.from).count() >= HS_PER_SOURCE {
+        oldest(m, Some(p.from))
+    } else if m.len() >= HS_MAX {
+        oldest(m, None)
+    } else {
+        None
+    };
+    if let Some(k) = gone {
+        m.remove(&k);
+    }
+    m.insert(hs, p);
+}
 
 /// The salt shown for an account that does not exist: stable per name for this run, so the answer does not tell
 /// which names exist.
@@ -487,19 +530,15 @@ async fn hello(
     let (hs, snonce, t) = (random_token(), random_token(), now());
     let mut m = HANDSHAKES.lock();
     m.retain(|_, p| p.until > t);
-    if m.len() >= HS_MAX {
-        return Err((
-            StatusCode::SERVICE_UNAVAILABLE,
-            "too many sign-ins at once — retry".into(),
-        ));
-    }
-    m.insert(
+    admit(
+        &mut m,
         hs.clone(),
         Pending {
             user,
             cnonce: b.cnonce,
             snonce: snonce.clone(),
             until: t + HS_SECS,
+            from: hs_source(peer.ip()),
         },
     );
     Ok(Json(

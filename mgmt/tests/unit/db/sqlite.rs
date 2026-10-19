@@ -453,6 +453,20 @@ fn json_edits_are_atomic() {
     assert_eq!(r, Err("refused"));
     let v: Vec<String> = serde_json::from_str(&db.get_config("list", "[]")).unwrap();
     assert_eq!(v.len(), 200, "a refused edit writes nothing");
+    db.set_config("broken", "not json").unwrap();
+    let r = super::super::edit_json(&*db, "broken", |v: &mut Vec<String>| {
+        v.push("x".into());
+        Ok::<(), String>(())
+    });
+    assert!(
+        r.is_err(),
+        "an unreadable value is an error, not an empty list"
+    );
+    assert_eq!(
+        db.get_config("broken", ""),
+        "not json",
+        "and stays as it was"
+    );
     drop(db);
     tmp("broom_test_edit.db");
 }

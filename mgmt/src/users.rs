@@ -54,6 +54,10 @@ async fn set(
         return Err(bad("user name: a-z, 0-9, _ or -, at most 32"));
     }
     let new_pw = b.cred.is_some();
+    // Here it would end the caller's own session too; Change password checks the current one and keeps the session.
+    if new_pw && name == w.name {
+        return Err(bad("your own password: use Change password"));
+    }
     let phc = match &b.cred {
         None => None,
         Some(c) => Some(

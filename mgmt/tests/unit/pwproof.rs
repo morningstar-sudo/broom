@@ -65,8 +65,8 @@ fn handshake_and_sealing() {
     assert!(open(&sk, "staff1", &t2).is_none(), "tampered");
 }
 
-/// static/crypto.js gives the same keys and seals (its values, made with node, pinned here): the browser and the
-/// server agree.
+/// static/crypto.js gives the same keys and seals (its values pinned here; tests/crypto.test.js checks crypto.js gives
+/// these very values): the browser and the server agree.
 #[test]
 fn same_as_the_browser() {
     let (client, stored, server) = keys("correct horse", b"0123456789abcdef", 1000);

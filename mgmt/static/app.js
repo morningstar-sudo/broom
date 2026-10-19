@@ -731,7 +731,7 @@ async function loadUsers(){if(!me.role)await loadMe();
   const u=await j('/api/users');
   tb.innerHTML=u.map(x=>`<tr><td class="mono">${esc(x.name)}${x.name===me.user?' <span class="badge text-bg-secondary">you</span>':''}</td>
     <td><select class="form-select form-select-sm w-auto" data-change="userRole" data-args="${esc(JSON.stringify([x.name]))}">${['owner','staff'].map(r=>`<option${r===x.role?' selected':''}>${esc(r)}</option>`).join('')}</select></td>
-    <td><div class="d-flex gap-1"><button class="btn btn-sm btn-outline-secondary" ${act('userPw',x.name,x.role)}>New password</button>${x.name===me.user?'':` <button class="btn btn-sm btn-outline-danger" ${act('userDel',x.name)}>Delete</button>`}</div></td></tr>`).join('');}
+    <td><div class="d-flex gap-1">${x.name===me.user?'':`<button class="btn btn-sm btn-outline-secondary" ${act('userPw',x.name,x.role)}>New password</button> <button class="btn btn-sm btn-outline-danger" ${act('userDel',x.name)}>Delete</button>`}</div></td></tr>`).join('');}
 const userCall=(url,body,done)=>post(url,body,'us_msg',done,loadUsers);
 async function userAdd(){const name=v('us_name').toLowerCase(),p=document.getElementById('us_pw');let cred;
   try{cred=sealFor(name,p.value);}catch(e){say(document.getElementById('us_msg'),' ✗ '+e.message);return;}

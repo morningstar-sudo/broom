@@ -143,6 +143,10 @@ jobs:
         working-directory: mgmt
         run: cargo fmt --check
 
+      # The browser side of sign-in (static/crypto.js) against the vectors the server's tests pin (pwproof.rs).
+      - name: crypto.js
+        run: node mgmt/tests/crypto.test.js
+
       # snponly.efi is upstream iPXE at IPXE_COMMIT + patches/, built by ipxe/build.sh: the same inputs give the same
       # file → kept between runs, built only when one of them changes.
       - uses: actions/cache@v4
@@ -275,7 +279,13 @@ jobs:
         working-directory: mgmt
         run: |
           set -e
-          sha256sum dist/bootrom-mgmt ipxe/snponly.efi dist/broom-stage.tar.gz dist/broom-assets.zip | tee SHA256SUMS
+          # By file name, not path: a release file is downloaded on its own, next to SHA256SUMS.
+          sha256sum dist/bootrom-mgmt ipxe/snponly.efi dist/broom-stage.tar.gz dist/broom-assets.zip | sed -E 's#^([0-9a-f]+ [ *]).*/#\1#' | tee SHA256SUMS
+          # README → Quick start, as a server runs it: only the binary + SHA256SUMS in the directory.
+          mkdir chk && cp dist/bootrom-mgmt SHA256SUMS chk/
+          (cd chk && sha256sum --ignore-missing -c SHA256SUMS) | tee chk.txt
+          grep -qx 'bootrom-mgmt: OK' chk.txt || { echo "SHA256SUMS does not check bootrom-mgmt the README's way" >&2; exit 1; }
+          rm -r chk chk.txt
           file dist/bootrom-mgmt
           # The binary accepts only the bundles whose sha256 it reads from its tail: asked, not just grepped.
           ./dist/bootrom-mgmt pins | tee pins.txt
@@ -314,6 +324,7 @@ jobs:
             mgmt/ipxe/snponly.efi
             mgmt/dist/broom-stage.tar.gz
             mgmt/dist/broom-assets.zip
+            mgmt/SHA256SUMS
 
       # Pushes to main only (not pull requests). The action creates the tag on this commit; a tag made with
       # GITHUB_TOKEN does not start another workflow run.

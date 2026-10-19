@@ -207,9 +207,10 @@ pub trait Db: Send + Sync {
     fn prune_bench(&self, cutoff: i64, keep: usize) -> DbResult<usize>;
 }
 
-/// update_config for a JSON value (a list of games disks, the accounts…): `f` edits it in place, as one step. Unset or
-/// unreadable = `T::default()`. Outer Err = the database failed; inner = what `f` returned (an Err of `f` writes
-/// nothing).
+/// update_config for a JSON value (a list of games disks, the accounts…): `f` edits it in place, as one step. Unset =
+/// `T::default()`; a stored value that does not parse is an Err and stays as it is (never reset to the default: that
+/// would wipe the accounts). Outer Err = the database failed or the value is unreadable; inner = what `f` returned (an
+/// Err of `f` writes nothing).
 pub fn edit_json<T, R, E>(
     db: &dyn Db,
     key: &str,
@@ -224,7 +225,15 @@ where
         let Some(f) = f.take() else {
             return Ok(None);
         };
-        let mut v: T = serde_json::from_str(cur).unwrap_or_default();
+        let mut v: T = if cur.is_empty() {
+            T::default()
+        } else {
+            serde_json::from_str(cur).map_err(|e| {
+                let e = format!("{key}: stored value unreadable, not changed: {e}");
+                tracing::error!("{e}");
+                e
+            })?
+        };
         match f(&mut v) {
             Ok(r) => {
                 out = Some(Ok(r));

@@ -86,6 +86,59 @@ fn throttle_per_ip() {
     assert!(!f.contains_key(&ip), "idle entries dropped");
 }
 
+/// Open handshakes: one client can't fill the table (its own oldest goes), a full table drops its oldest instead of
+/// refusing everyone; IPv6 counts per /64, IPv4-mapped per IPv4 address.
+#[test]
+fn handshakes_per_client() {
+    let ip = |s: &str| hs_source(s.parse().unwrap());
+    let p = |from, until| Pending {
+        user: "admin".into(),
+        cnonce: String::new(),
+        snonce: String::new(),
+        until,
+        from,
+    };
+    let mut m = HashMap::new();
+    let a = ip("10.0.0.5");
+    for i in 0..=HS_PER_SOURCE as u64 {
+        admit(&mut m, format!("a{i}"), p(a, 100 + i));
+    }
+    assert_eq!(m.len(), HS_PER_SOURCE);
+    assert!(
+        !m.contains_key("a0") && m.contains_key("a8"),
+        "its own oldest went"
+    );
+    admit(&mut m, "b".into(), p(ip("10.0.0.6"), 1));
+    assert!(
+        m.contains_key("b") && m.len() == HS_PER_SOURCE + 1,
+        "another client unaffected"
+    );
+
+    let mut m = HashMap::new();
+    for i in 0..HS_MAX as u64 {
+        admit(
+            &mut m,
+            format!("{i}"),
+            p(IpAddr::from([10, 1, (i >> 8) as u8, i as u8]), 100 + i),
+        );
+    }
+    admit(&mut m, "new".into(), p(ip("10.2.0.1"), 9999));
+    assert_eq!(m.len(), HS_MAX);
+    assert!(
+        m.contains_key("new") && !m.contains_key("0"),
+        "full: the oldest of all went"
+    );
+
+    assert_eq!(ip("2001:db8::1"), ip("2001:db8::ffff:2"), "one /64");
+    assert_ne!(ip("2001:db8::1"), ip("2001:db8:0:1::1"));
+    assert_ne!(
+        ip("::ffff:10.0.0.1"),
+        ip("::ffff:10.0.0.2"),
+        "IPv4-mapped: per address"
+    );
+    assert_eq!(ip("::ffff:10.0.0.1"), ip("10.0.0.1"));
+}
+
 #[test]
 fn setup_token_compare() {
     assert!(same("abc", "abc") && !same("abc", "abd") && !same("abc", ""));

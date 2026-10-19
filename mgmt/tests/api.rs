@@ -257,6 +257,12 @@ fn api_contract() {
             400,
             "not yourself"
         );
+        assert_eq!(
+            set(json!({"name": "admin", "role": "owner", "cred": cred("admin", "new-admin-pass")})),
+            400,
+            "your own password: Change password, not a reset that ends your session"
+        );
+        assert_eq!(h.get("/api/status").status, 200, "still signed in");
         assert_eq!(set(json!({"name": "staff1", "role": "owner"})), 200);
         assert_eq!(s.get("/api/users").status, 200, "now an owner");
         assert_eq!(
