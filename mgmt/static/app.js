@@ -418,7 +418,7 @@ async function showVersions(id,name,os){verImg={id,name,os};
   const el=document.getElementById('img_versions');
   el.innerHTML=`<h2 class="h6 mb-2">Versions — ${esc(name)}</h2><p class="mono">${ic('wait')} loading...</p>`;
   const r=await j('/api/images/snapshots?id='+id);
-  el.innerHTML=`<h2 class="h6 mb-2">Versions — ${esc(name)} <button class="btn btn-sm btn-outline-primary ms-2" ${act('snapshotImage')}>+ Snapshot now</button></h2>
+  el.innerHTML=`<h2 class="h6 mb-2">Versions — ${esc(name)} <button class="btn btn-sm btn-outline-primary ms-2" ${act('snapshotImage')}>+ Snapshot now</button> <button class="btn btn-sm btn-outline-secondary" ${act('dedupImage')} title="versions give back the data they have in common with the golden (XFS with reflink, btrfs; the golden clients load is never changed): for versions saved earlier, or after a move — a new upload does it by itself">Dedup</button></h2>
     <div class="table-responsive"><table class="table table-sm table-hover align-middle"><thead><tr><th>Version</th><th>Label</th><th>Created</th><th></th></tr></thead><tbody>${
     r.versions.map(v=>`<tr><td class="mono">${esc(v.version)} ${v.version===r.active?'<span class="badge rounded-pill text-bg-success">active</span>':''}</td>
       <td>${esc(v.label)}</td><td class="mono">${new Date(v.created*1000).toLocaleString()}</td>
@@ -430,6 +430,8 @@ async function showVersions(id,name,os){verImg={id,name,os};
 async function snapshotImage(){const label=await ask('Snapshot '+verImg.name,'Label for this version (optional):','');if(label===null)return;
   const el=document.getElementById('img_status');
   try{await j('/api/images/snapshot',mk({id:verImg.id,label}));watchJob(verImg.name,el,()=>showVersions(verImg.id,verImg.name,verImg.os));}catch(e){say(el,' ✗ '+e.message);}}
+async function dedupImage(){const el=document.getElementById('img_status');
+  try{await j('/api/images/dedup',mk({id:verImg.id}));watchJob(verImg.name,el,()=>showVersions(verImg.id,verImg.name,verImg.os));}catch(e){say(el,' ✗ '+e.message);}}
 async function rollbackImage(version){
   if(!await sure('Roll '+verImg.name+' back to '+version+'?'+(verImg.os==='windows'?' Every client will download the golden again.':' Running clients lose their iSCSI disk until publish finishes.')))return;
   const el=document.getElementById('img_status');
@@ -1167,7 +1169,7 @@ const ACTIONS={
   volMove,volFormat,volFolder,volRemove,loadServerDisks,
   userAdd,userRole,userPw,userDel,rekey,saveDnsGate,dnsResolveShow,
   loadImages,addImage,setDefault,toggleCache,toggleSsd,togglePreload,editImgGroups,republish,showVersions,exportImage,editBoot,delImage,
-  snapshotImage,rollbackImage,versionToImage,deleteVersion,
+  snapshotImage,dedupImage,rollbackImage,versionToImage,deleteVersion,
   loadGames,saveGames,setGamesUpdate,toggleGamesRam,saveGamesUpdate,discardGamesUpdate,editGames,delGames,
   loadDrivers,uploadDriver,saveDrvTargets,delDriver,
   loadGroups,editGroup,closeGroup,saveGroup,createGroup,renameGroup,deleteGroup,

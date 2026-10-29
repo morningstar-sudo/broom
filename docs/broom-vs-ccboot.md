@@ -2,7 +2,7 @@
 title: Broom vs CCBoot — open-source alternative for diskless internet cafés
 description: How Broom, a free open-source diskless boot server, compares with CCBoot and other commercial diskless software, and where Broom is still behind.
 date: 2026-10-11T23:07:00+07:00
-last_modified_at: 2026-10-19
+last_modified_at: 2026-10-29
 ---
 
 [← Broom](index.md)
@@ -42,8 +42,9 @@ change between versions; check their own documentation for current details.
   HVCI stay on — what modern anti-cheats require. No MOK to enroll on any PC.
 - **Diskless and imaging in one.** The same boot menu captures a real PC's disk as an image (only what NTFS uses is
   sent) or writes an image onto a PC's disk so it boots that Windows natively, like Ghost over the network.
-- **Versions in a click.** Snapshots of the golden are hard links: instant and free until the golden changes. Games
-  disks get a new version on every save, and PCs already playing keep the old one until they reboot.
+- **Versions in a click.** Snapshots of the golden are hard links: instant and free until the golden changes. On XFS
+  or btrfs a version then keeps only what differs from the new golden, while the golden the PCs load stays in one
+  piece. Games disks get a new version on every save, and PCs already playing keep the old one until they reboot.
 - **The room in one browser tab.** A live wall of every PC's screen, take one over with the mouse and keyboard
   (full-screen games included), each PC's CPU, RAM, temperature, disk health and traffic, the server's load charts
   and its log — no separate remote or monitoring tool, no port open on the PCs.

@@ -100,6 +100,25 @@ pub fn set_ram(st: &SharedState, name: &str, ram: bool) -> Result<(), String> {
     Ok(())
 }
 
+/// image.img was replaced by a file with the same bytes and stamp (dedup.rs: rebuilt in one piece): the served golden
+/// reads the new one from now on — downloads running finish on the old one; a RAM copy is made again by the publish.
+/// A served golden of another image.img (the publish builds a new one anyway) is left alone.
+pub fn reopen(name: &str, raw: &std::path::Path) {
+    let Some(g) = served(name) else {
+        return;
+    };
+    if crate::hash::stamp(raw).as_deref() != Some(g.id.as_str()) {
+        return;
+    }
+    match crate::vhdx::Virtual::open(raw, &g.id) {
+        Ok(v) => install(name, &g.id, v),
+        Err(e) => tracing::warn!(
+            "image {name}: golden not reopened from {}: {e}",
+            raw.display()
+        ),
+    }
+}
+
 /// The image is gone.
 pub fn forget(name: &str) {
     SERVED.lock().remove(name);

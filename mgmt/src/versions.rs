@@ -5,6 +5,10 @@
 // because image.img is never written in place: an upload, a rollback, a restored version all REPLACE it (rename),
 // and the Windows publish trims only an image not trimmed yet (on its own copy if a version shares the file).
 // Storage on another filesystem than the images (no hard link possible) → the version is a copy (holes kept).
+// A new golden (upload, Capture) is a new file: on a filesystem that can, the newest version then gives back the blocks
+// it has in common with it (dedup.rs: only version files change, never the served image.img) — every file still a
+// whole raw disk on its own, its `<file>.bhash` index beside it. A rollback to a version in pieces rebuilds it in
+// one piece first (replace_file): image.img is then still that version's file.
 // Snapshot/rollback run as publish jobs (images.rs), serialized by versions_lock.
 use serde::{Deserialize, Serialize};
 use std::fs::File;
@@ -68,6 +72,41 @@ pub fn list(name: &str) -> Vec<Manifest> {
     manifests(&storage_dir(), name)
 }
 
+/// The version deduped against a new image.img (dedup.rs): the newest one that is another file — None when image.img
+/// itself is a version (restored or saved: nothing new in it). Under versions_lock.
+pub(crate) fn dedupe_base(name: &str) -> Option<(String, PathBuf)> {
+    dedupe_base_at(&storage_dir(), &image_path(name), name)
+}
+
+fn dedupe_base_at(root: &Path, img: &Path, name: &str) -> Option<(String, PathBuf)> {
+    let have = manifests(root, name);
+    if have.iter().any(|m| same_file(&root.join(&m.file), img)) {
+        return None;
+    }
+    have.into_iter()
+        .map(|m| (m.version, root.join(m.file)))
+        .find(|(_, p)| p.exists())
+}
+
+/// An image's version files oldest first, each file once: what a dedup pass goes through. Under versions_lock.
+pub(crate) fn chain(name: &str) -> Vec<(String, PathBuf)> {
+    chain_at(&storage_dir(), name)
+}
+
+fn chain_at(root: &Path, name: &str) -> Vec<(String, PathBuf)> {
+    let mut out: Vec<(String, PathBuf)> = Vec::new();
+    let files = manifests(root, name)
+        .into_iter()
+        .rev()
+        .map(|m| (m.version, root.join(m.file)));
+    for (v, p) in files {
+        if p.exists() && !out.iter().any(|(_, q)| same_file(q, &p)) {
+            out.push((v, p));
+        }
+    }
+    out
+}
+
 /// Save image.img as a new version "v<N>": a hard link (instant, no copy). Refused when image.img already is a version
 /// (a rollback just restored it, or nothing changed since the last one).
 pub fn snapshot(name: &str, label: &str) -> Result<Manifest, String> {
@@ -90,14 +129,21 @@ fn snapshot_at(root: &Path, img: &Path, name: &str, label: &str) -> Result<Manif
     let p = root.join(&rel);
     std::fs::create_dir_all(p.parent().unwrap()).map_err(e("mkdir files"))?;
     let _ = std::fs::remove_file(&p); // left by an interrupted snapshot (no manifest named it)
-    if let Err(err) = std::fs::hard_link(&img, &p) {
-        // Another filesystem: a copy of the data (holes stay holes).
-        tracing::info!("image {name}: version as a hard link not possible ({err}) → copied");
-        let used = std::os::unix::fs::MetadataExt::blocks(&meta) * 512;
-        crate::publish::need_space(root, used, "snapshot")?;
-        crate::disk::copy_region(&img, 0, None, &p).inspect_err(|_| {
-            let _ = std::fs::remove_file(&p);
-        })?;
+    let _ = std::fs::remove_file(crate::dedup::index_of(&p));
+    match std::fs::hard_link(&img, &p) {
+        // The same file: its dedup index is too (only a cache: may be missing).
+        Ok(()) => {
+            let _ = std::fs::hard_link(crate::dedup::index_of(&img), crate::dedup::index_of(&p));
+        }
+        Err(err) => {
+            // Another filesystem: a copy of the data (holes stay holes).
+            tracing::info!("image {name}: version as a hard link not possible ({err}) → copied");
+            let used = std::os::unix::fs::MetadataExt::blocks(&meta) * 512;
+            crate::publish::need_space(root, used, "snapshot")?;
+            crate::disk::copy_region(&img, 0, None, &p).inspect_err(|_| {
+                let _ = std::fs::remove_file(&p);
+            })?;
+        }
     }
     sync_fs(root)?; // the file on disk before the manifest that names it
     let dir = manifest_dir(root, name);
@@ -194,6 +240,45 @@ fn check_at(root: &Path, name: &str, version: &str) -> Result<(), String> {
     }
 }
 
+/// The version image.img is (the same file: restored, saved, or a new image's v1), if any. Under versions_lock.
+pub(crate) fn version_of_image(name: &str) -> Option<String> {
+    let (root, img) = (storage_dir(), image_path(name));
+    manifests(&root, name)
+        .into_iter()
+        .find(|m| same_file(&root.join(&m.file), &img))
+        .map(|m| m.version)
+}
+
+/// The file of `version`.
+pub(crate) fn file_of(name: &str, version: &str) -> Result<PathBuf, String> {
+    let root = storage_dir();
+    Ok(root.join(load(&root, name, version)?.file))
+}
+
+/// `with` (the same bytes, laid out in one piece: dedup::rebuild) becomes the file of `version` — the old one goes,
+/// with the blocks no other file shares — and stays at its own path too (to be renamed over image.img). Under
+/// versions_lock.
+pub(crate) fn replace_file(name: &str, version: &str, with: &Path) -> Result<(), String> {
+    replace_file_at(&storage_dir(), name, version, with)
+}
+
+fn replace_file_at(root: &Path, name: &str, version: &str, with: &Path) -> Result<(), String> {
+    let m = load(root, name, version)?;
+    if std::fs::metadata(with).ok().map(|x| x.len()) != Some(m.size) {
+        return Err(format!("{}: not {version}'s size", with.display()));
+    }
+    let p = root.join(&m.file);
+    // Linked next to it, then renamed over it: the version's path never names half a file (gc drops a leftover).
+    let mut tmp = p.as_os_str().to_owned();
+    tmp.push(".new");
+    let tmp = PathBuf::from(tmp);
+    let _ = std::fs::remove_file(&tmp);
+    std::fs::hard_link(with, &tmp).map_err(e(&tmp.display().to_string()))?;
+    std::fs::rename(&tmp, &p).map_err(e(&p.display().to_string()))?;
+    crate::dedup::link_index(with, &p);
+    sync_fs(root)
+}
+
 /// Make image.img equal to `version` (a new image cloned from a version).
 pub fn rehydrate(name: &str, version: &str) -> Result<(), String> {
     rehydrate_at(&storage_dir(), &image_path(name), name, version)
@@ -273,7 +358,14 @@ fn gc(root: &Path) -> Result<usize, String> {
             .flatten()
             .flatten()
         {
-            if !files.contains(&f.path()) && std::fs::remove_file(f.path()).is_ok() {
+            // A dedup index goes with the file it describes (an unfinished `.bhash.tmp` is garbage).
+            let p = f.path();
+            let of = p
+                .to_str()
+                .and_then(|s| s.strip_suffix(".bhash"))
+                .map(PathBuf::from);
+            let keep = files.contains(of.as_ref().unwrap_or(&p));
+            if !keep && std::fs::remove_file(&p).is_ok() && of.is_none() {
                 freed += 1;
             }
         }

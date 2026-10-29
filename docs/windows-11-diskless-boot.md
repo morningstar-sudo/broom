@@ -2,7 +2,7 @@
 title: Diskless boot Windows 11 over PXE and iSCSI with Broom
 description: "Network-boot Windows 11 Pro on a room of PCs from one golden image with Broom: how it works, what clients need, and setup from an empty Linux server."
 date: 2026-10-11T23:07:00+07:00
-last_modified_at: 2026-10-19
+last_modified_at: 2026-10-29
 ---
 
 [← Broom](index.md)
@@ -102,7 +102,8 @@ PC restarts once by itself, and from then on every boot is clean.
   (Windows Update, an anti-cheat's first run); turned off, its next boot saves that as the base.
 - **Strict reset** — Windows can only start through PXE, so a PC that misses the network boot cannot start Windows
   without the reset.
-- **Versions** — snapshot the golden before a change, roll back in a click.
+- **Versions** — snapshot the golden before a change, roll back in a click. With the images on XFS or btrfs,
+  versions share their common data: each costs only what changed ([user guide](user-guide.md#versions)).
 - **Remote** — a live wall of every PC's screen in the web admin; click one to control it with the mouse and keyboard,
   full-screen games included.
 - **Health** — each PC's CPU, RAM, temperatures, disk health (SMART, bad sectors), uptime and the traffic it draws
@@ -117,4 +118,5 @@ PC restarts once by itself, and from then on every boot is clean.
   for PCs whose Remote agent runs, PCs that just booted and exempt ones (cashier, staff): an agent killed or a laptop
   plugged in gets no internet. Block outside DNS (ports 53, 853) on the router to make it stick.
 
-The [full manual](https://github.com/morningstar-sudo/broom#readme) covers every option, backup and security.
+The [user guide](user-guide.md) goes through daily use step by step; the
+[full manual](https://github.com/morningstar-sudo/broom#readme) covers every option, backup and security.

@@ -122,12 +122,22 @@ pub(crate) fn prepare_stage() {
     refresh_shim();
 }
 
+const IN_USE: &str = "clients are connected; a disk-cache image shares one golden file and can't be swapped live. \
+                      Reboot/close the clients (publish off-hours), or set this image to zram cache.";
+
 pub fn run_publish(st: &SharedState, name: &str, steps: &mut Steps) -> Result<String, String> {
     let img = st
         .db
         .image_by_name(name)?
         .ok_or(format!("image '{name}' not found in DB"))?;
     let (id, os) = (img.id, img.os);
+    // publish_iscsi refuses this anyway: before a rebuild below, not minutes after it.
+    if os == "linux" && img.cache_mode != "zram" && image_in_use(st, name) {
+        return Err(IN_USE.into());
+    }
+    // Whatever is served is in one piece (clients read the golden start to end): image.img in pieces — a version
+    // deduped against a newer golden, rolled back to or made a new image — is rebuilt first (dedup.rs).
+    let rebuilt = crate::dedup::make_whole(st, name, steps)?;
     let r = match os.as_str() {
         "linux" => {
             // Secure Boot clients boot Linux goldens through the shim, which comes with the stage bundle.
@@ -143,7 +153,12 @@ pub fn run_publish(st: &SharedState, name: &str, steps: &mut Steps) -> Result<St
         other => Err(format!("invalid os: {other} (linux|windows)")),
     };
     refresh_shim(); // after: a Windows publish may just have installed the stage bundle (and its shim)
-    r
+    // The rebuilt golden shares nothing yet: every version gives back what it has in common with it.
+    match rebuilt.then(|| crate::dedup::dedupe_image(st, name, steps)) {
+        Some(Ok(d)) => r.map(|msg| format!("{msg}; {d}")),
+        Some(Err(e)) => r.map(|msg| format!("{msg}; ⚠ dedup: {e}")),
+        None => r,
+    }
 }
 
 /// Shared RO iSCSI target for an image (the iSCSI daemon, iscsi.rs): the golden file, or a compressed copy of it in
@@ -172,14 +187,16 @@ pub fn start_iscsi(st: &SharedState) {
         Ok(s) => tracing::info!("{s}"),
         Err(e) => return tracing::error!("iSCSI targets not served: {e}"),
     }
-    restore_targets(st);
+    let _ = restore_targets(st, None); // logs its own errors
     let _ = crate::games::sync(st); // logs its own errors
 }
 
-/// Every published Linux image whose current target the daemon doesn't have (first start, daemon lost its state):
-/// disk → export it again; zram → publish again (new generation + RAM copy, falls back to disk on RAM overflow).
-/// Targets the daemon still has are left alone (clients stay connected).
-pub(crate) fn restore_targets(st: &SharedState) {
+/// Every published Linux image whose current target the daemon doesn't have (first start, daemon lost its state, a
+/// move): disk → export it again; zram → publish again (new generation + RAM copy, falls back to disk on RAM overflow).
+/// Targets the daemon still has are left alone (clients stay connected). `held`: the image whose job slot the caller
+/// already holds (the move job) — restored too, its job status left to the caller, its failure returned.
+pub(crate) fn restore_targets(st: &SharedState, held: Option<&str>) -> Result<(), String> {
+    let mut out = Ok(());
     let have: Vec<String> = crate::iscsi::list()
         .unwrap_or_default()
         .into_iter()
@@ -191,7 +208,8 @@ pub(crate) fn restore_targets(st: &SharedState) {
         }
         // Claim the job slot like any job: a publish / rollback / delete started from the web meanwhile is refused
         // instead of racing this one (same staging dir, same generation, same image.img).
-        {
+        let own = held == Some(img.name.as_str());
+        if !own {
             let mut jobs = st.jobs.lock();
             if jobs.get(&img.name).is_some_and(|s| s.starts_with('⏳')) {
                 continue;
@@ -221,17 +239,24 @@ pub(crate) fn restore_targets(st: &SharedState) {
                     img.name,
                     img.cache_mode
                 );
-                st.set_job(
-                    &img.name,
-                    format!("✓ iSCSI target restored ({})", img.cache_mode),
-                );
+                if !own {
+                    st.set_job(
+                        &img.name,
+                        format!("✓ iSCSI target restored ({})", img.cache_mode),
+                    );
+                }
             }
             Err(e) => {
                 tracing::error!("iSCSI target for image {} not restored: {e}", img.name);
-                st.set_job(&img.name, format!("✗ iSCSI target not restored: {e}"));
+                if own {
+                    out = Err(e);
+                } else {
+                    st.set_job(&img.name, format!("✗ iSCSI target not restored: {e}"));
+                }
             }
         }
     }
+    out
 }
 
 /// Golden Linux: build kernel/initrd (overlay.rs) + serve iSCSI RO shared (disk|zram) +
@@ -249,9 +274,7 @@ fn publish_iscsi(st: &SharedState, id: i64, name: &str) -> Result<String, String
     // while a client of this image is connected (they would read changed bytes mid-session → FS corruption). zram is
     // fine: each publish makes a fresh device + target, and the old one is kept for already-connected clients.
     if want != "zram" && image_in_use(st, name) {
-        return Err("clients are connected; a disk-cache image shares one golden file and can't be swapped live. \
-                    Reboot/close the clients (publish off-hours), or set this image to zram cache."
-            .into());
+        return Err(IN_USE.into());
     }
     // Boot scripts get it at boot (${broom-srv}, /boot/start); without one no client could reach the server.
     if st.db.get_config("dhcp_server_ip", "").is_empty() {

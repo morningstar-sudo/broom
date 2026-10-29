@@ -10,6 +10,7 @@ mod bench;
 mod boot;
 mod capture;
 mod db;
+mod dedup;
 mod devices;
 mod dhcp;
 mod disk;
@@ -119,14 +120,17 @@ fn clean_leftovers() {
             }
         }
     };
-    // images/<name>/image.img.new (convert), tftp/broom-win/<name>/golden.vhdx.tmp (publish).
-    // (upload/ itself is kept: an upload refused by its publish waits there for a retry; its unzip/ is a convert temp.)
+    // images/<name>/image.img.new (convert), image.img.bhash.tmp (dedup index), tftp/broom-win/<name>/golden.vhdx.tmp
+    // (publish). (upload/ itself is kept: an upload refused by its publish waits there for a retry; its unzip/ is a
+    // convert temp.)
     for e in std::fs::read_dir(images_dir())
         .into_iter()
         .flatten()
         .flatten()
     {
         rm(&e.path().join("image.img.new"));
+        rm(&e.path().join("image.img.bhash.tmp"));
+        rm(&e.path().join("image.img.new.bhash")); // a golden rebuilt in one piece (dedup::make_whole)
         rm(&e.path().join("upload").join("unzip"));
     }
     each(&tftp_dir().join("broom-drivers"), &|n| !n.ends_with(".tmp")); // driver archive being written

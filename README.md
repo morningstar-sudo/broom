@@ -19,8 +19,11 @@ labs, up to ~100 PCs per server (see [Sizing](#sizing)).
   no port open on the PCs.
 - **Health and logs**: CPU, RAM, temperatures, SMART / bad sectors for every PC and the server; logs with filter and
   live follow.
-- **Snapshots, machine groups, driver packages.** Free, Apache-2.0.
+- **Versions of every golden**: snapshot and roll back; on XFS / btrfs versions share their common data, so each one
+  costs only what changed. Whatever is served stays in one piece on the disk.
+- **Machine groups, driver packages.** Free, Apache-2.0.
 
+**User guide:** [step by step, from an empty server to a room in daily use](https://broom.hainth.edu.vn/user-guide.html) ·
 **Guides:** [broom.hainth.edu.vn](https://broom.hainth.edu.vn/)
 
 ## Screenshots
@@ -170,7 +173,18 @@ boot without a republish.
 - A machine's **group** decides its boot menu, the images kept on its SSD, its iSCSI disks and drivers (Groups page).
   Things set for no group go to everyone. This organizes, it is not access control.
 - **Preload** (Windows images): PCs fetch the image ahead of use while booting another one.
-- **Versions:** snapshot / roll back a golden (hard links, instant); **→ New image** turns a version into an image.
+- **Versions:** **+ Snapshot now** saves the golden as a version (a hard link: instant, no space). The first upload
+  of an image is saved as v1. **→ New image** turns a version into an image; **Delete** frees what no other version
+  uses.
+- **Shared data:** a new golden is a new file. On a filesystem that can share blocks (**XFS with reflink**, btrfs:
+  Broom tries it, it does not go by the name), the version before it then gives back every block they have in common
+  (FIDEDUPERANGE: the kernel compares the bytes; blake3 per 64 KB finds the candidates, kept in `<file>.bhash`). Only
+  the stored version changes, never the golden being served. On ext4 every version keeps its full size. **Dedup**
+  (Versions) does the same for versions saved earlier, after a move or after restoring a backup.
+- **Rollback / → New image** serve a version again. Whatever is served is in **one piece** on the disk (PCs read the
+  golden start to end): a version that shares its data is scattered, so the publish first rebuilds it in one piece (a
+  copy, minutes for 20–50 GB; free space ≈ the golden + 1 GB), with the same bytes and stamp, so no hash is computed
+  again. The other versions then share their data with it.
 - **Export:** a VMware VM (`.vmx` + `.vmdk`) of an image or version, to edit it again.
 
 ## Web admin
@@ -192,7 +206,7 @@ Accounts: **owner** (everything) or **staff** (look, Remote, Wake, save a games 
 ├── bootrom-mgmt     # the binary
 ├── bootrom.db       # config, accounts, machines, license keys, images (SQLite)
 ├── images/<name>/   # image.img = the golden (raw, sparse)
-├── storage/         # image versions (hard links)
+├── storage/         # image versions (hard links; on XFS / btrfs they share their common data)
 ├── games/<name>/    # iSCSI disks
 ├── disks/<id>/      # other server disks Broom formatted / mounted (Server → Disks)
 ├── tftp/            # boot files, rebuilt by Publish
@@ -203,7 +217,13 @@ Overrides: `BOOTROM_HOME`, `BOOTROM_IMAGES_DIR`, `BOOTROM_STORAGE_DIR`, `BOOTROM
 
 **Backup:** `bootrom.db` (`sqlite3 bootrom.db ".backup /backup/bootrom.db"`, keep it private: license keys and the
 guest password), `images/` + `storage/` together while no publish runs (`rsync -aSH`), `games/`, and `disks/<id>/`
-(or follow the symlinks with `rsync -L`). Restore: stop, put the files back, start.
+(or follow the symlinks with `rsync -L`). `*.bhash` files are a cache and can be left out. Restore: stop, put the
+files back, start. A copy does not keep the data versions share: press **Dedup** on each image's versions after a
+restore.
+
+**Server disks for images:** Server → Disks formats a free disk XFS with reflink (ext4 without `mkfs.xfs`), or adds
+a folder you mounted. Versions share their data on XFS with reflink or btrfs, not on ext4 (e.g. a server's own ext4
+disk): keep the images on a disk formatted here.
 
 **Forgot the owner password:** stop the service, `sqlite3 bootrom.db "DELETE FROM config WHERE key='users'"` (removes
 every account), start it: a new setup token is printed.
@@ -235,6 +255,9 @@ anywhere but the page). The session cookie itself still travels in the clear. Wh
 - **Windows:** `build.cmd` (runs in WSL `Ubuntu-24.04`). **Linux / WSL:** `./build.sh`. Output `mgmt/dist/bootrom-mgmt`.
 - Needs Rust stable via [rustup](https://rustup.rs) (toolchain pinned in `mgmt/rust-toolchain.toml`), `musl-tools`,
   `git`, `gcc`, `make`, `perl`, `liblzma-dev`. The binary is static (musl): it runs on any x86_64 Linux.
+- Tests (`cargo test`, run by `build.sh`) also use `cpio`, `busybox-initramfs` and `qemu-utils`. `./build.sh --live`
+  adds the root-only tests (asks for sudo): NTFS (`ntfs-3g`), LVM (`lvm2`), and the version store on real XFS / ext4
+  filesystems on loop devices (`xfsprogs`, `e2fsprogs`).
 - **iPXE** is fetched at `mgmt/ipxe/IPXE_COMMIT`, patched with `mgmt/ipxe/patches/` and embedded; rebuilt only when
   those change (`--ipxe` forces it).
 - A local build has no Windows stage bundle. Make one on an Ubuntu machine with a `-generic` kernel and copy it next to

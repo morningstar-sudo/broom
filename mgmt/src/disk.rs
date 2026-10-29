@@ -521,35 +521,47 @@ impl Source {
     /// Virtual byte ranges that may hold data, sorted: the holes of sparse files are skipped (SEEK_DATA/SEEK_HOLE),
     /// so a mostly empty 100 GB golden is not read end to end. A filesystem without SEEK_DATA → everything.
     pub fn data_ranges(&self) -> Vec<(u64, u64)> {
-        use std::os::fd::AsRawFd;
         let mut out = Vec::new();
         let mut base = 0u64;
         for (f, so, sl) in &self.segs {
-            let (fd, end) = (f.as_raw_fd(), so + sl);
-            let mut pos = *so;
-            while pos < end {
-                // SAFETY: lseek on an open fd; no memory is touched.
-                let d = unsafe { libc::lseek(fd, pos as libc::off_t, libc::SEEK_DATA) };
-                if d < 0 {
-                    if std::io::Error::last_os_error().raw_os_error() != Some(libc::ENXIO) {
-                        out.push((base + pos - so, base + sl)); // no SEEK_DATA here: assume data
-                    }
-                    break;
-                }
-                let d = (d as u64).max(pos);
-                if d >= end {
-                    break;
-                }
-                // SAFETY: as above.
-                let h = unsafe { libc::lseek(fd, d as libc::off_t, libc::SEEK_HOLE) };
-                let h = if h < 0 { end } else { (h as u64).min(end) };
-                out.push((base + d - so, base + h - so));
-                pos = h;
-            }
+            out.extend(
+                file_data_ranges(f, *so, so + sl)
+                    .into_iter()
+                    .map(|(a, b)| (base + a - so, base + b - so)),
+            );
             base += sl;
         }
         out
     }
+}
+
+/// Byte ranges of [start, end) of an open file that may hold data, sorted (SEEK_DATA/SEEK_HOLE). A filesystem
+/// without SEEK_DATA → everything.
+pub fn file_data_ranges(f: &File, start: u64, end: u64) -> Vec<(u64, u64)> {
+    use std::os::fd::AsRawFd;
+    let fd = f.as_raw_fd();
+    let mut out = Vec::new();
+    let mut pos = start;
+    while pos < end {
+        // SAFETY: lseek on an open fd; no memory is touched.
+        let d = unsafe { libc::lseek(fd, pos as libc::off_t, libc::SEEK_DATA) };
+        if d < 0 {
+            if std::io::Error::last_os_error().raw_os_error() != Some(libc::ENXIO) {
+                out.push((pos, end)); // no SEEK_DATA here: assume data
+            }
+            break;
+        }
+        let d = (d as u64).max(pos);
+        if d >= end {
+            break;
+        }
+        // SAFETY: as above.
+        let h = unsafe { libc::lseek(fd, d as libc::off_t, libc::SEEK_HOLE) };
+        let h = if h < 0 { end } else { (h as u64).min(end) };
+        out.push((d, h));
+        pos = h;
+    }
+    out
 }
 
 #[cfg(test)]

@@ -3,7 +3,7 @@ title: Broom — open-source diskless boot server for Windows 11 and Linux
 description: Free, open-source diskless boot server. Network-boot a room of Windows 11 or Linux PCs from one golden image, clean on every boot, or capture and deploy a PC's disk. Secure Boot without MOK. One static binary.
 seo: { type: WebSite }
 date: 2026-10-11T23:07:00+07:00
-last_modified_at: 2026-10-19
+last_modified_at: 2026-10-29
 ---
 
 **Broom** network-boots a room of PCs from **one golden image**: every reboot comes up clean. One static binary on
@@ -18,6 +18,8 @@ cafés, gaming centers and school labs, up to ~100 PCs per server
 
 ## Guides
 
+- [User guide](user-guide.md): step by step, from an empty server to a room in daily use — network boot, server
+  disks, goldens, PCs, versions and rollback, games disks, drivers, remote, backup, troubleshooting.
 - [Diskless boot Windows 11 with Broom](windows-11-diskless-boot.md): how it works, from an empty server to a room
   of clean Windows 11 PCs.
 - [Diskless boot for internet cafés](internet-cafe-diskless.md): a café room from scratch, games on iSCSI disks,
@@ -39,7 +41,9 @@ cafés, gaming centers and school labs, up to ~100 PCs per server
   No VNC client, no port open on the PCs.
 - **Health and logs**: CPU, RAM, temperatures, SMART / bad sectors for every PC and the server; live server charts;
   the server's log with filter and live follow.
-- **Snapshots, machine groups, driver packages.**
+- **Versions of every golden**: snapshot and roll back in a click; on XFS / btrfs versions share their common data, so
+  each one costs only what changed, and whatever is served stays in one piece on the disk.
+- **Machine groups, driver packages.**
 
 ![Broom web admin Remote page controlling a Windows 11 client](images/remote-control.webp){: width="1883" height="867"}
 
@@ -59,5 +63,5 @@ sudo ./bootrom-mgmt install-service
 journalctl -u bootrom-mgmt -f      # shows the one-time setup token
 ```
 
-Open `http://<server-ip>/`, enter the setup token, then follow the
-[full manual](https://github.com/morningstar-sudo/broom#quick-start).
+Open `http://<server-ip>/`, enter the setup token, then follow the [user guide](user-guide.md) (or the
+[full manual](https://github.com/morningstar-sudo/broom#quick-start)).

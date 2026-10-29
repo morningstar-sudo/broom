@@ -41,6 +41,7 @@ pub fn routes() -> Router<SharedState> {
         .route("/api/images/snapshots", get(snapshots))
         .route("/api/images/rollback", post(rollback))
         .route("/api/images/version-delete", post(version_delete))
+        .route("/api/images/dedup", post(dedup))
         .route("/api/images/export", post(export))
         .route("/api/images/from-version", post(from_version))
         .route("/api/images/export-file", get(export_file))
@@ -245,6 +246,19 @@ async fn snapshot(
     Ok(Json(serde_json::json!({"ok": true, "async": true})))
 }
 
+/// Versions share the data they have in common (dedup.rs): versions saved before that existed, or after a move.
+/// Background job.
+async fn dedup(
+    State(st): State<SharedState>,
+    Json(b): Json<IdBody>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let name = name_of(&st, b.id)?;
+    spawn_job(&st, name, "dedup", |st, name, steps| {
+        crate::dedup::dedupe_image(st, name, steps)
+    })?;
+    Ok(Json(serde_json::json!({"ok": true, "async": true})))
+}
+
 #[derive(Deserialize)]
 struct VersionBody {
     id: i64,
@@ -272,14 +286,17 @@ async fn rollback(
         if disk_target && crate::publish::image_in_use(st, name) {
             in_use()?;
         }
-        {
+        let file = {
             let _g = st.versions_lock.lock();
-            crate::versions::check(name, &version)?
+            crate::versions::check(name, &version)?;
+            crate::versions::file_of(name, &version)?
         };
         let dir = crate::images_dir().join(name);
         steps.go(&format!("restore {version}"));
         let (img_path, tmp) = (dir.join("image.img"), dir.join("image.img.new"));
         let _ = std::fs::remove_file(&tmp);
+        // The version's file itself (a hard link, instant); in pieces (deduped against a newer golden), the publish
+        // below rebuilds it in one piece before serving it (dedup::make_whole).
         {
             let _g = st.versions_lock.lock();
             crate::versions::rehydrate_to(name, &version, &tmp)
@@ -297,6 +314,7 @@ async fn rollback(
             crate::publish::drop_all_targets(st, name);
         }
         std::fs::rename(&tmp, &img_path).map_err(|e| format!("{}: {e}", img_path.display()))?;
+        crate::dedup::link_index(&file, &img_path); // the version's file again: its index too
         st.db.set_active_version(img.id, Some(&version))?;
         let msg = crate::publish::run_publish(st, name, steps)?;
         Ok(format!("rolled back to {version} — {msg}"))
@@ -660,7 +678,14 @@ fn spawn_publish(
             crate::golden::prepare_golden(&dir, &crate::images_dir().join(name).join("image.img"))?;
             st.db.set_active_version(name_id(st, name)?, None)?; // new golden = no version yet
         }
-        let published = crate::publish::run_publish(st, name, steps);
+        let mut published = crate::publish::run_publish(st, name, steps);
+        // The version before the new golden gives back what they have in common (dedup.rs: image.img itself is only
+        // read); never fails the publish.
+        if let Ok(msg) = &mut published
+            && let Some(d) = crate::dedup::after_publish(st, name, steps)
+        {
+            msg.push_str(&format!("; {d}"));
+        }
         if !first {
             return published;
         }

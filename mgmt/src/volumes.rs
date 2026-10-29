@@ -1,9 +1,10 @@
 // volumes.rs — more disks for the server: images and games disks can live on another disk than the binary's home.
-// A volume = a disk formatted here (ext4, else xfs: mkfs from the distro, the only outside tool) and mounted by broom
-// itself at <home>/disks/<id> at every start (no fstab), or a folder the admin mounted (LVM, RAID…).
+// A volume = a disk formatted here (xfs with reflink, else ext4: mkfs from the distro, the only outside tool) and
+// mounted by broom itself at <home>/disks/<id> at every start (no fstab), or a folder the admin mounted (LVM, RAID…).
 // An image / games disk on a volume = a symlink at its usual place (images/<name>, storage/files/<name>,
 // games/<name>) to the same name on the volume: every path the rest of the code builds stays valid, a version is
-// still a hard link of its golden (both on the volume), and free-space checks see the volume (statvfs follows).
+// still a hard link of its golden (both on the volume), versions can share blocks (dedup.rs: same filesystem), and
+// free-space checks see the volume (statvfs follows).
 // Kept in the config table ("volumes", JSON).
 use axum::{
     Json, Router,
@@ -480,15 +481,19 @@ fn format_blocking(st: &SharedState, disk: &str) -> Result<Volume, String> {
                 )
             })
     };
-    let fstype = match run("mkfs.ext4", &["-F", "-q", "-m", "0", "-L", &label, &dev]) {
-        Ok((true, _)) => "ext4",
-        Ok((false, err)) => return Err(format!("mkfs.ext4 {dev}: {}", err.trim())),
-        Err(_) => match run("mkfs.xfs", &["-f", "-q", "-L", &label, &dev]) {
-            Ok((true, _)) => "xfs",
-            Ok((false, err)) => return Err(format!("mkfs.xfs {dev}: {}", err.trim())),
+    // XFS with reflink first: image versions share their common data there (dedup.rs).
+    let fstype = match run(
+        "mkfs.xfs",
+        &["-f", "-q", "-m", "reflink=1", "-L", &label, &dev],
+    ) {
+        Ok((true, _)) => "xfs",
+        Ok((false, err)) => return Err(format!("mkfs.xfs {dev}: {}", err.trim())),
+        Err(_) => match run("mkfs.ext4", &["-F", "-q", "-m", "0", "-L", &label, &dev]) {
+            Ok((true, _)) => "ext4",
+            Ok((false, err)) => return Err(format!("mkfs.ext4 {dev}: {}", err.trim())),
             Err(_) => {
                 return Err(
-                    "no mkfs.ext4 or mkfs.xfs on this server (apt install e2fsprogs / dnf install xfsprogs)"
+                    "no mkfs.xfs or mkfs.ext4 on this server (apt install xfsprogs / dnf install xfsprogs)"
                         .into(),
                 );
             }
@@ -568,6 +573,13 @@ pub(crate) fn copy_tree(
         return std::fs::hard_link(first, dst).map_err(|e| format!("{}: {e}", dst.display()));
     }
     crate::disk::copy_region(src, 0, None, dst)?;
+    // Same bytes, same stamp (hash.rs, the Windows golden.id): nothing hashed or built again after the move.
+    if let Ok(t) = m.modified() {
+        let _ = std::fs::File::options()
+            .write(true)
+            .open(dst)
+            .and_then(|f| f.set_modified(t));
+    }
     if m.nlink() > 1 {
         links.insert(key, dst.to_path_buf());
     }
@@ -874,7 +886,7 @@ async fn move_item(
     } else {
         return Err(bad("kind: image | games"));
     };
-    crate::images::spawn_job(&st, job, "move", move |st2, _, _| {
+    crate::images::spawn_job(&st, job, "move", move |st2, _, steps| {
         let r = if kind == "image" {
             if crate::publish::image_in_use(st2, &name) {
                 return Err("clients are booted from it — shut them down first".into());
@@ -885,8 +897,28 @@ async fn move_item(
                 let _g = st2.versions_lock.lock();
                 move_blocking(st2, "image", &name, to.as_deref())
             };
-            crate::publish::restore_targets(st2);
-            r
+            // A Windows golden is read through an open file: from the new place now (the old one is gone).
+            if r.is_ok() {
+                crate::goldenram::reopen(&name, &crate::images_dir().join(&name).join("image.img"));
+            }
+            // Served from the new place in one piece, like any served golden (dedup.rs), before its target is back.
+            if r.is_ok()
+                && let Err(e) = crate::dedup::make_whole(st2, &name, steps)
+            {
+                tracing::warn!("image {name} moved, golden not rebuilt in one piece: {e}");
+            }
+            // Moved or not, its target is made again (this job holds its slot: restored here, not skipped as busy).
+            let restored = crate::publish::restore_targets(st2, Some(&name));
+            // The copies share nothing any more: the versions share their common data again (dedup.rs), best-effort.
+            if r.is_ok() {
+                match crate::dedup::dedupe_image(st2, &name, steps) {
+                    Ok(m) => tracing::info!("image {name} moved: {m}"),
+                    Err(e) => tracing::info!("image {name} moved, no dedup: {e}"),
+                }
+            }
+            r.and_then(|()| {
+                restored.map_err(|e| format!("moved, but its iSCSI target was not made again: {e}"))
+            })
         } else {
             crate::games::idle(&name)?;
             // Out of the iSCSI daemon while its files move (it holds them open), back in after.
