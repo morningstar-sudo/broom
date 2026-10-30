@@ -11,7 +11,9 @@ labs, up to ~100 PCs per server (see [Sizing](#sizing)).
 
 - **Secure Boot on, no MOK**: every step of the network boot is signed through Microsoft's UEFI CA. With TPM 2.0 +
   HVCI, **FACEIT Anti-Cheat works**.
-- **Clean every boot**: Windows 11 Pro or Linux clients; writes go to the local SSD and are reset at the next boot.
+- **Clean every boot**: Windows (tested on 11 Pro and Enterprise) or Linux clients; writes go to the local SSD and
+  are reset at the next boot.
+- **UEFI or legacy BIOS (CSM)**: one golden boots both kinds of PC, no second image.
 - **One file to deploy**: no dnsmasq, tftpd or targetcli. Build the golden in a VM (or capture a real PC) and
   upload it from the browser.
 - **Shared iSCSI disks** for games and apps: update once, every PC gets it at its next boot.
@@ -39,7 +41,7 @@ labs, up to ~100 PCs per server (see [Sizing](#sizing)).
 
 ## How it works
 
-1. Build a golden in a VM (Linux, or Windows 11 Pro), or capture a real PC.
+1. Build a golden in a VM (Linux, or Windows 11 Pro / Enterprise), or capture a real PC.
 2. Upload it in the web admin: the server extracts the disk, builds the boot files and serves it.
 3. Clients PXE-boot it read-only; their writes land on the local SSD and are reset at each boot.
    - **Windows:** the golden is cached on the SSD as `golden.vhdx` (downloaded once per new golden, checked with
@@ -61,8 +63,8 @@ their own layer over it. Every boot resets to `base ← drivers ← fresh child`
 ## Requirements
 
 - **Server:** x86_64 Linux (tested on Debian/Ubuntu and Rocky Linux 10), run as root, disk space for the goldens.
-- **Clients:** x86_64 PCs, UEFI or legacy BIOS (CSM), **PXE first in the boot order**. Windows images need a local SSD; Linux images can
-  run without one (writes in RAM).
+- **Clients:** x86_64 PCs, UEFI or legacy BIOS (CSM), **PXE first in the boot order**. Windows images need a local
+  SSD; Linux images can run without one (writes in RAM).
 
 ## Sizing
 
@@ -122,14 +124,17 @@ with several disks, pick the Broom disk under Devices → *Disks* and optionally
 Clients then get the iPXE project's signed build and kernels signed for Ubuntu's shim; no MOK enrollment. Golden
 drivers must be HVCI-compatible (e.g. VMware: use `e1000e`, not `e1000`).
 
+**Legacy BIOS (CSM):** nothing to switch on: BIOS PCs get their own iPXE and boot the same goldens, the Broom SSD
+laid out as MBR. A Windows golden prepped by an older version boots UEFI PCs only: run the prep command again.
+
 ## Adding a golden
 
 Upload the powered-off VM folder (only `.vmx` / `.vmdk` are sent, in parallel chunks with retry), or a single
 `.vmdk` / `.img` / `.zip`.
 
 - **Linux:** in the VM, `curl -fsSL http://<server>/broom-prep | sudo bash`, power off, upload (OS = Linux).
-- **Windows 11 Pro:** set the guest user (Windows page), then in the VM, in Audit Mode (Ctrl+Shift+F3 at OOBE),
-  PowerShell as Administrator:
+- **Windows 11 Pro / Enterprise:** set the guest user (Windows page), then in the VM, in Audit Mode (Ctrl+Shift+F3
+  at OOBE), PowerShell as Administrator:
   ```powershell
   irm http://<server>/broom-prep-win | iex
   ```

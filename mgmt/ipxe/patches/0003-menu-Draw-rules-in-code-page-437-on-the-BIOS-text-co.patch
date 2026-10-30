@@ -1,0 +1,40 @@
+From b8c95abc6ffd927f6724dcec4c0cf6835f598563 Mon Sep 17 00:00:00 2001
+From: morningstar-sudo <mornngstr1@gmail.com>
+Date: Fri, 30 Oct 2026 15:47:05 +0700
+Subject: [menu] Draw rules in code page 437 on the BIOS text console
+
+The BIOS console does not decode UTF-8: U+2500 showed as three CP437
+characters per column and wrapped over the whole screen.
+---
+ src/hci/tui/menu_ui.c | 10 ++++++++--
+ 1 file changed, 8 insertions(+), 2 deletions(-)
+
+diff --git a/src/hci/tui/menu_ui.c b/src/hci/tui/menu_ui.c
+index 7970665..75232cb 100644
+--- a/src/hci/tui/menu_ui.c
++++ b/src/hci/tui/menu_ui.c
+@@ -201,7 +201,8 @@ static void draw_menu_timeout ( struct menu_ui *ui ) {
+  * @v row		Screen row
+  *
+  * Emits U+2500 as UTF-8 directly (the EFI and framebuffer consoles
+- * decode UTF-8; curses only handles single-byte characters), then
++ * decode UTF-8; curses only handles single-byte characters), or 0xc4
++ * on the BIOS text console, which shows bytes in code page 437; then
+  * invalidates the curses cursor so the next draw repositions itself.
+  */
+ static void draw_menu_rule ( unsigned int row ) {
+@@ -210,8 +211,13 @@ static void draw_menu_rule ( unsigned int row ) {
+ 	color_set ( CPAIR_SEPARATOR, NULL );
+ 	mvaddch ( row, EDGE_COL, ' ' );	/* push colour to the screen */
+ 	printf ( "\033[%d;%dH", ( row + 1 ), ( EDGE_COL + 1 ) );
+-	for ( col = EDGE_COL ; col < ( COLS - EDGE_COL ) ; col++ )
++	for ( col = EDGE_COL ; col < ( COLS - EDGE_COL ) ; col++ ) {
++#ifdef PLATFORM_pcbios
++		putchar ( 0xc4 );
++#else
+ 		printf ( "\xe2\x94\x80" );
++#endif
++	}
+ 	stdscr->scr->curs_x = ~0U;
+ 	color_set ( CPAIR_NORMAL, NULL );
+ }

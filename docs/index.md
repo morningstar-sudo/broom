@@ -33,7 +33,9 @@ cafés, gaming centers and school labs, up to ~100 PCs per server
 
 - **Secure Boot on, no MOK**: every step of the network boot is signed through Microsoft's UEFI CA. With TPM 2.0 +
   HVCI, [FACEIT Anti-Cheat works](faceit-diskless.md).
-- **Clean every boot**: Windows 11 Pro or Linux clients; writes go to the local SSD and are reset at the next boot.
+- **Clean every boot**: Windows (tested on 11 Pro and Enterprise) or Linux clients; writes go to the local SSD and
+  are reset at the next boot.
+- **UEFI or legacy BIOS (CSM)**: one golden boots both kinds of PC, no second image.
 - **One file to deploy**: no dnsmasq, tftpd or targetcli. Build the golden in a VM and upload it from the browser.
 - **Imaging too**: capture a real PC's disk as an image, or deploy an image onto a PC's disk, from the boot menu.
 - **Shared iSCSI disks** for games and apps: update once, every PC gets it at its next boot.

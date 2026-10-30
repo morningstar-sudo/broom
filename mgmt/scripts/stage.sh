@@ -118,8 +118,9 @@ broomdisk(){
     done
   done
 }
-# The disk's partition table is the one this firmware boots Windows from: GPT under UEFI, MBR under BIOS.
-fwtable(){ case "$(blkid -p -s PTTYPE -o value /dev/$1 2>/dev/null)" in gpt) [ -z "$BIOS" ];; dos) [ -n "$BIOS" ];; *) false;; esac; }
+# The disk's partition table is the one this firmware boots Windows from: GPT under UEFI, MBR under BIOS. Unknown (blkid
+# failed or unsure) counts as right: only a table surely of the other kind wipes the disk.
+fwtable(){ case "$(blkid -p -s PTTYPE -o value /dev/$1 2>/dev/null)" in gpt) [ -z "$BIOS" ];; dos) [ -n "$BIOS" ];; *) true;; esac; }
 # sfdisk script of that layout for disk $1: Windows gets what LX leaves; under 32 GB left → no Linux part.
 layout(){
   gb=$(( $(cat $SYSB/$1/size) / 2097152 )); lx=$LX
@@ -738,8 +739,11 @@ bios_drive(){
 }
 if [ -n "$BIOS" ]; then
   [ -s $B/bios.tar.gz ] || die "image $NAME has no legacy BIOS boot files - run the Windows prep command again in its VM, upload, Publish"
-  tar -xzOf $B/bios.tar.gz esp.img | dd of="$(part $disk 1)" bs=1M conv=fsync 2>/dev/null || die "write the BIOS boot partition"
-  tar -xzOf $B/bios.tar.gz mbr.bin | dd of=/dev/$disk bs=440 count=1 conv=notrunc,fsync 2>/dev/null || die "write the MBR boot code"
+  # Unpacked first (~100 MB in RAM): a broken archive stops here, not as a half-written p1 ("BOOTMGR is missing").
+  tar -xzf $B/bios.tar.gz -C /run esp.img mbr.bin || die "unpack bios.tar.gz"
+  dd if=/run/esp.img of="$(part $disk 1)" bs=1M conv=fsync 2>/dev/null || die "write the BIOS boot partition"
+  dd if=/run/mbr.bin of=/dev/$disk bs=440 count=1 conv=notrunc,fsync 2>/dev/null || die "write the MBR boot code"
+  rm -f /run/esp.img /run/mbr.bin
   sfdisk -q --activate /dev/$disk 1 >/dev/null 2>&1 || die "sfdisk --activate"
   # Strict reset: the BroomBootOrder task deletes \bootmgr from p1 once Windows is up → the SSD boots only through here.
   if [ "$STRICT" = 1 ]; then echo bios > $B/strict.txt; else rm -f $B/strict.txt; fi

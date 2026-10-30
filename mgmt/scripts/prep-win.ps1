@@ -103,29 +103,32 @@ bcdedit /store $S /set '{default}' device 'vhd=[locate]\broom\child.vhdx' | Out-
 bcdedit /store $S /set '{default}' osdevice 'vhd=[locate]\broom\child.vhdx' | Out-Null
 bcdedit /store $S /set '{default}' description 'Broom Windows' | Out-Null
 bcdedit /store $S /timeout 0 | Out-Null
-$bp = Get-Partition -DriveLetter $L
+# Optional: anything failing here (no letter assigned, no file) leaves a UEFI-only golden, never stops the prep.
+$bp = Get-Partition -DriveLetter $L -ErrorAction SilentlyContinue
 @"
 select vdisk file="$vb"
 detach vdisk
 "@ | Set-Content -Encoding ascii "$env:TEMP\broom-bios.txt"
 diskpart /s "$env:TEMP\broom-bios.txt" | Out-Null
 $okBios = $false
-New-Item -ItemType Directory "$B\bios" | Out-Null
-$fs = [IO.File]::OpenRead($vb)
 try {
-  $mbr = New-Object byte[] 440
-  [void]$fs.Read($mbr, 0, 440)
-  if ($bp -and $bp.Offset -eq 1MB -and ($mbr | Where-Object { $_ -ne 0 })) {
-    [IO.File]::WriteAllBytes("$B\bios\mbr.bin", $mbr)
-    $out = [IO.File]::Create("$B\bios\esp.img")
-    try {
-      [void]$fs.Seek($bp.Offset, 'Begin')
-      $buf = New-Object byte[] 1MB; $left = [int64]$bp.Size
-      while ($left -gt 0) { $n = $fs.Read($buf, 0, [Math]::Min($buf.Length, $left)); if ($n -le 0) { break }; $out.Write($buf, 0, $n); $left -= $n }
-    } finally { $out.Dispose() }
-    $okBios = $left -eq 0
-  }
-} finally { $fs.Dispose() }
+  New-Item -ItemType Directory "$B\bios" | Out-Null
+  $fs = [IO.File]::OpenRead($vb)
+  try {
+    $mbr = New-Object byte[] 440
+    [void]$fs.Read($mbr, 0, 440)
+    if ($bp -and $bp.Offset -eq 1MB -and ($mbr | Where-Object { $_ -ne 0 })) {
+      [IO.File]::WriteAllBytes("$B\bios\mbr.bin", $mbr)
+      $out = [IO.File]::Create("$B\bios\esp.img")
+      try {
+        [void]$fs.Seek($bp.Offset, 'Begin')
+        $buf = New-Object byte[] 1MB; $left = [int64]$bp.Size
+        while ($left -gt 0) { $n = $fs.Read($buf, 0, [Math]::Min($buf.Length, $left)); if ($n -le 0) { break }; $out.Write($buf, 0, $n); $left -= $n }
+      } finally { $out.Dispose() }
+      $okBios = $left -eq 0
+    }
+  } finally { $fs.Dispose() }
+} catch { $okBios = $false }
 if (-not $okBios) {
   Remove-Item "$B\bios" -Recurse -Force -ErrorAction SilentlyContinue
   Write-Host '>>> Legacy BIOS boot files NOT made: this image boots UEFI clients only' -ForegroundColor Yellow

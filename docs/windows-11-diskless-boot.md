@@ -1,13 +1,13 @@
 ---
 title: Diskless boot Windows 11 over PXE and iSCSI with Broom
-description: "Network-boot Windows 11 Pro on a room of PCs from one golden image with Broom: how it works, what clients need, and setup from an empty Linux server."
+description: "Network-boot Windows 11 Pro or Enterprise on a room of PCs from one golden image with Broom: how it works, what clients need, and setup from an empty Linux server."
 date: 2026-10-11T23:07:00+07:00
 last_modified_at: 2026-10-29
 ---
 
 [← Broom](index.md)
 
-Broom lets a room of PCs run **Windows 11 Pro from one shared golden image**. You install and set up Windows once,
+Broom lets a room of PCs run **Windows 11 Pro or Enterprise from one shared golden image**. You install and set up Windows once,
 in a virtual machine; every PC then boots that image over the network, and whatever a user changes is gone at the
 next boot.
 
@@ -31,9 +31,9 @@ base: a new or updated one is installed once (one extra restart) and needs no ne
 
 - **Server:** any x86_64 Linux (tested on Debian/Ubuntu and Rocky Linux 10), with disk space for the goldens and a
   Gigabit LAN to the clients. Broom is one binary; nothing else to install.
-- **Clients:** x86_64 PCs (UEFI or legacy BIOS), network boot (PXE) first in the boot order, and a local SSD — Windows images are
-  cached and run there.
-- **Golden:** Windows 11 Pro, installed in a VM (e.g. VMware) or on a real PC and captured.
+- **Clients:** x86_64 PCs (UEFI or legacy BIOS), network boot (PXE) first in the boot order, and a local SSD —
+  Windows images are cached and run there.
+- **Golden:** Windows 11 Pro or Enterprise, installed in a VM (e.g. VMware) or on a real PC and captured.
 
 ## Steps
 
@@ -59,8 +59,8 @@ DHCP and point its PXE options at Broom: next-server / option 66 = the Broom ser
 
 ### 3. Build the golden
 
-1. Create a VM, install Windows 11 Pro, and stop at the first setup screen (OOBE). Press **Ctrl+Shift+F3** to enter
-   **Audit Mode**.
+1. Create a VM, install Windows 11 Pro or Enterprise, and stop at the first setup screen (OOBE). Press
+   **Ctrl+Shift+F3** to enter **Audit Mode**.
 2. Install your software, games launchers, drivers you want everywhere, and settings.
 3. In Broom's web admin, set the guest user and password (**Windows → Guest user**).
 4. In the VM, run PowerShell as Administrator:

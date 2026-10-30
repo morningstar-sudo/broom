@@ -24,7 +24,7 @@ faq:
 [← Broom](index.md)
 
 **Broom** is free, open-source **diskless boot** software for **internet cafés, gaming centers and school labs**, up
-to about 100 PCs per server. You install Windows 11 Pro **once** in a virtual machine and upload it to the server;
+to about 100 PCs per server. You install Windows 11 Pro or Enterprise **once** in a virtual machine and upload it to the server;
 every client network-boots from that image, and every restart brings the client back **clean** — whatever a customer
 installed or deleted is gone.
 
@@ -54,9 +54,10 @@ installed or deleted is gone.
 ## What you need
 
 - **Server:** an x86_64 machine running Linux, disk space for the images, Gigabit LAN to the clients.
-- **Clients:** UEFI or legacy BIOS PCs with network boot (PXE) first, and **an SSD in each** (the Windows image is cached and runs
-  there).
-- **Image:** Windows 11 Pro installed in a virtual machine (e.g. VMware), or on one of the room's PCs and captured.
+- **Clients:** UEFI or legacy BIOS PCs with network boot (PXE) first, and **an SSD in each** (the Windows image is
+  cached and runs there).
+- **Image:** Windows 11 Pro or Enterprise installed in a virtual machine (e.g. VMware), or on one of the room's PCs
+  and captured.
 
 ## Steps
 
@@ -84,8 +85,8 @@ Pick one:
 
 ### 3. Build the Windows image
 
-1. Create a VM, install Windows 11 Pro, and at the first setup screen (OOBE) press **Ctrl+Shift+F3** to enter
-   **Audit Mode**.
+1. Create a VM, install Windows 11 Pro or Enterprise, and at the first setup screen (OOBE) press **Ctrl+Shift+F3**
+   to enter **Audit Mode**.
 2. Install your software and game launchers, and set things up as the whole room should have them.
 3. In Broom's web admin, set the customers' account and password (**Windows → Guest user**).
 4. In the VM, open PowerShell as Administrator and run:

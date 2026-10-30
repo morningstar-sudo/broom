@@ -29,8 +29,8 @@ model and how to build from source.
   and one extra golden while a rollback rebuilds it. **Give the images a disk formatted by Broom** (XFS): there,
   versions share the data they have in common and each one costs only what changed. On ext4 every version takes its
   full size (see [Server disks](#server-disks)).
-- **Clients:** x86_64 PCs, UEFI or legacy BIOS (CSM), with network boot (PXE) first in the boot order. Windows images need a local SSD in each
-  PC; Linux images also run without one (writes in RAM).
+- **Clients:** x86_64 PCs, UEFI or legacy BIOS (CSM), with network boot (PXE) first in the boot order. Windows
+  images need a local SSD in each PC; Linux images also run without one (writes in RAM).
 - **Network:** 1 GbE to the PCs, PortFast / edge port on the PC switch ports. Keep the boot LAN for the room only: the
   goldens and iSCSI are readable by any host on it.
 
@@ -65,6 +65,9 @@ UI, iPXE and scripts (`broom-assets.zip`) of its own release; an offline server 
 step of the boot is then signed; no MOK to enroll. Needed for anti-cheats such as
 [FACEIT](faceit-diskless.md).
 
+**Legacy BIOS (CSM):** nothing to switch on: BIOS PCs get their own iPXE and boot the same images, the Broom SSD laid
+out as MBR. A Windows image prepped by an older version boots UEFI PCs only: run the Windows prep command again.
+
 Other options on the same page, all optional: **Strict reset** (Windows starts only through PXE, so a PC whose network
 boot fails can't run without the reset) and **DNS — only for healthy machines** (see
 [Watch and control the room](#monitor)).
@@ -89,10 +92,11 @@ the files; the versions then share their data again by themselves.
 The golden is the disk every PC boots. Make it in a VM (VMware or any hypervisor that writes `.vmdk` / raw disks) or
 on a real PC you then capture.
 
-### Windows 11 Pro
+### Windows 11 Pro / Enterprise
 
 1. **Windows → Guest user:** set the account and password the customers use.
-2. Install Windows 11 Pro in a VM. At the first setup screen (OOBE) press **Ctrl+Shift+F3** to enter **Audit Mode**.
+2. Install Windows 11 Pro or Enterprise in a VM. At the first setup screen (OOBE) press **Ctrl+Shift+F3** to enter
+   **Audit Mode**.
 3. Install the software and game launchers the whole room should have, and set it up. Keep big games out of it:
    they go on [iSCSI disks](#games). Drivers that need Secure Boot / HVCI must be
    HVCI-compatible (VMware: use the `e1000e` NIC, not `e1000`).

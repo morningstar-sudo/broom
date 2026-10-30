@@ -293,15 +293,13 @@ fn deploy(api: &Api) -> Result<(), String> {
         size_str(list.iter().map(|p| p.1).sum()),
         mins(t0.elapsed().as_secs_f64())
     );
-    // The firmware needs a boot entry on this disk's EFI partition: the stage makes it (efibootmgr). Legacy BIOS has
-    // none: the disk's own MBR boot code (written with the image) boots it.
-    let esp = crate::disk::read(&disk.dev)?
-        .filter(|_| uefi)
-        .and_then(|t| {
-            t.parts
-                .iter()
-                .position(|p| p.kind.eq_ignore_ascii_case(crate::disk::ESP) || p.kind == "ef")
-        });
+    // The firmware needs a boot entry on this disk's EFI partition: the stage makes it (efibootmgr; not under legacy
+    // BIOS, where the disk's own MBR boot code, written with the image, boots it).
+    let esp = crate::disk::read(&disk.dev)?.and_then(|t| {
+        t.parts
+            .iter()
+            .position(|p| p.kind.eq_ignore_ascii_case(crate::disk::ESP) || p.kind == "ef")
+    });
     if let (Some(i), true) = (esp, disk.dev.starts_with("/dev/")) {
         let _ = std::fs::write(DEPLOYED, format!("{short} {}\n", i + 1));
     }

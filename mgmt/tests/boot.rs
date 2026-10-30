@@ -114,6 +114,31 @@ fn linux_client_boots() {
             script.contains(&format!("root=UUID={}", g.uuid)),
             "{script}"
         );
+        // Legacy BIOS hand-off (the Windows stage's last step): taken only for a machine whose menu choice came from
+        // this address, for a BIOS hard disk number; then its next menu request boots that disk, once.
+        let local = |mac: &str, drive: &str| {
+            anon.post(
+                &format!("/api/boot/local?mac={mac}&drive={drive}"),
+                &serde_json::json!({}),
+            )
+            .status
+        };
+        assert_eq!(
+            local("52:54:00:00:00:b1", "0x80"),
+            403,
+            "no menu choice from here"
+        );
+        assert_eq!(local(MAC_S, "0x7f"), 403, "not a BIOS hard disk");
+        assert_eq!(local(MAC_S, "0x81"), 204);
+        let menu_now = || anon.get(&format!("/boot.ipxe?mac={MAC_S}&ip={ip}")).text();
+        assert_eq!(
+            menu_now(),
+            "#!ipxe\nsanboot --no-describe --drive 0x81 || exit\n"
+        );
+        assert!(
+            menu_now().contains("choose --default"),
+            "once: the menu again"
+        );
         assert!(
             home.log().contains("client pc01 started"),
             "boot logged with the hostname"

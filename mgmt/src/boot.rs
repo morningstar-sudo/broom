@@ -66,9 +66,10 @@ fn script(body: String) -> impl IntoResponse {
 }
 
 /// Legacy BIOS hand-off (no BootNext there): mac → (BIOS drive, until when). The machine's next /boot.ipxe boots that
-/// local disk instead of the menu, once. Short-lived: a stale entry must never let a later boot skip its reset.
+/// local disk instead of the menu, once. Short-lived: a stale entry must never let a later boot skip its reset. Room
+/// for a slow restart (RAID option ROMs): always set right after the stage reset the child, so waiting is harmless.
 static LOCAL: LazyLock<Mutex<HashMap<String, (u8, u64)>>> = LazyLock::new(Default::default);
-const LOCAL_S: u64 = 120;
+const LOCAL_S: u64 = 300;
 
 /// A BIOS drive number as the stage sends it: "0x80".."0x8f" (the firmware's hard disks).
 fn bios_drive(s: &str) -> Option<u8> {
