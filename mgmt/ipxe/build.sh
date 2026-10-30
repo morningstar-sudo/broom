@@ -1,6 +1,7 @@
 #!/bin/bash
-# Build iPXE (UEFI snponly.efi) → mgmt/ipxe/snponly.efi; this file is EMBEDDED in the mgmt binary (boot.rs) and
-# served from memory by the built-in TFTP server (tftp.rs). Neither ipxe-src/ nor snponly.efi is in git.
+# Build iPXE (UEFI snponly.efi + legacy BIOS undionly.kpxe) → mgmt/ipxe/; both are EMBEDDED in the mgmt binary
+# (boot.rs) and served from memory by the built-in TFTP server (tftp.rs). Neither ipxe-src/ nor the binaries are in git.
+# undionly.kpxe carries bios.ipxe (EMBED=): BIOS iPXE does not fetch autoexec.ipxe by itself as the EFI one does.
 # Source = upstream iPXE at the commit in IPXE_COMMIT + broom's changes in patches/ (menu layout, short banner).
 # ipxe-src/ is a temporary git checkout: fetched + patched here (needs git + network), deleted again after the build
 # (~200 MB with objects) unless KEEP_IPXE_SRC=1.
@@ -31,9 +32,10 @@ if [ "$(cat "$src/.git/broom-stamp" 2>/dev/null)" != "$stamp" ]; then
   git -C "$src" -c user.name=morningstar-sudo -c user.email=mornngstr1@gmail.com am -q "$here"/patches/*.patch
   echo "$stamp" > "$src/.git/broom-stamp"
 fi
-make -C "$src/src" -j"$(nproc)" bin-x86_64-efi/snponly.efi
+make -C "$src/src" -j"$(nproc)" bin-x86_64-efi/snponly.efi bin/undionly.kpxe EMBED="$here/bios.ipxe"
 cp "$src/src/bin-x86_64-efi/snponly.efi" "$here/snponly.efi"
-echo "OK: $here/snponly.efi ($(stat -c %s "$here/snponly.efi") bytes)"
+cp "$src/src/bin/undionly.kpxe" "$here/undionly.kpxe"
+for f in snponly.efi undionly.kpxe; do echo "OK: $here/$f ($(stat -c %s "$here/$f") bytes)"; done
 if [ "${KEEP_IPXE_SRC:-0}" != 1 ] && [ -z "$(git -C "$src" status --porcelain)" ]; then
   rm -rf "$src"   # regenerable from IPXE_COMMIT + patches/; kept when it holds uncommitted edits
 fi

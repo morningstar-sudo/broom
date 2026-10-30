@@ -1,3 +1,4 @@
 # Patches must apply byte-exact to upstream iPXE: no line-ending conversion.
 patches/*.patch -text
 *.sh text eol=lf
+*.ipxe text eol=lf

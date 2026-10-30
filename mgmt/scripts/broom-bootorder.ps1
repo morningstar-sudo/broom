@@ -5,6 +5,21 @@ if (-not $v) { exit }
 # Its own block: it ends early (`return`) without skipping the steps after it; an error in it skips only it.
 try {
   & {
+    # Legacy BIOS (no ESP, no BootOrder; the SSD is MBR): MBR has no "no drive letter" bit, so the letters Windows gives
+    # BROOMWIN and the BIOS boot partition (BROOMEFI) come off here. Strict reset: bootmgr goes from that partition once
+    # Windows is up - the stage writes the partition again on every PXE boot.
+    if ($env:firmware_type -eq 'Legacy') {
+      foreach ($lb in 'BROOMWIN', 'BROOMEFI') {
+        $x = Get-Volume -FileSystemLabel $lb -ErrorAction SilentlyContinue
+        if ($x -and $x.DriveLetter) { & mountvol "$($x.DriveLetter):" /d | Out-Null }
+      }
+      $e = Get-Volume -FileSystemLabel BROOMEFI -ErrorAction SilentlyContinue
+      $bm = if ($e) { $e.Path + 'bootmgr' }
+      if ($bm -and [IO.File]::Exists($v.Path + 'broom\strict.txt') -and [IO.File]::Exists($bm)) {
+        [IO.File]::SetAttributes($bm, 'Normal'); [IO.File]::Delete($bm)
+      }
+      return
+    }
     # Strict reset (stage wrote strict.txt = the SSD's Windows entries): remove the Windows boot loader from the ESP once
     # Windows is up - the stage puts it back on every PXE boot, so without the stage (cable out, F12, BootOrder edited)
     # the SSD cannot start Windows at all.

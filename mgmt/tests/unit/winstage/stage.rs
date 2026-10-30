@@ -159,6 +159,8 @@ fn stage_disk_choice() {
     // whether p2 already holds the BROOMWIN filesystem.
     // What the server answers to the disk report (/api/disks/report); empty = no answer.
     let plan = std::cell::RefCell::new(String::new());
+    // "1" = the stage runs under legacy BIOS; the fake disks carry GPT (blkid mocked).
+    let bios = std::cell::RefCell::new(String::new());
     let run = |name: &str, disks: &[(&str, bool, &[&str], bool)], reg: &str, answer: &str| {
         let d = std::env::temp_dir().join(format!("broom_t_disk_{name}"));
         let _ = std::fs::remove_dir_all(&d);
@@ -227,11 +229,12 @@ fn stage_disk_choice() {
             .replace("/run/broom-", &format!("{}/broom-", d.display()));
         // No udevadm here → disks are known as "<dev>-<sectors>". wget = the server's answer; sfdisk = recorded.
         let sh = format!(
-            "REG={reg}; LX=50; MAC=aa:bb:cc:dd:ee:ff; SRV=srv\nlog(){{ :; }}; die(){{ echo DIE; exit; }}; restart(){{ echo RESTART; exit; }}; configure_networking(){{ :; }}\n\
+            "REG={reg}; BIOS={1}; LX=50; MAC=aa:bb:cc:dd:ee:ff; SRV=srv\nlog(){{ :; }}; die(){{ echo DIE; exit; }}; restart(){{ echo RESTART; exit; }}; configure_networking(){{ :; }}\n\
              wget(){{ o=; while [ $# -gt 0 ]; do [ \"$1\" = -O ] && o=$2; shift; done; [ -f {0}/plan ] && cp {0}/plan \"$o\"; }}\n\
-             sfdisk(){{ echo \"$*\" >> {0}/sfdisk; }}; udevadm(){{ :; }}\n\
+             sfdisk(){{ echo \"$*\" >> {0}/sfdisk; }}; udevadm(){{ :; }}; blkid(){{ echo gpt; }}\n\
              {body}\necho \"DISK $disk ${{NEWDISK:--}} ${{FORMAT:--}} $(cat {0}/sfdisk 2>/dev/null)\"",
-            d.display()
+            d.display(),
+            bios.borrow()
         );
         let o = stage_sh().args(["-c", &sh]).output().unwrap();
         let _ = std::fs::remove_dir_all(&d);
@@ -381,6 +384,14 @@ fn stage_disk_choice() {
         "DISK sda - -",
         "chosen = current: nothing to do"
     );
+    // The firmware switched to legacy BIOS: the GPT Broom SSD is laid out again (as MBR), no question.
+    *plan.borrow_mut() = String::new();
+    *bios.borrow_mut() = "1".into();
+    assert_eq!(
+        run("r", &[("sda", false, WIN, true)], "1", ""),
+        "DISK sda 1 -",
+        "GPT layout under BIOS → laid out again"
+    );
     // ask_disk runs in $(...): configure_networking there would be forgotten (IP=done lives in a shell variable)
     // and the next call would run DHCP again on the configured NIC — downloads then crawled at ~200 KB/s.
     let ask = &s[s.find("ask_disk(){").unwrap()..];
@@ -398,21 +409,40 @@ fn stage_disk_choice() {
 fn stage_ssd_layout() {
     let s = super::stage_script();
     let f = &s[s.find("layout(){").unwrap()..s.find("\nscan\n").unwrap()];
-    let run = |sectors: u64, lx: u32| {
-        let d = std::env::temp_dir().join(format!("broom_t_layout_{sectors}_{lx}"));
+    let run_fw = |sectors: u64, lx: u32, bios: &str| {
+        let d = std::env::temp_dir().join(format!("broom_t_layout_{sectors}_{lx}_{bios}"));
         std::fs::create_dir_all(d.join("sda")).unwrap();
         std::fs::write(d.join("sda/size"), format!("{sectors}\n")).unwrap();
         let o = stage_sh()
             .args([
                 "-c",
-                &format!("SYSB={}; LX={lx}; WB=30\n{f}\nlayout sda", d.display()),
+                &format!(
+                    "SYSB={}; BIOS={bios}; LX={lx}; WB=30\n{f}\nlayout sda",
+                    d.display()
+                ),
             ])
             .output()
             .unwrap();
         let _ = std::fs::remove_dir_all(&d);
         String::from_utf8_lossy(&o.stdout).to_string()
     };
+    let run = |sectors, lx| run_fw(sectors, lx, "");
     let gib = 2097152u64; // sectors
+    // Legacy BIOS: MBR with the "BROM" disk id, p1 active; every size given, capped at 2 TiB.
+    let mbr = run_fw(500 * gib, 55, "1");
+    assert_eq!(
+        mbr,
+        "label: dos\nlabel-id: 0x4d4f5242\nsize=512MiB, type=c, bootable\nsize=444GiB, type=7\nsize=30GiB, type=83\nsize=24GiB, type=83\n"
+    );
+    assert!(
+        run_fw(500 * gib, 0, "1").ends_with("size=498GiB, type=7\n"),
+        "no Linux share"
+    );
+    let big = run_fw(4096 * gib, 55, "1");
+    assert!(
+        big.contains("size=1991GiB, type=7\n"),
+        "4 TB disk → 2 TiB MBR: {big}"
+    );
     let both = run(500 * gib, 55);
     assert!(
         both.contains("size=444GiB, type=EBD0")
@@ -429,6 +459,88 @@ fn stage_ssd_layout() {
         !run(80 * gib, 55).contains("broomwb"),
         "80 GB disk: Windows would get < 32 GB → no Linux part"
     );
+}
+
+/// Partition names on the legacy BIOS Broom SSD (MBR has none): the disk id at byte 440 marks it, the place names
+/// each partition; a GPT name wins; any other MBR disk has no Broom partitions.
+#[test]
+fn stage_mbr_names() {
+    let s = super::stage_script();
+    let f = &s[s.find("pname(){").unwrap()..s.find("pn(){").unwrap()];
+    let d = std::env::temp_dir().join("broom_t_mbr_names");
+    let _ = std::fs::remove_dir_all(&d);
+    let mut out = Vec::new();
+    for (disk, id) in [("sda", *b"BROM"), ("sdb", *b"BROL"), ("sdc", *b"MSWN")] {
+        let mut mbr = vec![0u8; 512];
+        mbr[440..444].copy_from_slice(&id);
+        std::fs::create_dir_all(d.join("dev")).unwrap();
+        std::fs::write(d.join("dev").join(disk), &mbr).unwrap();
+        for p in 1..=4 {
+            let pd = d.join("block").join(disk).join(format!("{disk}{p}"));
+            std::fs::create_dir_all(&pd).unwrap();
+            std::fs::write(pd.join("uevent"), format!("DEVTYPE=partition\nPARTN={p}\n")).unwrap();
+            std::fs::write(pd.join("partition"), format!("{p}\n")).unwrap();
+        }
+    }
+    // GPT name on sdc1 wins over the place.
+    std::fs::write(
+        d.join("block/sdc/sdc1/uevent"),
+        "DEVTYPE=partition\nPARTN=1\nPARTNAME=BROOMWIN\n",
+    )
+    .unwrap();
+    for disk in ["sda", "sdb", "sdc"] {
+        let sh = format!(
+            "{}\nfor p in 1 2 3 4; do printf '%s,' \"$(pname {disk} {}/block/{disk}/{disk}$p)\"; done",
+            f.replace("/dev/$1", &format!("{}/dev/$1", d.display())),
+            d.display()
+        );
+        let o = stage_sh().args(["-c", &sh]).output().unwrap();
+        out.push(String::from_utf8_lossy(&o.stdout).to_string());
+    }
+    let _ = std::fs::remove_dir_all(&d);
+    assert_eq!(
+        out,
+        [
+            "BROOMEFI,BROOMWIN,broomwb,broomcache,",
+            "broomwb,broomcache,,,",
+            "BROOMWIN,,,,"
+        ]
+    );
+}
+
+/// The BIOS drive of the Broom SSD from boot_params (EDD MBR ids the kernel's setup read at boot): the entry carrying
+/// "BROM" names it; none / no file → nothing (the stage falls back to 0x80).
+#[test]
+fn stage_bios_drive() {
+    let s = super::stage_script();
+    let f = &s[s.find("bios_drive(){").unwrap()
+        ..s.find("if [ -n \"$BIOS\" ]; then\n  [ -s $B/bios").unwrap()];
+    let d = std::env::temp_dir().join("broom_t_bios_drive");
+    std::fs::create_dir_all(&d).unwrap();
+    let run = |ids: &[u32]| {
+        let mut bp = vec![0u8; 4096];
+        bp[0x1ea] = ids.len() as u8;
+        for (i, id) in ids.iter().enumerate() {
+            bp[0x290 + 4 * i..0x294 + 4 * i].copy_from_slice(&id.to_le_bytes());
+        }
+        let p = d.join("data");
+        std::fs::write(&p, &bp).unwrap();
+        let o = stage_sh()
+            .args(["-c", &format!("{f}\nbios_drive {}", p.display())])
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&o.stdout).trim().to_string()
+    };
+    assert_eq!(run(&[0x1234_5678, 0x4d4f_5242]), "81", "second BIOS disk");
+    assert_eq!(run(&[0x4d4f_5242]), "80");
+    assert_eq!(run(&[0x1234_5678]), "", "no Broom SSD among them");
+    assert_eq!(run(&[]), "");
+    let o = stage_sh()
+        .args(["-c", &format!("{f}\nbios_drive /nonexistent")])
+        .output()
+        .unwrap();
+    let _ = std::fs::remove_dir_all(&d);
+    assert_eq!(String::from_utf8_lossy(&o.stdout).trim(), "", "no file");
 }
 
 /// Stage vs server golden.sha256 before downloading (cut from stage_script(), wget mocked by a list of answers,

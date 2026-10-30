@@ -41,10 +41,13 @@ for a in $(cat /proc/cmdline); do
     broom.host=*) HOST=${a#*=};; broom.lic=*) LIC=${a#*=};; BOOTIF=01-*) MAC=$(echo "${a#BOOTIF=01-}" | tr - :);;
     broom.reg=*) REG=${a#*=};; broom.base=*) BASE=${a#*=};; broom.strict=*) STRICT=${a#*=};; broom.lxgb=*) LX=${a#*=};; broom.wbgb=*) WB=${a#*=};; esac
 done
+# Legacy BIOS (CSM) instead of UEFI: MBR Broom SSD, no ESP / NVRAM boot entries (see layout and step 3).
+BIOS=""; [ -d /sys/firmware/efi ] || BIOS=1
 # Capture / deploy (boot menu [C]): this PC's disk -> an image on the server, or an image -> this PC's disk. Nothing
 # below runs: only the network, then the server's own binary, which asks on screen and does the disk work. Into
 # /broom (the initramfs root, RAM): /run is mounted noexec. After a Deploy (/run/broom-deploy = "<disk> <ESP number>")
-# a firmware entry for the new Windows, booted next (BootNext; the order keeps PXE first).
+# a firmware entry for the new Windows, booted next (BootNext; the order keeps PXE first). Legacy BIOS has no entries:
+# the deployed disk's own MBR boot code boots it from the firmware's disk order.
 if [ "$CAPTURE" = 1 ]; then
   [ -n "$SRV" ] || die "missing broom.srv on cmdline"
   udevadm settle 2>/dev/null
@@ -55,7 +58,7 @@ if [ "$CAPTURE" = 1 ]; then
   else
     echo "broom: could not download the capture tool from $SRV" > /dev/console
   fi
-  if read -r dd dp < /run/broom-deploy 2>/dev/null; then
+  if [ -z "$BIOS" ] && read -r dd dp < /run/broom-deploy 2>/dev/null; then
     modprobe efivarfs 2>/dev/null; mount -t efivarfs efivarfs /sys/firmware/efi/efivars 2>/dev/null
     for s in $(efibootmgr | grep "Windows (deployed)" | sed -n 's/^Boot\([0-9A-Fa-f]\{4\}\).*/\1/p'); do efibootmgr -q -b $s -B; done
     old=$(efibootmgr | sed -n 's/^BootOrder: //p')
@@ -94,20 +97,44 @@ scan(){
 # partition names (read from sysfs: no tool needed, the Linux side does the same):
 #   p1 BROOMEFI 512M | p2 BROOMWIN (Windows) | p3 broomwb (WB GB, broom.wbgb) + p4 broomcache (Linux, only when LX > 0)
 # LX = GB kept for the Linux side, sized by the server from its Linux goldens (broom.lxgb; 0 = no Linux image).
+# Legacy BIOS: the same partitions on MBR (Windows boots BIOS only from MBR), which has no names — the disk id
+# 0x4d4f5242 ("BROM" at byte 440) marks it and each partition's place gives its name; "BROL" = a Linux-only layout
+# (laid out by a Linux image: p1 broomwb, p2 broomcache).
 case "$LX" in ''|*[!0-9]*) LX=0;; esac
 case "$WB" in ""|*[!0-9]*) WB=30;; esac   # writeback GB (broom.wbgb)
-pn(){ p=$(part $1 $2); sed -n 's/^PARTNAME=//p' $SYSB/$1/${p##*/}/uevent 2>/dev/null; }
+# Name of partition $2 (its sysfs dir) of disk $1.
+pname(){
+  _pn=$(sed -n 's/^PARTNAME=//p' $2/uevent 2>/dev/null)
+  [ -n "$_pn" ] && { echo "$_pn"; return; }
+  case "$(dd if=/dev/$1 bs=1 skip=440 count=4 2>/dev/null):$(cat $2/partition 2>/dev/null)" in
+    BROM:1) echo BROOMEFI;; BROM:2) echo BROOMWIN;; BROM:3|BROL:1) echo broomwb;; BROM:4|BROL:2) echo broomcache;;
+  esac
+}
+pn(){ p=$(part $1 $2); pname $1 $SYSB/$1/${p##*/}; }
 broomdisk(){
   for n in $disks; do
     for p in $SYSB/$n/$n*; do
-      case "$(sed -n 's/^PARTNAME=//p' $p/uevent 2>/dev/null)" in BROOMEFI|BROOMWIN|broomwb|broomcache) echo $n; return;; esac
+      case "$(pname $n $p)" in BROOMEFI|BROOMWIN|broomwb|broomcache) echo $n; return;; esac
     done
   done
 }
+# The disk's partition table is the one this firmware boots Windows from: GPT under UEFI, MBR under BIOS.
+fwtable(){ case "$(blkid -p -s PTTYPE -o value /dev/$1 2>/dev/null)" in gpt) [ -z "$BIOS" ];; dos) [ -n "$BIOS" ];; *) false;; esac; }
 # sfdisk script of that layout for disk $1: Windows gets what LX leaves; under 32 GB left → no Linux part.
 layout(){
   gb=$(( $(cat $SYSB/$1/size) / 2097152 )); lx=$LX
+  [ -n "$BIOS" ] && [ $gb -gt 2047 ] && gb=2047   # MBR: 2 TiB at most
   [ $((gb - 1 - lx)) -ge 32 ] || lx=0
+  if [ -n "$BIOS" ]; then
+    # Every size given (a partition left open would run past 2 TiB on a bigger disk), the last one 1 GiB short.
+    printf 'label: dos\nlabel-id: 0x4d4f5242\nsize=512MiB, type=c, bootable\n'
+    if [ $lx -gt 0 ]; then
+      printf 'size=%sGiB, type=7\nsize=%sGiB, type=83\nsize=%sGiB, type=83\n' $((gb - 1 - lx)) $WB $((lx - WB - 1))
+    else
+      printf 'size=%sGiB, type=7\n' $((gb - 2))
+    fi
+    return
+  fi
   printf 'label: gpt\nsize=512MiB, type=U, name=BROOMEFI\n'
   if [ $lx -gt 0 ]; then
     printf 'size=%sGiB, type=EBD0A0A2-B9E5-4433-87C0-68B6B72699C7, name=BROOMWIN, attrs="GUID:63"\nsize=%sGiB, name=broomwb\nname=broomcache\n' $((gb - 1 - lx)) $WB
@@ -181,7 +208,9 @@ fi
 if [ -n "$disk" ]; then
   # p1/p2 not Windows' = a Linux-only layout (no room for Windows then) → laid out again (only broom data on it).
   # Laid out by a Linux boot → Windows' partitions are there, just not formatted yet.
-  if [ "$(pn $disk 1)" != BROOMEFI ] || [ "$(pn $disk 2)" != BROOMWIN ]; then NEWDISK=1
+  # The firmware switched between UEFI and legacy BIOS → laid out again for it too (GPT ↔ MBR).
+  if ! fwtable $disk; then log "/dev/$disk is laid out for the other firmware mode (UEFI/BIOS) -> laid out again"; NEWDISK=1
+  elif [ "$(pn $disk 1)" != BROOMEFI ] || [ "$(pn $disk 2)" != BROOMWIN ]; then NEWDISK=1
   elif [ "$(lbl $(part $disk 2))" != BROOMWIN ]; then FORMAT=1; fi
 fi
 if [ -z "$disk" ]; then
@@ -212,8 +241,9 @@ fi
 W=/run/broomwin; E=/run/broomefi; B=$W/broom
 mkdir -p $W $E
 # BROOMWIN has no drive letter in Windows (GPT bit 63): users can't see/delete broom files;
-# vhdmp still opens the VHDX normally. Flag missing → set again.
-[ "$(sfdisk --part-attrs /dev/$disk 2 2>/dev/null)" = GUID:63 ] \
+# vhdmp still opens the VHDX normally. Flag missing → set again. (MBR has no such bit: broom-bootorder.ps1 takes the
+# letters off BROOMWIN and the BIOS boot partition instead.)
+[ -n "$BIOS" ] || [ "$(sfdisk --part-attrs /dev/$disk 2 2>/dev/null)" = GUID:63 ] \
   || { sfdisk -q --part-attrs /dev/$disk 2 GUID:63 >/dev/null 2>&1; udevadm settle 2>/dev/null; }
 # Hard power-off while Windows runs (happens often) → NTFS host "dirty" → ntfs3 refuses to mount.
 # ntfsfix -d clears the dirty flag + resets the journal (only broom files live here, child resets every boot)
@@ -241,7 +271,7 @@ rm -f /run/broom-agent.key
 #    names have no dot). Parking is a rename on the same volume (instant) and the VHDX parent links are relative, so a
 #    set works in either place. active.txt = the image at the top; every step can simply run again after a power cut.
 #    img.<image>/.parked = when it was parked = its last use (the oldest goes first when space runs out).
-IMGSET="golden.vhdx golden.sha256 base.vhdx base.open drvs.vhdx drvs.sig base.host base.lic base-template.vhdx child-template.vhdx child-template.off efi.tar.gz"
+IMGSET="golden.vhdx golden.sha256 base.vhdx base.open drvs.vhdx drvs.sig base.host base.lic base-template.vhdx child-template.vhdx child-template.off efi.tar.gz bios.tar.gz"
 cd $B
 act=$(cat active.txt 2>/dev/null)
 case "$act" in ''|*[!A-Za-z0-9_-]*) act=$NAME;; esac   # a disk from before image folders: the top set is this image's
@@ -410,7 +440,8 @@ if wget -q -O /run/broom-files.sha256 http://$SRV/tftp/broom-win/$NAME/files.sha
   # for the new boot script instead of putting new templates next to this golden.
   g=$(sed -n 's/^\([0-9a-f]*\)  golden$/\1/p' /run/broom-files.sha256)
   [ -z "$g" ] || [ "$g" = "$HASH" ] || restart "image $NAME changed on the server -> reboot to get the new version"
-  check_list /run/broom-files.sha256 http://$SRV/tftp/broom-win/$NAME efi.tar.gz child-template.vhdx child-template.off base-template.vhdx
+  # bios.tar.gz (legacy BIOS only, golden prepped by a version that makes it): fetched here the first time too.
+  check_list /run/broom-files.sha256 http://$SRV/tftp/broom-win/$NAME efi.tar.gz ${BIOS:+bios.tar.gz} child-template.vhdx child-template.off base-template.vhdx
 else
   log "no files.sha256 from the server for $NAME -> boot files not checked (Publish again if this repeats)"
 fi
@@ -687,6 +718,42 @@ else
   touch first.pending; MODE="first boot (specialize, a few minutes)"
 fi
 cd /
+
+# 3-4 under legacy BIOS: no ESP, no NVRAM boot entries. p1 = the image's BIOS boot partition (bios.tar.gz, made by the
+#    Windows prep: FAT32 with bootmgr + Boot\BCD → vhd=[locate]\broom\child.vhdx, its boot sector loading bootmgr),
+#    written whole every boot like the ESP's fresh filesystem; MBR boot code in front, p1 active. No BootNext either:
+#    the server answers this machine's next PXE boot once with "boot the local disk" (/api/boot/local), on the BIOS
+#    drive number the firmware gave this SSD (EDD: the drive whose MBR carries the disk id "BROM").
+# bios_drive <boot_params file>: that drive in hex (81), nothing if unknown. The kernel's setup code, running under the
+# BIOS at boot, read the MBR disk id of each BIOS disk into boot_params — edd_mbr_sig_buffer (u32[16] at 0x290, entry
+# i = drive 0x80+i), edd_mbr_sig_buf_entries (u8 at 0x1ea) — which every x86 kernel shows in /sys/kernel/boot_params:
+# no edd module needed. Ids are read at boot: a disk laid out this boot is not known yet.
+bios_drive(){
+  c=$(od -An -tu1 -j490 -N1 "$1" 2>/dev/null | tr -d ' ')
+  i=0
+  while [ $i -lt "${c:-0}" ] && [ $i -lt 16 ]; do
+    [ "$(od -An -tx4 -j$((656 + 4 * i)) -N4 "$1" 2>/dev/null | tr -d ' ')" = 4d4f5242 ] && { printf '%x\n' $((128 + i)); return; }
+    i=$((i + 1))
+  done
+}
+if [ -n "$BIOS" ]; then
+  [ -s $B/bios.tar.gz ] || die "image $NAME has no legacy BIOS boot files - run the Windows prep command again in its VM, upload, Publish"
+  tar -xzOf $B/bios.tar.gz esp.img | dd of="$(part $disk 1)" bs=1M conv=fsync 2>/dev/null || die "write the BIOS boot partition"
+  tar -xzOf $B/bios.tar.gz mbr.bin | dd of=/dev/$disk bs=440 count=1 conv=notrunc,fsync 2>/dev/null || die "write the MBR boot code"
+  sfdisk -q --activate /dev/$disk 1 >/dev/null 2>&1 || die "sfdisk --activate"
+  # Strict reset: the BroomBootOrder task deletes \bootmgr from p1 once Windows is up → the SSD boots only through here.
+  if [ "$STRICT" = 1 ]; then echo bios > $B/strict.txt; else rm -f $B/strict.txt; fi
+  rm -f $B/bootorder.txt
+  drv=$(bios_drive /sys/kernel/boot_params/data)
+  [ -n "$drv" ] || { drv=80; log "BIOS drive of /dev/$disk unknown (no EDD data, or laid out this boot) -> 0x80"; }
+  { echo "=== $(date '+%F %T') $MODE"; timeline /run/broom-stage.log; } >> $B/stage.log
+  tail -n 5000 $B/stage.log > $B/stage.log.t && mv $B/stage.log.t $B/stage.log
+  sync; umount $W
+  [ -n "$MAC" ] || die "no BOOTIF on the cmdline: the server cannot hand this machine to its disk"
+  wget -q -T 10 -O /dev/null --post-data= "http://$SRV/api/boot/local?mac=$MAC&drive=0x$drv" || die "the server did not take the local boot (/api/boot/local)"
+  log "boot order: next PXE boot -> local disk 0x$drv (/dev/$disk)"
+  restart "-> Windows ($MODE)"
+fi
 
 # 3. ESP: bootmgr + BCD (vhd=[locate]\broom\child.vhdx) — a fresh filesystem every boot, so nothing written to the
 #    ESP during a session (another loader, a changed BCD) survives it; the partition (PARTUUID) stays.

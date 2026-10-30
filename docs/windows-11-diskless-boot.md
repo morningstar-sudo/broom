@@ -13,7 +13,7 @@ next boot.
 
 ## How it works
 
-1. The PC network-boots (UEFI PXE) and gets iPXE from the Broom server, then a boot menu.
+1. The PC network-boots (UEFI or legacy BIOS PXE) and gets iPXE from the Broom server, then a boot menu.
 2. A small Linux stage starts on the PC. It makes sure the PC's SSD holds the current golden as `golden.vhdx` —
    downloading it once per new golden, not every boot — and creates a fresh **child VHDX** on top of it.
 3. Windows boots natively from that child VHDX. Every write the user makes goes into the child, on the local SSD.
@@ -31,7 +31,7 @@ base: a new or updated one is installed once (one extra restart) and needs no ne
 
 - **Server:** any x86_64 Linux (tested on Debian/Ubuntu and Rocky Linux 10), with disk space for the goldens and a
   Gigabit LAN to the clients. Broom is one binary; nothing else to install.
-- **Clients:** x86_64 UEFI PCs, network boot (PXE) first in the boot order, and a local SSD — Windows images are
+- **Clients:** x86_64 PCs (UEFI or legacy BIOS), network boot (PXE) first in the boot order, and a local SSD — Windows images are
   cached and run there.
 - **Golden:** Windows 11 Pro, installed in a VM (e.g. VMware) or on a real PC and captured.
 
@@ -55,7 +55,7 @@ Open `http://<server-ip>/`, enter the setup token and set the admin password.
 
 Either turn on Broom's **DHCP server** (Network page) after switching your router's DHCP off, or keep the router's
 DHCP and point its PXE options at Broom: next-server / option 66 = the Broom server's IP, boot file / option 67 =
-`snponly.efi`.
+`snponly.efi` (legacy BIOS PCs: `undionly.kpxe`).
 
 ### 3. Build the golden
 

@@ -61,7 +61,7 @@ their own layer over it. Every boot resets to `base ← drivers ← fresh child`
 ## Requirements
 
 - **Server:** x86_64 Linux (tested on Debian/Ubuntu and Rocky Linux 10), run as root, disk space for the goldens.
-- **Clients:** x86_64 UEFI PCs, **PXE first in the boot order**. Windows images need a local SSD; Linux images can
+- **Clients:** x86_64 PCs, UEFI or legacy BIOS (CSM), **PXE first in the boot order**. Windows images need a local SSD; Linux images can
   run without one (writes in RAM).
 
 ## Sizing
@@ -109,7 +109,8 @@ binary (checked the same way), start it.
 Open `http://<server-ip>/`, enter the setup token and set the owner password. Then the network boot:
 
 - **Keep the router's DHCP** and set its PXE options: next-server / option 66 = the Broom server, boot file /
-  option 67 = `snponly.efi` (Secure Boot clients: `sb/snponly-shim.efi`); or
+  option 67 = `snponly.efi` (Secure Boot clients: `sb/snponly-shim.efi`; legacy BIOS clients: `undionly.kpxe`; a
+  room with both needs a router that picks the file by client architecture, option 93); or
 - **Turn on Broom's DHCP server** (Network page) after switching the router's off: interface, range, gateway, DNS.
   It is off by default, since two DHCP servers break a LAN.
 

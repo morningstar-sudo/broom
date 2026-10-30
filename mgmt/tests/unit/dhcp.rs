@@ -96,6 +96,37 @@ fn secure_boot_switch_picks_signed_ipxe() {
     assert!(p.file.starts_with("http://10.0.0.12/boot.ipxe"));
 }
 
+/// The same request from PXE firmware of client arch `arch` (option 93; 60 says the same, as firmware does).
+fn arch_req(arch: u16) -> Packet {
+    let mut p = req(DISCOVER, &[]);
+    for (c, v) in &mut p.opts {
+        match c {
+            60 => *v = format!("PXEClient:Arch:{arch:05}:UNDI:002001").into_bytes(),
+            93 => *v = arch.to_be_bytes().to_vec(),
+            _ => {}
+        }
+    }
+    p
+}
+
+#[test]
+fn legacy_bios_gets_undionly() {
+    assert_eq!(kind(&arch_req(0)), Kind::PxeBios);
+    for sb in [false, true] {
+        let c = Cfg { sb, ..cfg() };
+        let (p, _) = handle(&arch_req(0), &c, &store()).reply.unwrap();
+        assert_eq!(
+            p.file, "undionly.kpxe",
+            "no Secure Boot under BIOS (switch {sb})"
+        );
+    }
+    // 32-bit UEFI (6) and anything else non-x64: no boot file.
+    for arch in [6, 11] {
+        let (p, _) = handle(&arch_req(arch), &cfg(), &store()).reply.unwrap();
+        assert_eq!(p.file, "", "arch {arch}");
+    }
+}
+
 #[test]
 fn ipxe_gets_menu_url() {
     let out = handle(&req(DISCOVER, &[(175, &[1])]), &cfg(), &store());

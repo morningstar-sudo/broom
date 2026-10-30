@@ -1,5 +1,6 @@
 // A PC booting a published Linux golden, step by step as its firmware and iPXE do it: DHCP → TFTP iPXE → (iPXE) DHCP
-// → HTTP boot menu → HTTP boot script → kernel/initrd over HTTP → iSCSI login + reads of the golden.
+// → HTTP boot menu → HTTP boot script → kernel/initrd over HTTP → iSCSI login + reads of the golden. A legacy BIOS PC
+// gets its own iPXE at the TFTP step; from autoexec.ipxe on both take the same path.
 mod common;
 
 use common::clients::{ACK, DISCOVER, Dhcp, Http, Iscsi, OFFER, REQUEST, tftp_get};
@@ -70,6 +71,22 @@ fn linux_client_boots() {
         assert!(
             tftp_get("../etc/passwd").is_err(),
             "TFTP serves only the iPXE files"
+        );
+        // A legacy BIOS PC (arch 0) on the same LAN: the BIOS iPXE, which chains the same autoexec.ipxe.
+        let bios: [(u8, &[u8]); 2] = [(60, b"PXEClient:Arch:00000:UNDI:002001"), (93, &[0, 0])];
+        let offer = dhcp.exchange(DISCOVER, [0x52, 0x54, 0, 0, 0, 0xb1], 0x2001, &bios);
+        assert_eq!(
+            (offer.msg_type(), offer.file.as_str()),
+            (OFFER, "undionly.kpxe")
+        );
+        let kpxe = tftp_get("undionly.kpxe").unwrap();
+        let built =
+            std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/ipxe/undionly.kpxe")).unwrap();
+        assert!(
+            kpxe == built,
+            "undionly.kpxe over TFTP: {} bytes, built {}",
+            kpxe.len(),
+            built.len()
         );
 
         // 3. iPXE asks DHCP again (option 175) → the boot menu URL as boot file, same IP.

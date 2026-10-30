@@ -310,7 +310,9 @@ enum Kind {
     Ipxe,
     /// UEFI PXE firmware, x64 (client arch 7/9).
     PxeEfi,
-    /// PXE firmware of another arch (e.g. legacy BIOS) — no boot file for it.
+    /// Legacy BIOS PXE ROM, x86 (client arch 0).
+    PxeBios,
+    /// PXE firmware of another arch (e.g. 32-bit UEFI, ARM) — no boot file for it.
     PxeOther,
     Plain,
 }
@@ -320,7 +322,8 @@ impl Kind {
         match self {
             Kind::Ipxe => "iPXE",
             Kind::PxeEfi => "UEFI PXE",
-            Kind::PxeOther => "PXE, not UEFI x64",
+            Kind::PxeBios => "BIOS PXE",
+            Kind::PxeOther => "PXE, not x64 UEFI/BIOS",
             Kind::Plain => "DHCP",
         }
     }
@@ -349,12 +352,14 @@ fn kind(req: &Packet) -> Kind {
         .map(|v| u16::from_be_bytes([v[0], v[1]]));
     match (pxe, arch) {
         (true, Some(7 | 9)) => Kind::PxeEfi,
+        (true, Some(0)) => Kind::PxeBios,
         (true, _) => Kind::PxeOther,
         _ => Kind::Plain,
     }
 }
 
-/// Boot file for the client: iPXE → our dynamic menu URL; UEFI PXE firmware → snponly.efi over TFTP.
+/// Boot file for the client: iPXE → our dynamic menu URL; UEFI PXE firmware → snponly.efi over TFTP; BIOS PXE ROM →
+/// undionly.kpxe (no Secure Boot under BIOS, so the switch does not apply).
 fn boot_file(k: Kind, cfg: &Cfg) -> Option<String> {
     match k {
         Kind::Ipxe => Some(format!(
@@ -370,6 +375,7 @@ fn boot_file(k: Kind, cfg: &Cfg) -> Option<String> {
             }
             .into(),
         ),
+        Kind::PxeBios => Some("undionly.kpxe".into()),
         _ => None,
     }
 }
@@ -824,7 +830,7 @@ pub async fn start(st: &SharedState) -> Result<String, String> {
         )
     } else {
         format!(
-            "DHCP server off — TFTP :69 on {on}: set the LAN's DHCP to next-server {} + boot file snponly.efi",
+            "DHCP server off — TFTP :69 on {on}: set the LAN's DHCP to next-server {} + boot file snponly.efi (legacy BIOS clients: undionly.kpxe)",
             cfg.server
         )
     })

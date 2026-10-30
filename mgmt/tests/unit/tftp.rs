@@ -105,8 +105,9 @@ async fn embedded_ipxe_and_refusals() {
         format!("\0\x06tsize\0{}\0", crate::boot::snponly_efi().len()).into_bytes()
     );
     c.send_to(b"\0\x05\0\x08abort\0", tid).await.unwrap();
-    // The official Secure Boot pair under sb/ (shim → loads sb/snponly.efi by name).
+    // Legacy BIOS iPXE, and the official Secure Boot pair under sb/ (shim → loads sb/snponly.efi by name).
     for (name, want) in [
+        ("undionly.kpxe", crate::boot::undionly_kpxe()),
         ("sb/snponly-shim.efi", crate::boot::sb_shim_efi()),
         ("sb/snponly.efi", crate::boot::sb_ipxe_efi()),
     ] {

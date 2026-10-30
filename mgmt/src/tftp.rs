@@ -74,9 +74,10 @@ fn parse_rrq(b: &[u8]) -> Option<(String, Vec<(String, String)>)> {
     Some((name, opts))
 }
 
-/// TFTP serves ONLY the embedded iPXE binaries, from memory: our own `snponly.efi`, and the official Secure Boot pair
-/// `sb/snponly-shim.efi` + `sb/snponly.efi` — plus `autoexec.ipxe`, which every iPXE (ours and the signed one) fetches
-/// from the TFTP server it was loaded from and runs first: it chains the boot menu, so iPXE works even when the LAN's
+/// TFTP serves ONLY the embedded iPXE binaries, from memory: our own `snponly.efi` and `undionly.kpxe` (legacy BIOS),
+/// and the official Secure Boot pair `sb/snponly-shim.efi` + `sb/snponly.efi` — plus `autoexec.ipxe`, which every iPXE
+/// fetches from the TFTP server it was loaded from and runs first (EFI ones by themselves, undionly.kpxe through its
+/// embedded bios.ipxe): it chains the boot menu, so iPXE works even when the LAN's
 /// own DHCP server (router) hands out the boot file and would otherwise just give iPXE `snponly.efi` again (a loop).
 /// iPXE then pulls kernel/initrd/golden over HTTP (`/tftp/...` ServeDir). Refusing everything else stops a spoofed UDP
 /// packet from making the server read a multi-GB golden into RAM (no handshake on UDP → an amplification/OOM vector).
@@ -84,6 +85,7 @@ fn load(name: &str, server: Ipv4Addr) -> Result<Cow<'static, [u8]>, String> {
     let name = name.replace('\\', "/");
     match name.trim_start_matches('/') {
         "snponly.efi" => Ok(Cow::Borrowed(crate::boot::snponly_efi())),
+        "undionly.kpxe" => Ok(Cow::Borrowed(crate::boot::undionly_kpxe())),
         "sb/snponly-shim.efi" => Ok(Cow::Borrowed(crate::boot::sb_shim_efi())),
         "sb/snponly.efi" => Ok(Cow::Borrowed(crate::boot::sb_ipxe_efi())),
         "autoexec.ipxe" | "sb/autoexec.ipxe" => Ok(Cow::Owned(autoexec(server).into_bytes())),

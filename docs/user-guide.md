@@ -29,7 +29,7 @@ model and how to build from source.
   and one extra golden while a rollback rebuilds it. **Give the images a disk formatted by Broom** (XFS): there,
   versions share the data they have in common and each one costs only what changed. On ext4 every version takes its
   full size (see [Server disks](#server-disks)).
-- **Clients:** x86_64 UEFI PCs with network boot (PXE) first in the boot order. Windows images need a local SSD in each
+- **Clients:** x86_64 PCs, UEFI or legacy BIOS (CSM), with network boot (PXE) first in the boot order. Windows images need a local SSD in each
   PC; Linux images also run without one (writes in RAM).
 - **Network:** 1 GbE to the PCs, PortFast / edge port on the PC switch ports. Keep the boot LAN for the room only: the
   goldens and iSCSI are readable by any host on it.
@@ -59,7 +59,7 @@ UI, iPXE and scripts (`broom-assets.zip`) of its own release; an offline server 
 - **Broom's DHCP server:** switch the router's DHCP off first, then turn on Broom's: interface, address range,
   gateway, DNS. Two DHCP servers on one LAN break it, so Broom's is off until you turn it on.
 - **Keep the router's DHCP:** set its PXE options: next-server / option 66 = the Broom server's IP, boot file /
-  option 67 = `snponly.efi` (Secure Boot clients: `sb/snponly-shim.efi`).
+  option 67 = `snponly.efi` (Secure Boot clients: `sb/snponly-shim.efi`; legacy BIOS clients: `undionly.kpxe`).
 
 **Secure Boot:** tick **Secure Boot clients** and enable the "Microsoft 3rd-party UEFI CA" in the PCs' firmware. Every
 step of the boot is then signed; no MOK to enroll. Needed for anti-cheats such as

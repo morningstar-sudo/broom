@@ -222,6 +222,10 @@ pub fn publish(
             crate::hash::file_hash(&format!("{out}/{f}")).ok_or(format!("sha256 of {f} failed"))?;
         sums.push_str(&format!("{h}  {f}\n"));
     }
+    // Only when the golden has legacy BIOS boot files (a BIOS stage fetches it from this list).
+    if let Some(h) = crate::hash::file_hash(&format!("{out}/bios.tar.gz")) {
+        sums.push_str(&format!("{h}  bios.tar.gz\n"));
+    }
     // Cache mode RAM: the copy loaded BEFORE golden.sha256 tells the stages to download, so the room's first rush
     // reads RAM. Refused (not enough RAM) or failed → the image goes back to disk, the publish still succeeds.
     let mut cache = "disk";
@@ -248,8 +252,13 @@ pub fn publish(
     if let Some(img) = before.filter(|i| i.hash.as_deref() != Some(hash.as_str())) {
         rearm_for_image(st, &img);
     }
+    let fw = if Path::new(&format!("{out}/bios.tar.gz")).exists() {
+        "EFI + legacy BIOS"
+    } else {
+        "EFI (no legacy BIOS: prep again for BIOS clients)"
+    };
     Ok(format!(
-        "Publish OK — Windows '{name}': golden.vhdx ({cache}) + EFI + child templates; stage {stage}; boot-start disk drivers: {drivers}"
+        "Publish OK — Windows '{name}': golden.vhdx ({cache}) + {fw} + child templates; stage {stage}; boot-start disk drivers: {drivers}"
     ))
 }
 
@@ -348,6 +357,16 @@ fn build_golden(
         .and_then(|_| crate::archive::tar_gz(&efi, Path::new(&format!("{out}/efi.tar.gz.new"))));
     let _ = std::fs::remove_dir_all(&efi);
     r?;
+    // Legacy BIOS clients: the boot partition image + MBR boot code (prep 3b) → bios.tar.gz. A golden prepped by an
+    // older version has none: it still publishes, for UEFI clients only (the stage tells a BIOS client so).
+    let _ = std::fs::remove_file(format!("{out}/bios.tar.gz.new"));
+    if vol.exists("broom/bios/esp.img") && vol.exists("broom/bios/mbr.bin") {
+        let r = vol.extract_dir("broom/bios", &efi).and_then(|_| {
+            crate::archive::tar_gz(&efi, Path::new(&format!("{out}/bios.tar.gz.new")))
+        });
+        let _ = std::fs::remove_dir_all(&efi);
+        r?;
+    }
     if !has_stub(&mut vol) {
         return Err("golden prepped by an older version (its scripts would never update with the server) — boot the \
                     VM, run the Windows prep command again (Images page), let it power off, then upload"
@@ -434,6 +453,12 @@ fn build_golden(
     }
     std::fs::rename(format!("{out}/efi.tar.gz.new"), format!("{out}/efi.tar.gz"))
         .map_err(|e| format!("efi.tar.gz: {e}"))?;
+    let bios = format!("{out}/bios.tar.gz");
+    if Path::new(&format!("{bios}.new")).exists() {
+        std::fs::rename(format!("{bios}.new"), &bios).map_err(|e| format!("bios.tar.gz: {e}"))?;
+    } else {
+        let _ = std::fs::remove_file(&bios);
+    }
     crate::vhdx::write_empty(
         &format!("{out}/base-template.vhdx"),
         &v.info,

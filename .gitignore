@@ -6,6 +6,7 @@ mgmt/target/
 # iPXE: generated checkout (upstream + mgmt/ipxe/patches, made by mgmt/ipxe/build.sh) and its build output
 mgmt/ipxe/ipxe-src/
 mgmt/ipxe/snponly.efi
+mgmt/ipxe/undionly.kpxe
 
 # --- local runtime data ---
 # Local DB + images during development

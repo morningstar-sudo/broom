@@ -79,6 +79,59 @@ detach vdisk
 diskpart /s "$env:TEMP\broom-esp.txt" | Out-Null
 Remove-Item $vd, "$env:TEMP\broom-esp.txt" -ErrorAction SilentlyContinue
 
+# 3b. Legacy BIOS bundle (broom\bios): the boot partition the stage writes whole onto p1 of a BIOS client's SSD. A
+#     second vdisk laid out as the stage lays out that SSD: MBR with disk id "BROM", the FAT32 partition active at 1 MiB
+#     (its boot sector's "hidden sectors" and the BCD's partition reference then match p1 there), bootmgr + Boot\BCD by
+#     bcdboot /f BIOS, Windows' own MBR and boot sector code (written by diskpart / format). A fixed VHD is the raw disk
+#     + a 512-byte footer: the partition image (esp.img) and the MBR boot code (mbr.bin) are cut from the file itself.
+$vb = "$env:TEMP\broom-bios.vhd"
+Remove-Item $vb -ErrorAction SilentlyContinue
+@"
+create vdisk file="$vb" maximum=100 type=fixed
+attach vdisk
+convert mbr
+uniqueid disk id=4D4F5242
+create partition primary offset=1024
+active
+format quick fs=fat32 label=BROOMEFI
+assign letter=$L
+"@ | Set-Content -Encoding ascii "$env:TEMP\broom-bios.txt"
+diskpart /s "$env:TEMP\broom-bios.txt" | Out-Null
+bcdboot "$env:SystemRoot" /s "${L}:" /f BIOS | Out-Null
+$S = "${L}:\Boot\BCD"
+bcdedit /store $S /set '{default}' device 'vhd=[locate]\broom\child.vhdx' | Out-Null
+bcdedit /store $S /set '{default}' osdevice 'vhd=[locate]\broom\child.vhdx' | Out-Null
+bcdedit /store $S /set '{default}' description 'Broom Windows' | Out-Null
+bcdedit /store $S /timeout 0 | Out-Null
+$bp = Get-Partition -DriveLetter $L
+@"
+select vdisk file="$vb"
+detach vdisk
+"@ | Set-Content -Encoding ascii "$env:TEMP\broom-bios.txt"
+diskpart /s "$env:TEMP\broom-bios.txt" | Out-Null
+$okBios = $false
+New-Item -ItemType Directory "$B\bios" | Out-Null
+$fs = [IO.File]::OpenRead($vb)
+try {
+  $mbr = New-Object byte[] 440
+  [void]$fs.Read($mbr, 0, 440)
+  if ($bp -and $bp.Offset -eq 1MB -and ($mbr | Where-Object { $_ -ne 0 })) {
+    [IO.File]::WriteAllBytes("$B\bios\mbr.bin", $mbr)
+    $out = [IO.File]::Create("$B\bios\esp.img")
+    try {
+      [void]$fs.Seek($bp.Offset, 'Begin')
+      $buf = New-Object byte[] 1MB; $left = [int64]$bp.Size
+      while ($left -gt 0) { $n = $fs.Read($buf, 0, [Math]::Min($buf.Length, $left)); if ($n -le 0) { break }; $out.Write($buf, 0, $n); $left -= $n }
+    } finally { $out.Dispose() }
+    $okBios = $left -eq 0
+  }
+} finally { $fs.Dispose() }
+if (-not $okBios) {
+  Remove-Item "$B\bios" -Recurse -Force -ErrorAction SilentlyContinue
+  Write-Host '>>> Legacy BIOS boot files NOT made: this image boots UEFI clients only' -ForegroundColor Yellow
+}
+Remove-Item $vb, "$env:TEMP\broom-bios.txt" -ErrorAction SilentlyContinue
+
 # 4. First logon on the client (when base is created): write base.ok to NTFS BROOMWIN + reboot → the stage commits base.
 #    Both scripts here are fixed stubs: they run the current copy the stage puts in BROOMWIN broom\ (from the server)
 #    → logic changes don't need prep again.

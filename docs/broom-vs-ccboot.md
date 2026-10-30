@@ -53,7 +53,7 @@ change between versions; check their own documentation for current details.
 ## Where Broom is behind
 
 - **Young project** — fewer sites in production, no commercial support.
-- **Windows 11 Pro only** on the Windows side, and **UEFI** PCs only.
+- **Windows 11 Pro only** on the Windows side, on **UEFI or legacy BIOS** PCs.
 - **Each PC needs an SSD** for Windows images (Linux images can run without one).
 - **Big rooms not proven yet** — up to ~100 PCs per server by design, given a 10–25 GbE server link, NVMe and enough
   RAM ([sizing](https://github.com/morningstar-sudo/broom#sizing)); the sites running it so far are small rooms.

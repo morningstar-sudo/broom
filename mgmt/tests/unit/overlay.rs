@@ -57,7 +57,7 @@ fn hook_shared_ssd_layout() {
         )
         .unwrap();
         let sh = format!(
-            "cd {d}; PATH={d}/bin:$PATH; WB_GB=30; REG={reg}; LX={lx}; SSD={ssd}; localdisks=\"{disks}\"\nlog(){{ echo \"$*\" >> log; }}\n\
+            "cd {d}; PATH={d}/bin:$PATH; WB_GB=30; REG={reg}; LX={lx}; SSD={ssd}; BIOS={bios}; localdisks=\"{disks}\"\nlog(){{ echo \"$*\" >> log; }}\n\
                  losetup(){{ :; }}; udevadm(){{ :; }}; sleep(){{ :; }}\n\
                  has_label(){{ case \" {fmt} \" in *\" $1 \"*) [ \"$2\" = broomcache ];; *) false;; esac; }}\n\
                  sfdisk(){{ for a; do :; done; n=${{a##*/}}; cat > sfdisk.$n; rm -rf {sys}/$n/$n[0-9]*; i=0\n\
@@ -65,6 +65,7 @@ fn hook_shared_ssd_layout() {
                  {body}\necho \"WB=$wb CACHE=$cache\"",
             d = d.display(),
             ssd = if tag == "nossd" { "0" } else { "" },
+            bios = if tag.starts_with("bios") { "1" } else { "" },
             disks = names.join(" "),
             fmt = formatted.join(" "),
             sys = sys.display(),
@@ -144,6 +145,18 @@ fn hook_shared_ssd_layout() {
     assert_eq!(
         run("nossd", &[("sda", ALL)], "1", 55, &[]),
         ("WB= CACHE=".into(), String::new(), String::new())
+    );
+    // Legacy BIOS: MBR (no names — the mocked sfdisk makes no partitions of it), "BROM" for the shared layout,
+    // "BROL" for Linux only.
+    let (_, lay, _) = run("bios", &[("sda", &[])], "1", 55, &[]);
+    assert_eq!(
+        lay,
+        "label: dos\nlabel-id: 0x4d4f5242\nsize=512MiB, type=c, bootable\nsize=444GiB, type=7\nsize=30GiB, type=83\nsize=24GiB, type=83\n"
+    );
+    let (_, lay, _) = run("bios_nolx", &[("sda", &[])], "1", 0, &[]);
+    assert_eq!(
+        lay,
+        "label: dos\nlabel-id: 0x4c4f5242\nsize=30GiB, type=83\nsize=469GiB, type=83\n"
     );
 }
 

@@ -1,4 +1,4 @@
-use super::{MenuImage, linux_share_gb, menu_script};
+use super::{LOCAL, LOCAL_S, MenuImage, bios_drive, linux_share_gb, menu_script, take_local};
 
 #[test]
 fn linux_share() {
@@ -198,4 +198,36 @@ fn menu_has_capture_last() {
         ));
         assert!(!s.contains("--default capture"));
     }
+}
+
+#[test]
+fn bios_drive_numbers() {
+    assert_eq!(bios_drive("0x80"), Some(0x80));
+    assert_eq!(bios_drive("0x8f"), Some(0x8f));
+    for bad in ["0x7f", "0x90", "0x00", "80", "0x", "0xzz", "0x180", ""] {
+        assert_eq!(bios_drive(bad), None, "{bad:?}");
+    }
+}
+
+#[test]
+fn local_boot_is_taken_once_and_expires() {
+    let now = crate::now_secs();
+    LOCAL
+        .lock()
+        .insert("02:00:00:00:00:b1".into(), (0x81, now + LOCAL_S));
+    LOCAL
+        .lock()
+        .insert("02:00:00:00:00:b2".into(), (0x80, now - 1));
+    assert_eq!(take_local("02:00:00:00:00:b1"), Some(0x81));
+    assert_eq!(
+        take_local("02:00:00:00:00:b1"),
+        None,
+        "once: the next boot gets the menu"
+    );
+    assert_eq!(
+        take_local("02:00:00:00:00:b2"),
+        None,
+        "expired: never skips a later reset"
+    );
+    assert!(!LOCAL.lock().contains_key("02:00:00:00:00:b2"));
 }

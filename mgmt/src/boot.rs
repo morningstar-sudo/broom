@@ -4,13 +4,16 @@
 // GET /boot/start?image=&mac=&ip=  (a menu choice chains here) → logs "client … started" and returns
 //   that image's boot script.
 // GET /boot/capture?mac=&ip=  (menu [C]) → the stage kernel in capture mode: this machine's disk → a golden.
-// iPXE (snponly.efi) is embedded in the binary — the built-in TFTP server (tftp.rs) serves it from memory.
+// POST /api/boot/local?mac=&drive=  (Windows stage, legacy BIOS) → that machine's next /boot.ipxe boots its disk, once.
+// iPXE (snponly.efi, BIOS: undionly.kpxe) is embedded in the binary — the built-in TFTP server (tftp.rs) serves it from memory.
 use axum::{
     extract::{Query, State},
-    http::header,
+    http::{StatusCode, header},
     response::IntoResponse,
 };
+use parking_lot::Mutex;
 use std::collections::HashMap;
+use std::sync::LazyLock;
 use tracing::{info, warn};
 
 use crate::SharedState;
@@ -19,6 +22,10 @@ use crate::db::Machine;
 /// iPXE built by mgmt/ipxe/build.sh (upstream + mgmt/ipxe/patches) (upgrading the mgmt binary = upgrading iPXE too).
 pub(crate) fn snponly_efi() -> &'static [u8] {
     crate::assets::bytes("ipxe/snponly.efi")
+}
+/// The legacy BIOS twin (same build, mgmt/ipxe/bios.ipxe embedded): PXE ROMs of BIOS clients (DHCP arch 0) load it.
+pub(crate) fn undionly_kpxe() -> &'static [u8] {
+    crate::assets::bytes("ipxe/undionly.kpxe")
 }
 /// Official Secure Boot iPXE (mgmt/ipxe/fetch-signed.sh), served under `sb/` when "Secure Boot clients" is on:
 /// the iPXE shim (signed by Microsoft) loads `sb/snponly.efi` (signed by the iPXE CA) by name from the same directory.
@@ -58,8 +65,65 @@ fn script(body: String) -> impl IntoResponse {
     ([(header::CONTENT_TYPE, "text/plain; charset=utf-8")], body)
 }
 
+/// Legacy BIOS hand-off (no BootNext there): mac → (BIOS drive, until when). The machine's next /boot.ipxe boots that
+/// local disk instead of the menu, once. Short-lived: a stale entry must never let a later boot skip its reset.
+static LOCAL: LazyLock<Mutex<HashMap<String, (u8, u64)>>> = LazyLock::new(Default::default);
+const LOCAL_S: u64 = 120;
+
+/// A BIOS drive number as the stage sends it: "0x80".."0x8f" (the firmware's hard disks).
+fn bios_drive(s: &str) -> Option<u8> {
+    let d = u8::from_str_radix(s.strip_prefix("0x")?, 16).ok()?;
+    (0x80..=0x8f).contains(&d).then_some(d)
+}
+
+/// POST /api/boot/local?mac=&drive=0x80 — the Windows stage on a legacy BIOS machine is done: its next PXE boot goes
+/// to that disk. Taken only from the address the machine's menu choice came from (pxe_ip, /boot/start): another host
+/// on the LAN cannot make a machine skip its reset.
+pub async fn local(
+    State(st): State<SharedState>,
+    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
+    Query(q): Q,
+) -> StatusCode {
+    let (mac, _) = client_ids(&q);
+    let peer = peer.ip().to_canonical().to_string();
+    let drive = q.get("drive").and_then(|d| bios_drive(d));
+    let from_it = st.pxe_ip.lock().get(&mac).is_some_and(|ip| *ip == peer);
+    let (false, Some(d), true) = (mac.is_empty(), drive, from_it) else {
+        warn!(
+            "local boot refused - mac {mac:?} - drive {drive:?} - from {peer} (not where its menu choice came from)"
+        );
+        return StatusCode::FORBIDDEN;
+    };
+    let now = crate::now_secs();
+    let mut l = LOCAL.lock();
+    l.retain(|_, (_, until)| *until > now);
+    l.insert(mac.clone(), (d, now + LOCAL_S));
+    StatusCode::NO_CONTENT
+}
+
+/// The local disk `mac` is handed to (once), if the stage asked within LOCAL_S.
+fn take_local(mac: &str) -> Option<u8> {
+    let now = crate::now_secs();
+    let mut l = LOCAL.lock();
+    l.retain(|_, (_, until)| *until > now);
+    l.remove(mac).map(|(d, _)| d)
+}
+
 pub async fn render(State(st): State<SharedState>, Query(q): Q) -> impl IntoResponse {
     let (mac, ip, m) = client(&st, &q);
+    if let Some(d) = Some(&mac)
+        .filter(|m| !m.is_empty())
+        .and_then(|m| take_local(m))
+    {
+        let who = m.and_then(|m| m.hostname).unwrap_or_else(|| mac.clone());
+        info!(
+            "client {who} -> local disk 0x{d:02x} (Windows stage done, legacy BIOS) - mac {mac} - ip {ip}"
+        );
+        // The firmware refusing it → `exit`: the BIOS goes on to its next boot device (the disk, by its own order).
+        return script(format!(
+            "#!ipxe\nsanboot --no-describe --drive 0x{d:02x} || exit\n"
+        ));
+    }
     let host = m.as_ref().and_then(|m| m.hostname.clone());
     // License generation (a counter, never the key) → stage rebuilds base when it changes.
     let lic = m
@@ -120,8 +184,9 @@ fn shim_line(st: &SharedState, what: &str) -> Option<String> {
         );
         return None;
     }
+    // Only on EFI iPXE: a legacy BIOS client (undionly.kpxe) has no Secure Boot and no `shim` command.
     Some(format!(
-        "shim http://{}/tftp/shim/shimx64.efi\n",
+        "iseq ${{platform}} pcbios || shim http://{}/tftp/shim/shimx64.efi\n",
         st.db.get_config("dhcp_server_ip", "")
     ))
 }

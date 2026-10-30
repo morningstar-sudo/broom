@@ -39,6 +39,7 @@ assets!(
     "static/page-windows.html",
     "static/page-logs.html",
     "ipxe/snponly.efi",
+    "ipxe/undionly.kpxe",
     "ipxe/signed/snponly-shim.efi",
     "ipxe/signed/snponly.efi",
     "scripts/linux-iscsi-hook.sh",

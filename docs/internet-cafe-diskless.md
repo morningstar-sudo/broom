@@ -54,7 +54,7 @@ installed or deleted is gone.
 ## What you need
 
 - **Server:** an x86_64 machine running Linux, disk space for the images, Gigabit LAN to the clients.
-- **Clients:** UEFI PCs with network boot (PXE) first, and **an SSD in each** (the Windows image is cached and runs
+- **Clients:** UEFI or legacy BIOS PCs with network boot (PXE) first, and **an SSD in each** (the Windows image is cached and runs
   there).
 - **Image:** Windows 11 Pro installed in a virtual machine (e.g. VMware), or on one of the room's PCs and captured.
 
@@ -80,7 +80,7 @@ Pick one:
 
 - **Broom's DHCP:** turn DHCP off on the router, then turn on the DHCP server on Broom's **Network** page; or
 - **Keep the router's DHCP:** set next-server / option 66 = the Broom server's IP and boot file / option 67 =
-  `snponly.efi`.
+  `snponly.efi` (legacy BIOS PCs: `undionly.kpxe`).
 
 ### 3. Build the Windows image
 

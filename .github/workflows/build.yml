@@ -1,6 +1,6 @@
-# Build iPXE (snponly.efi = upstream at mgmt/ipxe/IPXE_COMMIT + mgmt/ipxe/patches) + a debug mgmt binary (iPXE + web UI +
-# scripts embedded), run the unit tests, build the Windows stage bundle and the assets bundle (web UI, iPXE, scripts) with
-# it, and the release binary (static musl, without the assets inside); keep binary + bundles + snponly.efi as artifacts.
+# Build iPXE (snponly.efi + undionly.kpxe = upstream at mgmt/ipxe/IPXE_COMMIT + mgmt/ipxe/patches) + a debug mgmt
+# binary (iPXE + web UI + scripts embedded), run the unit tests, build the Windows stage bundle and the assets bundle (web
+# UI, iPXE, scripts) with it, and the release binary (static musl, without the assets inside); keep binary + bundles + iPXE as artifacts.
 # Every push to main also tags the commit with its push time (UTC, e.g. 2026-09-19T17-05-25Z) and publishes a release
 # with those files.
 # Jobs, side by side: audit; fw (Windows: broom-fw.dll + broom-vnc.exe); test (debug binary, unit tests, clippy);
@@ -147,13 +147,15 @@ jobs:
       - name: crypto.js
         run: node mgmt/tests/crypto.test.js
 
-      # snponly.efi is upstream iPXE at IPXE_COMMIT + patches/, built by ipxe/build.sh: the same inputs give the same
-      # file → kept between runs, built only when one of them changes.
+      # snponly.efi + undionly.kpxe are upstream iPXE at IPXE_COMMIT + patches/ (+ bios.ipxe), built by ipxe/build.sh:
+      # the same inputs give the same files → kept between runs, built only when one of them changes.
       - uses: actions/cache@v4
         id: ipxe
         with:
-          path: mgmt/ipxe/snponly.efi
-          key: ipxe-${{ runner.os }}-${{ hashFiles('mgmt/ipxe/IPXE_COMMIT', 'mgmt/ipxe/patches/**', 'mgmt/ipxe/build.sh') }}
+          path: |
+            mgmt/ipxe/snponly.efi
+            mgmt/ipxe/undionly.kpxe
+          key: ipxe-${{ runner.os }}-${{ hashFiles('mgmt/ipxe/IPXE_COMMIT', 'mgmt/ipxe/bios.ipxe', 'mgmt/ipxe/patches/**', 'mgmt/ipxe/build.sh') }}
       - name: iPXE
         if: steps.ipxe.outputs.cache-hit != 'true'
         run: bash mgmt/ipxe/build.sh
@@ -162,7 +164,7 @@ jobs:
       # checkout, build.sh would rebuild it. `bash`, not ./build.sh: committed from Windows the script has no exec bit.
       - name: Build bootrom-mgmt (debug) + unit tests
         run: |
-          touch mgmt/ipxe/snponly.efi
+          touch mgmt/ipxe/snponly.efi mgmt/ipxe/undionly.kpxe
           bash build.sh --dev
 
       # No clippy warning, tests included. After the build: the embedded snponly.efi only exists once iPXE is built.
@@ -176,6 +178,7 @@ jobs:
           path: |
             mgmt/dist/bootrom-mgmt
             mgmt/ipxe/snponly.efi
+            mgmt/ipxe/undionly.kpxe
           if-no-files-found: error
 
   # The Windows stage (kernel + initrd + shim) is built HERE, on Ubuntu's Canonical-signed generic kernel + its
@@ -259,7 +262,7 @@ jobs:
           cp in/broom-fw/broom-fw.dll in/broom-fw/broom-vnc.exe mgmt/scripts/
           (cd mgmt && zip -q -X dist/broom-assets.zip scripts/broom-fw.dll scripts/broom-vnc.exe)
           cp in/stage/broom-stage.tar.gz mgmt/dist/
-          cp in/debug-bin/ipxe/snponly.efi mgmt/ipxe/
+          cp in/debug-bin/ipxe/snponly.efi in/debug-bin/ipxe/undionly.kpxe mgmt/ipxe/
 
       # The release binary accepts only these two bundles: their sha256 + URL appended to it (assets.rs pin(): read from
       # its own tail at start). It downloads them from this release — the assets on its first start, the stage on the
@@ -280,7 +283,7 @@ jobs:
         run: |
           set -e
           # By file name, not path: a release file is downloaded on its own, next to SHA256SUMS.
-          sha256sum dist/bootrom-mgmt ipxe/snponly.efi dist/broom-stage.tar.gz dist/broom-assets.zip | sed -E 's#^([0-9a-f]+ [ *]).*/#\1#' | tee SHA256SUMS
+          sha256sum dist/bootrom-mgmt ipxe/snponly.efi ipxe/undionly.kpxe dist/broom-stage.tar.gz dist/broom-assets.zip | sed -E 's#^([0-9a-f]+ [ *]).*/#\1#' | tee SHA256SUMS
           # README → Quick start, as a server runs it: only the binary + SHA256SUMS in the directory.
           mkdir chk && cp dist/bootrom-mgmt SHA256SUMS chk/
           (cd chk && sha256sum --ignore-missing -c SHA256SUMS) | tee chk.txt
@@ -295,7 +298,7 @@ jobs:
             grep -qx "$n $s" pins.txt || { echo "$f: sha256 $s is not the one the binary reads" >&2; exit 1; }
           done
           # Release assets: everything a release binary loads (assets.rs), the clients' broom-fw.dll included.
-          for n in static/index.html ipxe/snponly.efi scripts/stage.sh scripts/broom-bootorder.ps1 scripts/broom-fw.cs scripts/broom-fw.dll scripts/broom-vnc.exe; do
+          for n in static/index.html ipxe/snponly.efi ipxe/undionly.kpxe scripts/stage.sh scripts/broom-bootorder.ps1 scripts/broom-fw.cs scripts/broom-fw.dll scripts/broom-vnc.exe; do
             unzip -l dist/broom-assets.zip "$n" >/dev/null || { echo "broom-assets.zip has no $n" >&2; exit 1; }
           done
           tar -tzf dist/broom-stage.tar.gz | grep -qx 'stage.img' || { echo "broom-stage.tar.gz has no stage.img" >&2; exit 1; }
@@ -308,6 +311,7 @@ jobs:
           path: |
             mgmt/dist/bootrom-mgmt
             mgmt/ipxe/snponly.efi
+            mgmt/ipxe/undionly.kpxe
             mgmt/dist/broom-stage.tar.gz
             mgmt/dist/broom-assets.zip
             mgmt/SHA256SUMS
@@ -322,6 +326,7 @@ jobs:
           subject-path: |
             mgmt/dist/bootrom-mgmt
             mgmt/ipxe/snponly.efi
+            mgmt/ipxe/undionly.kpxe
             mgmt/dist/broom-stage.tar.gz
             mgmt/dist/broom-assets.zip
             mgmt/SHA256SUMS
@@ -338,6 +343,7 @@ jobs:
           files: |
             mgmt/dist/bootrom-mgmt
             mgmt/ipxe/snponly.efi
+            mgmt/ipxe/undionly.kpxe
             mgmt/dist/broom-stage.tar.gz
             mgmt/dist/broom-assets.zip
             mgmt/SHA256SUMS

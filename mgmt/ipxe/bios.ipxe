@@ -1,0 +1,6 @@
+#!ipxe
+# Embedded in undionly.kpxe (build.sh EMBED=): the legacy BIOS twin of the EFI build's autoexec.ipxe fetch. The PXE ROM's
+# DHCP answer is already in iPXE (net0/ip, next-server); a router's DHCP (no built-in DHCP) hands out undionly.kpxe
+# again for iPXE's own request, so the menu is reached through the server's autoexec.ipxe, never through DHCP.
+isset ${net0/ip} && ifopen net0 || ifconf -c dhcp || ifconf -c dhcp || shell
+chain tftp://${next-server}/autoexec.ipxe || shell

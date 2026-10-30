@@ -571,6 +571,7 @@ async fn main() {
         .route("/boot.ipxe", get(boot::render)) // iPXE menu
         .route("/boot/start", get(boot::start)) // menu choice → "client started" log + image boot script
         .route("/boot/capture", get(boot::capture)) // menu [C]: the stage in capture mode
+        .route("/api/boot/local", axum::routing::post(boot::local)) // legacy BIOS: next boot → local disk, once
         .route("/broom-capture", get(capture_bin)) // this binary, for that stage
         .merge(images::routes()) // images, versions, upload, publish
         .merge(drivers::routes()) // Windows driver packages

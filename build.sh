@@ -1,7 +1,8 @@
 #!/bin/bash
 # build.sh — build the whole project in one go (Linux / WSL):
-#   1. iPXE snponly.efi   (upstream + mgmt/ipxe/patches; only when a patch, IPXE_COMMIT or ipxe-src changed, or --ipxe)
-#   2. mgmt release binary (embeds snponly.efi + web UI + scripts) + unit tests (skip with --no-test);
+#   1. iPXE snponly.efi + undionly.kpxe (upstream + mgmt/ipxe/patches; only when a patch, IPXE_COMMIT, bios.ipxe or
+#      ipxe-src changed, or --ipxe)
+#   2. mgmt release binary (embeds iPXE + web UI + scripts) + unit tests (skip with --no-test);
 #      --live also runs the root-only live tests (NTFS via ntfs-3g / ping / LVM, asks for sudo)
 #   3. copy to mgmt/dist/bootrom-mgmt  → deploy that single file to the server
 #   --dev: a debug build instead (not static, not for a server): CI only runs it to make the bundles
@@ -40,8 +41,8 @@ for t in cargo git gcc make perl; do command -v "$t" >/dev/null || missing="$mis
 # 1. iPXE — rebuild only if the patches, the pinned commit or a source file is newer than the embedded binary.
 efi=mgmt/ipxe/snponly.efi
 # (ipxe-src/ only exists while someone edits the patches — see mgmt/ipxe/build.sh.)
-if [ "$force_ipxe" = 1 ] || [ ! -f "$efi" ] \
-   || [ -n "$(find mgmt/ipxe/IPXE_COMMIT mgmt/ipxe/patches mgmt/ipxe/ipxe-src/src -newer "$efi" -type f ! -path '*/bin*' -print -quit 2>/dev/null)" ]; then
+if [ "$force_ipxe" = 1 ] || [ ! -f "$efi" ] || [ ! -f mgmt/ipxe/undionly.kpxe ] \
+   || [ -n "$(find mgmt/ipxe/IPXE_COMMIT mgmt/ipxe/bios.ipxe mgmt/ipxe/patches mgmt/ipxe/ipxe-src/src -newer "$efi" -type f ! -path '*/bin*' -print -quit 2>/dev/null)" ]; then
   echo "== [1/3] iPXE"
   bash mgmt/ipxe/build.sh
 else

@@ -29,19 +29,43 @@ for d in /sys/block/*; do
   localdisks="$localdisks $n"
 done
 log "local disks: ${localdisks:-(none)} | image=$NAME"
+# Legacy BIOS (CSM) instead of UEFI: a new Broom SSD is laid out as MBR (layout).
+BIOS=""; [ -d /sys/firmware/efi ] || BIOS=1
 # ext4 label of $1 = $2, read from the superblock itself (s_volume_name at 1024+120): no blkid needed — a busybox
 # blkid (no -s/-o) would read as "no label" and the kept cache would be formatted on every boot.
 has_label(){ [ "$(dd if="$1" bs=1 skip=1144 count=16 2>/dev/null | tr -d '\000')" = "$2" ]; }
 
 # GPT partition name of a sysfs partition dir, and the device of the partition named $2 on disk $1 (no tool needed).
-pname(){ sed -n 's/^PARTNAME=//p' "$1/uevent" 2>/dev/null; }
+# Legacy BIOS layout (MBR, no names — as the Windows stage lays it out): disk id "BROM" at byte 440 = p1-p4 BROOMEFI
+# BROOMWIN broomwb broomcache; "BROL" = Linux-only (p1 broomwb, p2 broomcache). The place gives the name.
+pname(){
+  _pn=$(sed -n 's/^PARTNAME=//p' "$1/uevent" 2>/dev/null)
+  [ -n "$_pn" ] && { echo "$_pn"; return; }
+  _pd=${1%/*}
+  case "$(dd if=/dev/${_pd##*/} bs=1 skip=440 count=4 2>/dev/null):$(cat "$1/partition" 2>/dev/null)" in
+    BROM:1) echo BROOMEFI;; BROM:2) echo BROOMWIN;; BROM:3|BROL:1) echo broomwb;; BROM:4|BROL:2) echo broomcache;;
+  esac
+}
 byname(){ for p in /sys/block/$1/$1*; do [ "$(pname $p)" = "$2" ] && { echo /dev/${p##*/}; return; }; done; }
 # 1. The Broom SSD — ONE disk shared with the Windows stage (same layout, same partition names):
 #    p1 BROOMEFI 512M | p2 BROOMWIN (Windows) | p3 broomwb WB_GB (writeback, mkfs every boot) | p4 broomcache (kept)
 #    LX = GB for the Linux part, sized by the server from its Linux goldens. No room for Windows (< 32 GB left) →
 #    Linux takes the whole disk (p1 broomwb + p2 broomcache).
+#    Legacy BIOS: MBR, so the Windows stage can boot Windows from it — every size given (an open last partition would
+#    run past 2 TiB), the last one 1 GiB short.
 layout(){
   gb=$(( $(cat /sys/block/$1/size) / 2097152 )); win=$((gb - 1 - LX))
+  if [ -n "$BIOS" ]; then
+    [ $gb -gt 2047 ] && { gb=2047; win=$((gb - 1 - LX)); }
+    [ $gb -ge $((WB_GB + 8)) ] || return 1
+    if [ $LX -ge $((WB_GB + 8)) ] && [ $win -ge 32 ]; then
+      printf 'label: dos\nlabel-id: 0x4d4f5242\nsize=512MiB, type=c, bootable\nsize=%sGiB, type=7\nsize=%sGiB, type=83\nsize=%sGiB, type=83\n' \
+        $win $WB_GB $((LX - WB_GB - 1))
+    else
+      printf 'label: dos\nlabel-id: 0x4c4f5242\nsize=%sGiB, type=83\nsize=%sGiB, type=83\n' $WB_GB $((gb - WB_GB - 1))
+    fi
+    return
+  fi
   [ $gb -ge $((WB_GB + 8)) ] || return 1
   printf 'label: gpt\n'
   if [ $LX -ge $((WB_GB + 8)) ] && [ $win -ge 32 ]; then
